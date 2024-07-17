@@ -1,4 +1,5 @@
 import { getEmbedding, getResponse } from './gpt.js';
+import { getSettings } from './settings.js';
 import Storage from './storage.js';
 
 const conversation = [];
@@ -149,6 +150,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Handle form submission
   sendButton.addEventListener('click', async () => {
+    const apiKey = getSettings().openaiApiKey;
+    if (apiKey === '') {
+      addMessage('system', 'Please configure your OpenAI API key in settings.');
+      return;
+    }
+
     userInput.disabled = true;
     const text = userInput.value;
     sendMessage('user', text);
