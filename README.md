@@ -8,6 +8,8 @@ A minimal HTML5 PWA/SPA that implements a dynamic notes space with an OpenAI-pow
 
 [Try it out on GitHub pages](https://sysread.github.io/scratch/).
 
+Note that I had to add `sysread.github.io` to the allow-list in my browser (Opera) as well as my ad-blocker extension.
+
 ## Getting started
 
 ### Using Docker
