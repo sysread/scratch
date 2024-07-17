@@ -10,6 +10,8 @@ A minimal HTML5 PWA/SPA that implements a dynamic notes space with an OpenAI-pow
 
 Note that I had to add `sysread.github.io` to the allow-list in my browser (Opera) as well as my ad-blocker extension.
 
+**ALSO** note that this is a work in progress. Expect a metric tonne of `console.log`s as I put this bad boy together.
+
 ## Getting started
 
 ### Using Docker
