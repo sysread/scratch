@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+set -eu -o pipefail
+
+if [ -z "$(command -v entr)" ]; then
+    echo >&2 "Please install entr:"
+    echo >&2 "  - MacOS: brew install entr"
+    echo >&2 "  - Linux: sudo apt-get install entr"
+    exit 1
+fi
+
+if [ -z "$(command -v python)" ]; then
+    echo >&2 "You don't have python installed?"
+    exit 1
+fi
+
+find . -type f | entr -r python -m http.server 8000
