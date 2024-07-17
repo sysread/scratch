@@ -6,7 +6,7 @@ export function getSettings() {
   return JSON.parse(localStorage.getItem('settings') || '{}');
 }
 
-export function setSettings(config) {
+export function setSettings(settings) {
   localStorage.setItem('settings', JSON.stringify(settings));
 }
 
