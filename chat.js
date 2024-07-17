@@ -151,6 +151,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Handle form submission
   sendButton.addEventListener('click', async () => {
     const apiKey = getSettings().openaiApiKey;
+    console.log(apiKey);
     if (apiKey === '') {
       addMessage('system', 'Please configure your OpenAI API key in settings.');
       return;
