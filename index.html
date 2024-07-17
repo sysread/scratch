@@ -45,7 +45,7 @@
       ------------------------------------------------------------------------->
     <script>
       if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.register('/service-worker.js').then(
+        navigator.serviceWorker.register('./service-worker.js').then(
           (registration) => {
             console.log('ServiceWorker registration successful with scope: ', registration.scope);
           },
@@ -168,7 +168,7 @@
 
     <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/marked/lib/marked.umd.min.js"></script>
 
-    <script type="module" src="settings.js" defer></script>
-    <script type="module" src="chat.js" defer></script>
+    <script type="module" src="./settings.js" defer></script>
+    <script type="module" src="./chat.js" defer></script>
   </body>
 </html>
