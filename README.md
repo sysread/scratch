@@ -4,6 +4,10 @@
 
 A minimal HTML5 PWA/SPA that implements a dynamic notes space with an OpenAI-powered conversational interface.
 
+## Try it out
+
+[Try it out on GitHub pages](https://sysread.github.io/scratch/).
+
 ## Getting started
 
 ### Using Docker
