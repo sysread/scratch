@@ -1,6 +1,6 @@
+/*
 const CACHE_NAME = 'scratch-cache-v1';
 
-/*
 const urlsToCache = [
   './',
   './index.html',
@@ -9,8 +9,6 @@ const urlsToCache = [
   'https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js',
   'https://cdn.jsdelivr.net/npm/marked/marked.min.js',
 ];
-*/
-const urlsToCache = [];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -43,3 +41,5 @@ self.addEventListener('activate', (event) => {
     }),
   );
 });
+
+*/
