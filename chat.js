@@ -4,6 +4,20 @@ import Storage from './storage.js';
 
 const conversation = [];
 
+let scrollMessagePaneLocked = false;
+
+const scrollMessagePaneIntvl = window.setInterval(() => {
+  if (scrollMessagePaneLocked) {
+    return;
+  }
+
+  const messagePane = document.getElementById('chat-messages');
+
+  if (messagePane) {
+    messagePane.scrollTop = messagePane.scrollHeight;
+  }
+}, 100);
+
 function buildMessageCard(role, content) {
   const card = document.createElement('div');
   card.classList.add('card');
@@ -163,18 +177,12 @@ document.addEventListener('DOMContentLoaded', () => {
     sendMessage('user', text);
   });
 
+  // Lock and unlock scroll based on user action
+  messagePane.addEventListener('scroll', () => {
+    const atBottom = messagePane.scrollHeight - messagePane.scrollTop === messagePane.clientHeight;
+    scrollMessagePaneLocked = !atBottom;
+  });
+
   // On load, immediately focus the user input field
   userInput.focus();
-
-  // Scroll to the bottom of chat messages on focus
-  userInput.addEventListener('focus', () => {
-    window.setTimeout(() => {
-      messagePane.scrollTop = messagePane.scrollHeight;
-    }, 300);
-  });
-
-  // Ensure the message pane is scrolled to the bottom on window resize
-  window.addEventListener('resize', () => {
-    messagePane.scrollTop = messagePane.scrollHeight;
-  });
 });
