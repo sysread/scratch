@@ -133,6 +133,7 @@ async function sendMessage(role, text) {
 document.addEventListener('DOMContentLoaded', () => {
   const userInput = document.getElementById('chat-user-input');
   const sendButton = document.getElementById('chat-submit');
+  const messagePane = document.getElementById('chat-messages');
 
   // Automatically resize the textarea based on its content
   userInput.addEventListener('input', () => {
@@ -168,8 +169,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // Scroll to the bottom of chat messages on focus
   userInput.addEventListener('focus', () => {
     window.setTimeout(() => {
-      const messagePane = document.getElementById('chat-messages');
       messagePane.scrollTop = messagePane.scrollHeight;
-    }, 50);
+    }, 300);
+  });
+
+  // Ensure the message pane is scrolled to the bottom on window resize
+  window.addEventListener('resize', () => {
+    messagePane.scrollTop = messagePane.scrollHeight;
   });
 });
