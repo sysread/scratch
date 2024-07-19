@@ -165,7 +165,11 @@ document.addEventListener('DOMContentLoaded', () => {
   // On load, immediately focus the user input field
   userInput.focus();
 
-  document.getElementById('debug').addEventListener('click', async () => {
-    console.log('STORAGE', await Storage.debug());
+  // Scroll to the bottom of chat messages on focus
+  userInput.addEventListener('focus', () => {
+    window.setTimeout(() => {
+      const messagePane = document.getElementById('chat-messages');
+      messagePane.scrollTop = messagePane.scrollHeight;
+    }, 50);
   });
 });

@@ -48,4 +48,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     showSettingsAlert('Settings saved!', 'success');
   });
+
+  // Clear the alerts div when closing the settings modal
+  document.getElementById('settings-modal').addEventListener('hide.bs.modal', (event) => {
+    const container = document.getElementById('settings-alert');
+    container.innerHTML = '';
+    container.classList.remove('d-block');
+    container.classList.add('d-none');
+  });
 });

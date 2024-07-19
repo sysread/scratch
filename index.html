@@ -7,7 +7,7 @@
     <title>Scratch Pad</title>
 
     <link rel="manifest" href="manifest.json" />
-    <link rel="icon" href="./favicon.ico" type="image/x-icon">
+    <link rel="icon" href="./favicon.ico" type="image/x-icon" />
 
     <style>
       body,
@@ -27,11 +27,14 @@
         overflow-y: auto;
         padding: 10px;
         margin-bottom: 10px;
+        display: flex;
+        flex-direction: column;
       }
 
       .chat-input {
         margin-top: auto;
         width: 100%;
+        padding-bottom: env(safe-area-inset-bottom); /* For iOS devices */
       }
 
       #chat-user-input {
@@ -110,14 +113,7 @@
           </div>
         </div>
       </div>
-
-      <!-- DEBUG -->
-      <button id="debug" class="btn btn-primary">Debug</button>
     </div>
-
-    <!------------------------------------------------------------------------
-      -- Thing
-      ----------------------------------------------------------------------->
 
     <!------------------------------------------------------------------------
       -- Settings modal
