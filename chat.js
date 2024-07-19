@@ -1,4 +1,4 @@
-import { getEmbedding, getResponse } from './gpt.js';
+import { getEmbedding, getResponse } from './ai.js';
 import { getSettings } from './settings.js';
 import Storage from './storage.js';
 

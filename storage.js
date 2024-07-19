@@ -1,6 +1,6 @@
 import Dexie from 'https://cdn.jsdelivr.net/npm/dexie@latest/dist/dexie.mjs';
 import cosineSimilarity from 'https://cdn.jsdelivr.net/npm/compute-cosine-similarity@1.1.0/+esm';
-import { getEmbedding } from './gpt.js';
+import { getEmbedding } from './ai.js';
 
 // Initialize Dexie
 const db = new Dexie('scratchdb');
