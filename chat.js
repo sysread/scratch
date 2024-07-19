@@ -121,7 +121,7 @@ async function sendMessage(role, text) {
 
       case 'SEARCH': {
         const entries = await Storage.search(directive.query, 10);
-        const response = entries.map((entry) => `INFO | ${entry.id} | ${entry.body}`).join('\n');
+        const response = entries.map((entry) => `INFO | ${entry.id} | ${entry.body}`).join('\n') || 'No results found.';
         conversation.push({ role: 'system', content: response });
         await sendMessage('system', response);
         break;
