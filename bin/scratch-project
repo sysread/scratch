@@ -289,12 +289,30 @@ EOF
 # Main
 #-------------------------------------------------------------------------------
 case "${1:-}" in
-  list) shift; do-list "$@" ;;
-  show) shift; do-show "$@" ;;
-  create) shift; do-create "$@" ;;
-  edit) shift; do-edit "$@" ;;
-  delete) shift; do-delete "$@" ;;
-  --help | -h) usage; exit 0 ;;
+  list)
+    shift
+    do-list "$@"
+    ;;
+  show)
+    shift
+    do-show "$@"
+    ;;
+  create)
+    shift
+    do-create "$@"
+    ;;
+  edit)
+    shift
+    do-edit "$@"
+    ;;
+  delete)
+    shift
+    do-delete "$@"
+    ;;
+  --help | -h)
+    usage
+    exit 0
+    ;;
   "")
     usage
     exit 1
