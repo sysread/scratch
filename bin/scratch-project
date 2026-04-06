@@ -269,26 +269,46 @@ do-delete() {
   gum format -- "Deleted project **${name}**"
 }
 
+_PROJECT_DESC="Manage project configurations"
+
 #-------------------------------------------------------------------------------
 # Usage
 #-------------------------------------------------------------------------------
 usage() {
-  cat >&2 << 'EOF'
-Usage: scratch project <command> [args...]
+  {
+    cat << 'EOF'
+# USAGE
+`scratch project <command> [args...]`
 
-Commands:
-  list              List all configured projects
-  show [name]       Show a project's config (auto-detects from cwd)
-  create [path]     Create a new project (defaults to cwd)
-  edit [name]       Edit an existing project's settings
-  delete [name]     Remove a project (with confirmation)
+# SYNOPSIS
+Manage project configurations.
+
+# COMMANDS
+  `list`              List all configured projects
+  `show [name]`       Show a project's config (auto-detects from cwd)
+  `create [path]`     Create a new project (defaults to cwd)
+  `edit [name]`       Edit an existing project's settings
+  `delete [name]`     Remove a project (with confirmation)
 EOF
+  } | _format_help >&2
+}
+
+_format_help() {
+  if type -t tui:format &> /dev/null; then
+    tui:format
+  else
+    cat
+  fi
 }
 
 #-------------------------------------------------------------------------------
 # Main
 #-------------------------------------------------------------------------------
 case "${1:-}" in
+  synopsis)
+    printf '%s\n' "$_PROJECT_DESC"
+    exit 0
+    ;;
   list)
     shift
     do-list "$@"
@@ -309,7 +329,7 @@ case "${1:-}" in
     shift
     do-delete "$@"
     ;;
-  --help | -h)
+  --help | -h | help)
     usage
     exit 0
     ;;

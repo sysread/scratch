@@ -51,17 +51,23 @@ has-min-bash-version 5
 # Arg parsing - doctor does its own since it cannot depend on a command
 # framework that might require missing tools.
 #-------------------------------------------------------------------------------
+_DOCTOR_DESC="Check the runtime environment for missing dependencies and required env vars"
+
 FIX=false
 DEV=false
 
 for arg in "$@"; do
   case "$arg" in
+    synopsis)
+      printf '%s\n' "$_DOCTOR_DESC"
+      exit 0
+      ;;
     --fix) FIX=true ;;
     --dev) DEV=true ;;
     --help | -h)
       echo "Usage: scratch doctor [--fix] [--dev]" >&2
       echo "" >&2
-      echo "Check the runtime environment for missing dependencies." >&2
+      echo "$_DOCTOR_DESC" >&2
       echo "" >&2
       echo "Options:" >&2
       echo "  --fix   Prompt to install missing dependencies via helpers/setup" >&2
