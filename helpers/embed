@@ -3,7 +3,7 @@
 #-------------------------------------------------------------------------------
 # Embedding generator wrapper
 #
-# Delegates to _embed.exs with the correct compiler flags. Apple clang 17+
+# Delegates to libexec/embed.exs with the correct compiler flags. Apple clang 17+
 # promotes a C++ template warning to an error that breaks EXLA's NIF
 # compilation. The CXX override suppresses that specific error.
 #

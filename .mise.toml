@@ -7,21 +7,31 @@
 #   mise run format     # format with shfmt
 #   mise run fix        # format + perms
 #   mise run check      # lint + test
+#   mise run setup      # full dev setup
 
 [tools]
+erlang = "latest"
+elixir = "latest"
 shfmt = "3.12.0"      # pinned: formatting changes cause diffs
 shellcheck = "0.11.0" # pinned: new rules can break CI
 bats = "latest"
 jq = "latest"
 gum = "latest"
 
+[tasks.setup]
+description = "Full developer setup (runtime deps, mise tools)"
+run = "helpers/setup"
+
 [tasks.test]
 description = "Run test suite"
 run = "helpers/run-tests"
 
 [tasks.lint]
-description = "Run shellcheck via test/lint.bats"
-run = "bats -r test/lint.bats"
+description = "Run shellcheck on all shell files"
+run = """
+files="$(git ls-files bin/ helpers/ lib/ test/*.bats test/helpers.sh | grep -v '\\.md$' || true)"
+[ -z "$files" ] || shellcheck $files
+"""
 
 [tasks.format]
 description = "Format with shfmt"
@@ -34,7 +44,7 @@ files="$(git ls-files bin/ helpers/ lib/ | grep -v '\\.md$' || true) $(git ls-fi
 description = "Enforce file permissions"
 run = """
 for f in $(git ls-files bin/ helpers/ | grep -v '\\.md$' || true); do chmod +x "$f"; done
-for f in $(git ls-files lib/ || true); do chmod -x "$f"; done
+for f in $(git ls-files lib/ libexec/ || true); do chmod -x "$f"; done
 """
 
 [tasks.fix]
