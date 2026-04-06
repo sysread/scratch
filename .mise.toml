@@ -1,0 +1,46 @@
+# Dev tool versions and tasks for scratch.
+#
+# Usage:
+#   mise install        # install all pinned tools
+#   mise run test       # run test suite
+#   mise run lint       # run shellcheck
+#   mise run format     # format with shfmt
+#   mise run fix        # format + perms
+#   mise run check      # lint + test
+
+[tools]
+shfmt = "3.12.0"      # pinned: formatting changes cause diffs
+shellcheck = "0.11.0" # pinned: new rules can break CI
+bats = "latest"
+jq = "latest"
+gum = "latest"
+
+[tasks.test]
+description = "Run test suite"
+run = "helpers/run-tests"
+
+[tasks.lint]
+description = "Run shellcheck via test/lint.bats"
+run = "bats -r test/lint.bats"
+
+[tasks.format]
+description = "Format with shfmt"
+run = """
+files="$(git ls-files bin/ helpers/ lib/ | grep -v '\\.md$' || true) $(git ls-files test/*.bats test/helpers.sh || true)"
+[ -z "$files" ] || shfmt -w --apply-ignore $files
+"""
+
+[tasks.perms]
+description = "Enforce file permissions"
+run = """
+for f in $(git ls-files bin/ helpers/ | grep -v '\\.md$' || true); do chmod +x "$f"; done
+for f in $(git ls-files lib/ || true); do chmod -x "$f"; done
+"""
+
+[tasks.fix]
+description = "Format and fix permissions"
+depends = ["format", "perms"]
+
+[tasks.check]
+description = "Lint and test"
+depends = ["lint", "test"]

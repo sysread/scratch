@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# Run the scratch test suite in a clean environment
+#
+# Tests run under env -i with a minimal allowlist of environment variables.
+# This prevents the user's shell profile from leaking into the test runner
+# and causing false passes or failures.
+#
+# Usage:
+#   helpers/run-tests              # run all tests
+#   helpers/run-tests [bats args]  # forward extra args to bats
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPTDIR/.." && pwd)"
+
+#-------------------------------------------------------------------------------
+# Parallel execution check - bats uses GNU parallel for inter-file parallelism.
+# Without it, bats falls back to serial execution.
+#-------------------------------------------------------------------------------
+NCPU=$(sysctl -n hw.ncpu 2> /dev/null || nproc 2> /dev/null || echo 4)
+JOBS=$((NCPU > 8 ? 8 : NCPU))
+BATS_JOBS=("--no-parallelize-within-files" "-j" "$JOBS")
+if ! command -v parallel > /dev/null 2>&1; then
+  echo "WARNING: GNU parallel not found - tests will run serially (slower)." >&2
+  echo "  Install it:  brew install parallel  (macOS) / apt install parallel  (Linux)" >&2
+  echo "" >&2
+  BATS_JOBS=()
+fi
+
+exec env -i \
+  PATH="$PATH" \
+  HOME="$HOME" \
+  OSTYPE="$OSTYPE" \
+  TMPDIR="${TMPDIR:-/tmp}" \
+  TERM="${TERM:-dumb}" \
+  bats "${BATS_JOBS[@]}" -T -r "$REPO_ROOT/test/" "$@"

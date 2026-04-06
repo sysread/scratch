@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# Subcommand dispatcher
+#
+# Resolves a subcommand name to its executable in bin/ and runs it. This script
+# requires bash 5+ - the entrypoint shim (bin/scratch) guarantees that.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+source "$SCRIPTDIR/../lib/base.sh"
+
+has-min-bash-version 5
+
+#-------------------------------------------------------------------------------
+# Resolve a subcommand name to its path in bin/
+#-------------------------------------------------------------------------------
+cmd:path() {
+  local cmd="$1"
+  local path="${SCRIPTDIR}/scratch-${cmd}"
+
+  if [[ -f "$path" && -x "$path" ]]; then
+    printf '%s\n' "$path"
+    return 0
+  fi
+
+  return 1
+}
+
+#-------------------------------------------------------------------------------
+# List available subcommands by scanning bin/ for scratch-* executables
+#-------------------------------------------------------------------------------
+cmd:list() {
+  local f name
+  for f in "$SCRIPTDIR"/scratch-*; do
+    [[ -f "$f" && -x "$f" ]] || continue
+    name="$(basename "$f")"
+    name="${name#scratch-}"
+    printf '%s\n' "$name"
+  done
+}
+
+#-------------------------------------------------------------------------------
+# Print usage summary
+#-------------------------------------------------------------------------------
+usage() {
+  local cmd
+  echo "Usage: scratch <command> [args...]" >&2
+  echo "" >&2
+  echo "Commands:" >&2
+  while IFS= read -r cmd; do
+    printf '  %s\n' "$cmd" >&2
+  done < <(cmd:list | sort)
+  echo "" >&2
+  echo "Run 'scratch <command> --help' for details on a specific command." >&2
+}
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+if (($# == 0)); then
+  usage
+  exit 1
+fi
+
+CMD="$1"
+shift
+
+# Built-in meta-commands
+case "$CMD" in
+  help | --help | -h)
+    usage
+    exit 0
+    ;;
+esac
+
+# Resolve and execute the subcommand
+CMD_PATH="$(cmd:path "$CMD" 2>/dev/null)" || {
+  warn "scratch: unknown command '$CMD'"
+  echo "" >&2
+  usage
+  exit 1
+}
+
+exec "$CMD_PATH" "$@"

@@ -1,0 +1,382 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# Environment health check
+#
+# Scans all scratch subcommands and libraries for their declared dependencies
+# and reports the status of each one. Unlike helpers/setup --check (which is a
+# silent pass/fail gate at startup), doctor produces a human-readable checklist
+# for diagnosing environment issues.
+#
+# Three categories are checked:
+#
+#   1. External commands - everything declared via has-commands in bin/ and lib/.
+#      Each entry shows which subcommands depend on it.
+#
+#   2. Environment variables - everything declared via require-env-vars in bin/
+#      and lib/. Same per-command attribution.
+#
+#   3. Developer tools (--dev) - mise-managed tools and other dev deps.
+#
+# Design constraint: doctor must work even when deps are broken (it is most
+# useful precisely then). It cannot depend on gum, tui, or any tool that might
+# itself be missing. Output is plain ANSI via raw printf.
+#
+# Exit codes:
+#   0  All checks passed
+#   1  One or more checks failed
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+#-------------------------------------------------------------------------------
+# Script environment
+#-------------------------------------------------------------------------------
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+source "$SCRIPTDIR/../lib/base.sh"
+
+has-min-bash-version 5
+
+#-------------------------------------------------------------------------------
+# Arg parsing - doctor does its own since it cannot depend on a command
+# framework that might require missing tools.
+#-------------------------------------------------------------------------------
+FIX=false
+DEV=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --fix) FIX=true ;;
+    --dev) DEV=true ;;
+    --help | -h)
+      echo "Usage: scratch doctor [--fix] [--dev]" >&2
+      echo "" >&2
+      echo "Check the runtime environment for missing dependencies." >&2
+      echo "" >&2
+      echo "Options:" >&2
+      echo "  --fix   Prompt to install missing dependencies via helpers/setup" >&2
+      echo "  --dev   Also check developer tools (mise, bats, shellcheck, shfmt)" >&2
+      exit 0
+      ;;
+    *)
+      warn "scratch doctor: unknown option '$arg'"
+      exit 1
+      ;;
+  esac
+done
+
+#-------------------------------------------------------------------------------
+# Constants - scanner keywords are held in variables so the literal strings
+# "has-commands " and "require-env-vars " never appear in non-comment code
+# lines. This prevents the scanner from matching its own grep arguments.
+#-------------------------------------------------------------------------------
+_KW_HAS_CMD='has-commands'
+_KW_REQ_ENV='require-env-vars'
+
+#-------------------------------------------------------------------------------
+# Globals
+#-------------------------------------------------------------------------------
+declare -A _CMD_DEPS=()
+declare -A _CMD_ENVS=()
+_FAILED=false
+
+#-------------------------------------------------------------------------------
+# ANSI color helpers - suppressed when stdout is not a TTY
+#-------------------------------------------------------------------------------
+if [[ -t 1 ]]; then
+  _GREEN=$'\033[0;32m'
+  _RED=$'\033[0;31m'
+  _DIM=$'\033[2m'
+  _RESET=$'\033[0m'
+else
+  _GREEN=''
+  _RED=''
+  _DIM=''
+  _RESET=''
+fi
+
+#-------------------------------------------------------------------------------
+# Print a passing check line
+#-------------------------------------------------------------------------------
+print-ok() {
+  printf "  %s✓%s  %-22s %s\n" "$_GREEN" "$_RESET" "$1" "$2"
+}
+
+#-------------------------------------------------------------------------------
+# Print a failing check line and set the global failure flag
+#-------------------------------------------------------------------------------
+print-fail() {
+  printf "  %s✗%s  %-22s %s\n" "$_RED" "$_RESET" "$1" "$2"
+  _FAILED=true
+}
+
+#-------------------------------------------------------------------------------
+# Print an informational (skipped) check line
+#-------------------------------------------------------------------------------
+print-note() {
+  printf "  %s  %-22s %s%s\n" "$_DIM" "$1" "$2" "$_RESET"
+}
+
+#-------------------------------------------------------------------------------
+# Extract a short display name from a script path - strips the directory and
+# the "scratch-" prefix, leaving just the subcommand name.
+#-------------------------------------------------------------------------------
+subcommand-name() {
+  basename "$1" | sed 's/^scratch-//'
+}
+
+#-------------------------------------------------------------------------------
+# Scan a single file for dependency declarations (has-commands calls).
+# Each command found is attributed to the given display name in _CMD_DEPS.
+#-------------------------------------------------------------------------------
+scan-commands() {
+  local file="$1"
+  local name="$2"
+  local line
+  local cmd
+
+  while IFS= read -r line; do
+    line="${line#*"${_KW_HAS_CMD}" }"
+    for cmd in $line; do
+      if [[ -z "${_CMD_DEPS[$cmd]+set}" ]]; then
+        _CMD_DEPS[$cmd]="$name"
+      elif [[ " ${_CMD_DEPS[$cmd]} " != *" $name "* ]]; then
+        _CMD_DEPS[$cmd]+=" $name"
+      fi
+    done
+  done < <(grep -h "${_KW_HAS_CMD} " "$file" 2> /dev/null | grep -v '^\s*#')
+}
+
+#-------------------------------------------------------------------------------
+# Scan a single file for env var declarations (require-env-vars calls).
+# Each variable found is attributed to the given display name in _CMD_ENVS.
+#-------------------------------------------------------------------------------
+scan-envs() {
+  local file="$1"
+  local name="$2"
+  local line
+  local var
+
+  while IFS= read -r line; do
+    line="${line#*"${_KW_REQ_ENV}" }"
+    for var in $line; do
+      if [[ -z "${_CMD_ENVS[$var]+set}" ]]; then
+        _CMD_ENVS[$var]="$name"
+      elif [[ " ${_CMD_ENVS[$var]} " != *" $name "* ]]; then
+        _CMD_ENVS[$var]+=" $name"
+      fi
+    done
+  done < <(grep -h "${_KW_REQ_ENV} " "$file" 2> /dev/null | grep -v '^\s*#')
+}
+
+#-------------------------------------------------------------------------------
+# Walk all scratch subcommands and libraries, populating _CMD_DEPS and
+# _CMD_ENVS. Subcommands get per-command attribution. Libraries are folded
+# into a synthetic "lib" label.
+#-------------------------------------------------------------------------------
+scan-all-deps() {
+  local f
+  local n
+
+  for f in "$SCRIPTDIR"/scratch-*; do
+    [[ -f "$f" && -x "$f" ]] || continue
+    n="$(subcommand-name "$f")"
+    scan-commands "$f" "$n"
+    scan-envs "$f" "$n"
+  done
+
+  for f in "$SCRIPTDIR/../lib/"*.sh; do
+    [[ -f "$f" ]] || continue
+    scan-commands "$f" "lib"
+    scan-envs "$f" "lib"
+  done
+}
+
+#-------------------------------------------------------------------------------
+# Check bash version
+#-------------------------------------------------------------------------------
+check-bash-version() {
+  local cur_bash
+
+  cur_bash="${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}.${BASH_VERSINFO[2]}"
+  if ((BASH_VERSINFO[0] >= 5)); then
+    print-ok "bash" "$cur_bash"
+  else
+    print-fail "bash" "$cur_bash (need 5+) - brew install bash"
+  fi
+}
+
+#-------------------------------------------------------------------------------
+# Check that every command declared via has-commands is available on PATH.
+# Sorted output for stability across runs.
+#-------------------------------------------------------------------------------
+check-commands() {
+  local dep
+  local users
+  local where
+  local hint
+
+  if ((${#_CMD_DEPS[@]} == 0)); then
+    return
+  fi
+
+  mapfile -t _dep_names < <(printf '%s\n' "${!_CMD_DEPS[@]}" | sort)
+
+  for dep in "${_dep_names[@]}"; do
+    users="${_CMD_DEPS[$dep]}"
+
+    if command -v "$dep" > /dev/null 2>&1; then
+      where="$(command -v "$dep")"
+      print-ok "$dep" "${_DIM}${where}${_RESET}  ${_DIM}(${users})${_RESET}"
+    else
+      case "$dep" in
+        gcloud) hint="brew install google-cloud-sdk" ;;
+        *) hint="brew install ${dep}" ;;
+      esac
+      print-fail "$dep" "not found - ${hint}  ${_DIM}(${users})${_RESET}"
+    fi
+  done
+}
+
+#-------------------------------------------------------------------------------
+# Check that every env var declared via require-env-vars is set and non-empty
+#-------------------------------------------------------------------------------
+check-env-vars() {
+  local var
+  local users
+
+  if ((${#_CMD_ENVS[@]} == 0)); then
+    return
+  fi
+
+  mapfile -t _env_names < <(printf '%s\n' "${!_CMD_ENVS[@]}" | sort)
+
+  printf '\nEnvironment variables\n\n'
+
+  for var in "${_env_names[@]}"; do
+    users="${_CMD_ENVS[$var]}"
+    if [[ -n "${!var:-}" ]]; then
+      print-ok "$var" "${_DIM}set  (${users})${_RESET}"
+    else
+      print-fail "$var" "not set  ${_DIM}(${users})${_RESET}"
+    fi
+  done
+}
+
+#-------------------------------------------------------------------------------
+# Check developer tooling: mise itself, mise-managed tools from .mise.toml
+#-------------------------------------------------------------------------------
+check-dev-tools() {
+  local mise_toml
+  local tool
+  local where
+
+  printf '\nDeveloper tools\n\n'
+
+  if command -v mise > /dev/null 2>&1; then
+    where="$(command -v mise)"
+    print-ok "mise" "${_DIM}${where}${_RESET}"
+  else
+    print-fail "mise" "not found - see https://mise.jdx.dev"
+    return
+  fi
+
+  mise_toml="$SCRIPTDIR/../.mise.toml"
+  if [[ -f "$mise_toml" ]]; then
+    while IFS='=' read -r tool _; do
+      tool="${tool## }"
+      tool="${tool%% }"
+
+      [[ -z "$tool" || "$tool" == \#* || "$tool" == \[* ]] && continue
+
+      if command -v "$tool" > /dev/null 2>&1; then
+        where="$(command -v "$tool")"
+        print-ok "$tool" "${_DIM}${where}${_RESET}"
+      else
+        print-fail "$tool" "not found - run: mise install"
+      fi
+    done < <(sed -n '/^\[tools\]/,/^\[/p' "$mise_toml" | grep -v '^\[')
+  fi
+}
+
+#-------------------------------------------------------------------------------
+# Offer to run setup to install missing dependencies
+#-------------------------------------------------------------------------------
+offer-fix() {
+  local answer
+  local setup_script
+  local setup_label
+
+  if [[ "$DEV" == true ]]; then
+    setup_script="$SCRIPTDIR/../helpers/dev-setup"
+    setup_label="mise run setup"
+  else
+    setup_script="$SCRIPTDIR/../helpers/setup"
+    setup_label="scratch setup"
+  fi
+
+  printf 'Run '\''%s'\'' to install missing dependencies? [y/N] ' "$setup_label"
+  read -r answer
+  case "$answer" in
+    [yY]*)
+      "$setup_script"
+      ;;
+    *)
+      printf 'Skipped. Run '\''%s'\'' when ready.\n\n' "$setup_label"
+      ;;
+  esac
+}
+
+#-------------------------------------------------------------------------------
+# Print summary, optionally offer --fix, and set exit code
+#-------------------------------------------------------------------------------
+print-summary() {
+  printf '\n'
+  printf '%.0s-' {1..50}
+  printf '\n'
+
+  if [[ "$_FAILED" == true ]]; then
+    printf '%sSome checks failed.%s\n\n' "$_RED" "$_RESET"
+
+    if [[ "$FIX" == true ]]; then
+      offer-fix
+    else
+      printf 'Run '\''scratch doctor --fix'\'' to install missing dependencies.\n\n'
+    fi
+
+    exit 1
+  else
+    printf '%sAll checks passed.%s\n\n' "$_GREEN" "$_RESET"
+  fi
+}
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+
+scan-all-deps
+
+printf '\nscratch doctor\n'
+printf '%.0s-' {1..50}
+printf '\n\n'
+printf 'Runtime\n\n'
+
+check-bash-version
+check-commands
+check-env-vars
+
+if [[ "$DEV" == true ]]; then
+  check-dev-tools
+fi
+
+print-summary

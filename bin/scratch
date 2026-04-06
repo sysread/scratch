@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# Scratch entrypoint shim
+#
+# This script must remain compatible with bash 3.2 (macOS system default).
+# It handles three things before handing off to the real dispatcher:
+#
+#   1. Intercepts "scratch setup" - delegates to helpers/setup, which must also
+#      work on bash 3.2 since it may need to install bash 5+.
+#
+#   2. Verifies the running bash is 5+ - prints upgrade instructions if not.
+#
+#   3. Checks for missing runtime dependencies - if any are missing and stdin
+#      is a TTY, prompts the user to install them via helpers/setup.
+#
+# IMPORTANT: Do not use ANY bash 4+ features in this file:
+#   - No associative arrays (declare -A)
+#   - No globstar (shopt -s globstar)
+#   - No namerefs (local -n)
+#   - No ${var^^} or ${var,,} case conversion
+#   - No |& pipe shorthand
+#   - No readarray / mapfile
+#   - No negative array indices (${arr[-1]})
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+#-------------------------------------------------------------------------------
+# Resolve script directory - handles symlinks so scratch works when symlinked
+# into a PATH directory (e.g. /usr/local/bin/scratch -> .../bin/scratch).
+#-------------------------------------------------------------------------------
+SCRIPT="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT" ]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  case "$TARGET" in
+    /*) ;;
+    *) TARGET="$DIR/$TARGET" ;;
+  esac
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+#-------------------------------------------------------------------------------
+# Intercept "scratch setup" - must work on bash 3.2 since its job is to
+# install bash 5+ and other runtime deps.
+#-------------------------------------------------------------------------------
+if [ "${1:-}" = "setup" ]; then
+  shift
+  exec "$SCRIPTDIR/../helpers/setup" "$@"
+fi
+
+#-------------------------------------------------------------------------------
+# Version check - BASH_VERSINFO is available in all bash versions, even 3.x.
+#-------------------------------------------------------------------------------
+SCRATCH_MIN_BASH_MAJOR=5
+SCRATCH_MIN_BASH_MINOR=0
+
+if [ "${BASH_VERSINFO[0]}" -lt "$SCRATCH_MIN_BASH_MAJOR" ] \
+  || { [ "${BASH_VERSINFO[0]}" -eq "$SCRATCH_MIN_BASH_MAJOR" ] \
+    && [ "${BASH_VERSINFO[1]}" -lt "$SCRATCH_MIN_BASH_MINOR" ]; }; then
+  echo "" >&2
+  echo "scratch requires bash >= ${SCRATCH_MIN_BASH_MAJOR}.${SCRATCH_MIN_BASH_MINOR}, but you have ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}." >&2
+  echo "" >&2
+  echo "macOS ships bash 3.2 (from 2007!) due to licensing." >&2
+  echo "Install a modern bash with Homebrew:" >&2
+  echo "" >&2
+  echo "  brew install bash" >&2
+  echo "" >&2
+  echo "Then make sure Homebrew's bash comes first in your PATH" >&2
+  echo "(or change your default shell: chsh -s \$(brew --prefix)/bin/bash)." >&2
+  echo "" >&2
+  echo "Or run: scratch setup" >&2
+  echo "" >&2
+  exit 1
+fi
+
+#-------------------------------------------------------------------------------
+# Runtime dependency check
+#
+# helpers/setup --check exits 0 silently when all deps are present, or exits 1
+# after printing each missing dep as a WARNING to stderr.
+#
+# Interactive (TTY): prompt the user to install missing deps.
+# Non-interactive (pipe/script): warn and continue. The subcommand's own
+# has-commands call will fail-fast if it actually needs the missing dep.
+#-------------------------------------------------------------------------------
+if ! "$SCRIPTDIR/../helpers/setup" --check; then
+  if [ -t 0 ]; then
+    printf '\nInstall missing dependencies? [y/N] ' >&2
+    read -r answer
+    case "$answer" in
+      [yY]*)
+        "$SCRIPTDIR/../helpers/setup"
+        ;;
+      *)
+        echo "Run 'scratch setup' when you're ready to install them." >&2
+        exit 1
+        ;;
+    esac
+  fi
+fi
+
+#-------------------------------------------------------------------------------
+# Dispatch - exec replaces this process entirely. exec -a sets argv[0] so
+# the process shows up as "scratch" in ps/htop rather than "dispatch".
+#-------------------------------------------------------------------------------
+exec -a scratch "$SCRIPTDIR/dispatch" "$@"
