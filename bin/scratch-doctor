@@ -307,6 +307,15 @@ check-dev-tools() {
       fi
     done < <(sed -n '/^\[tools\]/,/^\[/p' "$mise_toml" | grep -v '^\[')
   fi
+
+  # GNU parallel is a dev dependency not managed by mise (not in its tool
+  # registry). Bats uses it for inter-file parallelism (-j).
+  if command -v parallel > /dev/null 2>&1; then
+    where="$(command -v parallel)"
+    print-ok "parallel" "${_DIM}${where}${_RESET}"
+  else
+    print-fail "parallel" "not found - brew install parallel"
+  fi
 }
 
 #-------------------------------------------------------------------------------
