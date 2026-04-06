@@ -1,0 +1,32 @@
+# EditorConfig - whitespace and shfmt formatting settings.
+#
+# shfmt reads its formatting options from EditorConfig sections that match
+# the file being formatted. The shell-specific sections below configure:
+#   binary_next_line   (-bn)  pipe/&& operators start continuation lines
+#   switch_case_indent (-ci)  case bodies are indented inside the case
+#   space_redirects    (-sr)  space after redirect operators (> , 2> , <<< )
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+# Shell scripts with extensions
+[*.{sh,bash,bats}]
+binary_next_line = true
+switch_case_indent = true
+space_redirects = true
+
+# Extensionless scripts in bin/ and helpers/
+[{bin/*,helpers/*}]
+binary_next_line = true
+switch_case_indent = true
+space_redirects = true

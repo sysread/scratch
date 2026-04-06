@@ -25,8 +25,8 @@ while [ -L "$SCRIPT" ]; do
   esac
   SCRIPT="$TARGET"
 done
+# shellcheck disable=SC2034 # SCRIPTDIR will be used by dev-setup delegation
 SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPTDIR/.." && pwd)"
 
 #-------------------------------------------------------------------------------
 # Runtime dependencies - the commands scratch needs at runtime.

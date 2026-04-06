@@ -87,7 +87,7 @@ case "$CMD" in
 esac
 
 # Resolve and execute the subcommand
-CMD_PATH="$(cmd:path "$CMD" 2>/dev/null)" || {
+CMD_PATH="$(cmd:path "$CMD" 2> /dev/null)" || {
   warn "scratch: unknown command '$CMD'"
   echo "" >&2
   usage
