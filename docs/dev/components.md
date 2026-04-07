@@ -146,7 +146,7 @@ Functions:
 - `model:fetch` - pull `?type=all` from Venice, atomic write to the cache (tmp + mv)
 - `model:list [TYPE]` - print sorted model ids, optionally filtered by top-level `type` field
 - `model:get ID` - print the full JSON object for one model; dies if not found
-- `model:validate ID` - silent predicate; returns 0 if cached, 1 otherwise
+- `model:exists ID` - silent predicate; returns 0 if the id is in the cache, 1 otherwise (this is an existence check, not capability validation - profile validation lives under `model:profile:validate`)
 - `model:jq ID EXPR` - run an arbitrary jq expression rooted at one model's object
 
 All read functions lazy-load the cache through the private `_model:ensure-cache` helper.

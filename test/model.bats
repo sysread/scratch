@@ -243,22 +243,22 @@ seed_cache() {
 }
 
 # ---------------------------------------------------------------------------
-# model:validate
+# model:exists
 # ---------------------------------------------------------------------------
 
-@test "model:validate returns 0 for a known id" {
+@test "model:exists returns 0 for a known id" {
   install_venice_curl_stub
   seed_cache
 
-  run model:validate llama-3-large
+  run model:exists llama-3-large
   is "$status" 0
 }
 
-@test "model:validate returns 1 for an unknown id" {
+@test "model:exists returns 1 for an unknown id" {
   install_venice_curl_stub
   seed_cache
 
-  run model:validate ghost-model
+  run model:exists ghost-model
   is "$status" 1
 }
 

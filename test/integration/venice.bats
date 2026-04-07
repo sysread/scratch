@@ -73,19 +73,19 @@ setup() {
   [[ -n "$first" ]]
 }
 
-@test "model:validate accepts the first listed text model" {
+@test "model:exists accepts the first listed text model" {
   model:fetch
   local first
   first="$(model:list text | head -1)"
 
-  run model:validate "$first"
+  run model:exists "$first"
   is "$status" 0
 }
 
-@test "model:validate rejects a nonsense model id" {
+@test "model:exists rejects a nonsense model id" {
   model:fetch
 
-  run model:validate "not-a-real-model-xyz-12345"
+  run model:exists "not-a-real-model-xyz-12345"
   is "$status" 1
 }
 

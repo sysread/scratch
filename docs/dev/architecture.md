@@ -109,7 +109,8 @@ lib/          sourced libraries (not executable)
   cmd.sh          cmd:define, cmd:parse, cmd:get (declarative command framework)
   dispatch.sh     dispatch:try, dispatch:usage (parameterized subcommand dispatch)
   venice.sh      venice:api-key, venice:curl (Venice API primitives)
-  model.sh       model:fetch, model:list, model:validate, model:jq (cached registry)
+  model.sh       model:fetch, model:list, model:exists, model:jq (registry) +
+                  model:profile:* (profile system, sourced from data/models.json)
   chat.sh        chat:completion, chat:extract-content (chat completions)
 
 libexec/      internal non-bash executables
@@ -299,7 +300,7 @@ The model list is cached as the raw Venice response at `~/.config/scratch/venice
 `model:fetch` always requests `?type=all` so one call populates everything.
 Writes are atomic (`.tmp` then `mv`) so a failed fetch never corrupts a previously-good cache.
 
-All read functions (`model:list`, `model:get`, `model:validate`, `model:jq`) lazy-load the cache through a private `_model:ensure-cache` helper.
+All read functions (`model:list`, `model:get`, `model:exists`, `model:jq`) lazy-load the cache through a private `_model:ensure-cache` helper.
 First use from a fresh install triggers the fetch automatically.
 No TTL - the cache persists until the user calls `model:fetch` again to refresh.
 

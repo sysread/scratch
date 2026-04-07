@@ -1,20 +1,50 @@
 #!/usr/bin/env bash
 
 #-------------------------------------------------------------------------------
-# Venice model registry
+# Venice models: registry + profiles
 #
-# Caches the Venice model list locally and provides lookup + validation.
+# This file contains two related but distinct concept groups, namespaced
+# to make the distinction visible at every call site:
+#
+#   1. Model registry (model:*)
+#      The cached, validated copy of Venice's GET /models response.
+#      This is the canonical truth about what models exist and what
+#      they support. Functions: model:fetch, model:list, model:get,
+#      model:exists, model:jq, model:cache-path.
+#
+#   2. Model profiles (model:profile:*)
+#      Our internal "use this model in this configuration for this role"
+#      definitions, sourced from data/models.json (repo-internal config,
+#      not user settings). Profiles reference registry models and are
+#      validated against them. Functions: model:profile:list,
+#      model:profile:resolve, model:profile:model, model:profile:extras,
+#      model:profile:exists, model:profile:validate.
+#
+# The two groups live in one file because they are tightly coupled
+# (profile validation requires registry data) and small enough that
+# splitting would add directory boilerplate without commensurate clarity
+# gain. The double-colon namespace conveys the relationship without
+# forcing it into the filesystem.
+#
+# REGISTRY DETAILS
+#
 # The cache is the raw response from GET /models?type=all, stored at
-# ~/.config/scratch/venice/models.json. All read functions lazy-load the
-# cache: if it is missing, they trigger a fetch before proceeding.
+# ~/.config/scratch/venice/models.json. All registry read functions
+# lazy-load the cache: if it is missing, they trigger a fetch before
+# proceeding.
 #
 # Lazy loading means first use from a fresh install "just works" - the
-# first validation or lookup pulls the list from Venice. It also means
-# network errors surface at read time, which is usually the right place
-# to deal with them (the caller is about to act on the result).
+# first lookup pulls the list from Venice. Cache refresh is always
+# explicit: call model:fetch to re-pull. There is no TTL; stale entries
+# persist until the user asks.
 #
-# Cache refresh is always explicit: call model:fetch to re-pull. There is
-# no TTL; stale entries persist until the user asks.
+# PROFILE DETAILS
+#
+# Profiles live in data/models.json (tracked in the repo). The file has
+# two top-level groups: "base" (smart, balanced, fast) and "variants"
+# (coding, web, etc.) which each "extends" a base. Profile resolution
+# does a recursive deep-merge so a variant inherits its base's params
+# and venice_parameters, with variant-specific values taking precedence.
 #-------------------------------------------------------------------------------
 
 [[ "${_INCLUDED_MODEL:-}" == "1" ]] && return 0
@@ -129,12 +159,16 @@ model:get() {
 export -f model:get
 
 #-------------------------------------------------------------------------------
-# model:validate ID
+# model:exists ID
 #
 # Return 0 if ID exists in the cached model list, 1 otherwise. Silent;
 # suitable for use in conditionals. Lazy-loads the cache if missing.
+#
+# Note: this is an existence check, not "validation" in any deeper sense -
+# it does not verify capabilities or features. Profile validation lives
+# under model:profile:validate.
 #-------------------------------------------------------------------------------
-model:validate() {
+model:exists() {
   local id="$1"
   local cache
   local found
@@ -147,7 +181,7 @@ model:validate() {
   [[ -n "$found" ]]
 }
 
-export -f model:validate
+export -f model:exists
 
 #-------------------------------------------------------------------------------
 # model:jq ID JQ_EXPR
@@ -171,9 +205,9 @@ model:jq() {
   _model:ensure-cache
   cache="$(model:cache-path)"
 
-  # Validate existence first so the error message is clear, instead of
+  # Check existence first so the error message is clear, instead of
   # getting jq's null-output behavior for missing models.
-  if ! model:validate "$id"; then
+  if ! model:exists "$id"; then
     die "model: not found: $id (try: model:fetch to refresh the cache)"
   fi
 
