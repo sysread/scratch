@@ -7,6 +7,20 @@
 # This prevents the user's shell profile from leaking into the test runner
 # and causing false passes or failures.
 #
+# Isolation guarantees provided to unit tests:
+#
+#   1. HOME is a fresh mktemp directory, cleaned up on exit. Any code that
+#      resolves paths relative to $HOME (like ~/.config/scratch/...) lands
+#      safely in the tmpdir and cannot touch the developer's real config.
+#
+#   2. A "network guard" curl stub is installed on PATH that exits non-zero
+#      with a loud error message if a test forgets to mock the network.
+#      Per-test stubs made via make_stub prepend BATS_TEST_TMPDIR/stubbin
+#      ahead of the guard, so tests that legitimately invoke curl override
+#      transparently.
+#
+# Neither guarantee applies to integration tests (helpers/run-integration-tests).
+#
 # Usage:
 #   helpers/run-tests              # run all tests
 #   helpers/run-tests [bats args]  # forward extra args to bats
@@ -25,6 +39,44 @@ SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPTDIR/.." && pwd)"
 
 #-------------------------------------------------------------------------------
+# Test isolation: fresh HOME in a tmpdir
+#
+# Any code that resolves ~/.config/scratch/... will land here instead of the
+# developer's real home. The tmpdir is cleaned up on exit via trap. We use
+# a regular subprocess (not exec) so this shell survives to run the trap.
+#-------------------------------------------------------------------------------
+TEST_HOME="$(mktemp -d -t scratch-test-home.XXXXXX)"
+trap 'rm -rf "$TEST_HOME"' EXIT INT TERM HUP
+
+#-------------------------------------------------------------------------------
+# Network guard: a curl stub that fails loudly
+#
+# Unit tests must not hit the network. If a test calls curl without first
+# stubbing it (via make_stub or by overriding a wrapping function like
+# venice:curl), this stub fires and the test fails with a clear message
+# pointing at what to do.
+#
+# The guard dir goes on PATH AFTER BATS_TEST_TMPDIR/stubbin (which make_stub
+# uses), so per-test stubs shadow the guard without extra work.
+#-------------------------------------------------------------------------------
+GUARD_DIR="${TEST_HOME}/_network_guard"
+mkdir -p "$GUARD_DIR"
+cat > "${GUARD_DIR}/curl" << 'GUARD_STUB'
+#!/usr/bin/env bash
+{
+  echo "FATAL: a unit test attempted to run curl without stubbing it."
+  echo
+  echo "Unit tests must not hit the network. Override curl via make_stub"
+  echo "in your test's setup(), or override the bash function that wraps"
+  echo "curl (e.g. venice:curl) in the test body."
+  echo
+  echo "See docs/dev/conventions.md for the full testing convention."
+} >&2
+exit 99
+GUARD_STUB
+chmod +x "${GUARD_DIR}/curl"
+
+#-------------------------------------------------------------------------------
 # Parallel execution check - bats uses GNU parallel for inter-file parallelism.
 # Without it, bats falls back to serial execution.
 #-------------------------------------------------------------------------------
@@ -38,10 +90,19 @@ if ! command -v parallel > /dev/null 2>&1; then
   BATS_JOBS=()
 fi
 
-exec env -i \
-  PATH="$PATH" \
-  HOME="$HOME" \
+#-------------------------------------------------------------------------------
+# Run bats under the isolated environment
+#
+# Note we do NOT exec here - we need the script to survive to run the EXIT
+# trap above. The trap cleans up TEST_HOME whether bats passes or fails.
+#-------------------------------------------------------------------------------
+status=0
+env -i \
+  PATH="${GUARD_DIR}:${PATH}" \
+  HOME="$TEST_HOME" \
   OSTYPE="$OSTYPE" \
   TMPDIR="${TMPDIR:-/tmp}" \
   TERM="${TERM:-dumb}" \
-  bats "${BATS_JOBS[@]}" -T -r "$REPO_ROOT/test/" "$@"
+  bats "${BATS_JOBS[@]}" -T -r "$REPO_ROOT/test/" "$@" || status=$?
+
+exit "$status"
