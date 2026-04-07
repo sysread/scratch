@@ -206,7 +206,7 @@ Runtime functions (call after registration):
 - `cmd:rest` - print positional args
 - `cmd:usage [--no-extra]` - print help and exit
 
-See `test/cmd.bats` for examples of every function.
+See `test/01-cmd.bats` for examples of every function.
 
 ## Subcommands
 
@@ -342,21 +342,22 @@ Requires bash wrapper for the clang workaround (see `helpers/embed`).
 
 ## Test Files
 
+Test files use 2-digit numerical prefixes (CPAN convention) so they run in dependency order: lib tests first (00-06), bin tests next (10+), self-reflection tests last (90+). Gaps between groups leave room to wedge in new tests without renumbering.
+
 | File | Purpose |
 |---|---|
 | `test/helpers.sh` | Test utilities: `is`, `diag`, `make_stub`, `prepend_stub_path` |
-| `test/base.bats` | Tests for `lib/base.sh` |
-| `test/termio.bats` | Tests for `lib/termio.sh` (if present) |
-| `test/cmd.bats` | Tests for `lib/cmd.sh` |
-| `test/dispatch.bats` | Tests for `lib/dispatch.sh` |
-| `test/project.bats` | Tests for `lib/project.sh` |
-| `test/venice.bats` | Tests for `lib/venice.sh` (stubs curl binary) |
-| `test/model.bats` | Tests for `lib/model.sh` (overrides `venice:curl` function) |
-| `test/chat.bats` | Tests for `lib/chat.sh` (overrides `venice:curl`, captures request body) |
-| `test/integration/venice.bats` | Opt-in integration tests against the real Venice API |
-| `test/scratch-doctor.bats` | Tests for `bin/scratch-doctor` |
-| `test/lint.bats` | Self-reflection: shellcheck |
-| `test/formatting.bats` | Self-reflection: shfmt drift |
-| `test/permissions.bats` | Self-reflection: +x policy |
-| `test/anti-slop.bats` | Self-reflection: no smart quotes or em dashes |
-| `test/subcommand-contract.bats` | Self-reflection: subcommands honor --help |
+| `test/00-base.bats` | Tests for `lib/base.sh` |
+| `test/01-cmd.bats` | Tests for `lib/cmd.sh` |
+| `test/02-dispatch.bats` | Tests for `lib/dispatch.sh` |
+| `test/03-project.bats` | Tests for `lib/project.sh` |
+| `test/04-venice.bats` | Tests for `lib/venice.sh` (stubs curl binary) |
+| `test/05-model.bats` | Tests for `lib/model.sh` (registry + profiles; overrides `venice:curl`) |
+| `test/06-chat.bats` | Tests for `lib/chat.sh` (overrides `venice:curl`, captures request body) |
+| `test/10-scratch-doctor.bats` | Tests for `bin/scratch-doctor` |
+| `test/90-lint.bats` | Self-reflection: shellcheck |
+| `test/91-formatting.bats` | Self-reflection: shfmt drift |
+| `test/92-permissions.bats` | Self-reflection: +x policy |
+| `test/93-anti-slop.bats` | Self-reflection: unicode + AI attribution in unpushed commits |
+| `test/94-subcommand-contract.bats` | Self-reflection: subcommands honor --help |
+| `test/integration/00-venice.bats` | Opt-in integration tests against the real Venice API |

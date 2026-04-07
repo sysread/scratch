@@ -129,23 +129,26 @@ helpers/      bash scripts that are not subcommands
   root-dispatcher        target of bin/scratch exec; top-level subcommand dispatcher
 
 test/         bats test suite (unit tests only - non-recursive)
-  helpers.sh                is, diag, make_stub, prepend_stub_path
-  base.bats                 tests for lib/base.sh
-  cmd.bats                  tests for lib/cmd.sh
-  dispatch.bats             tests for lib/dispatch.sh
-  project.bats              tests for lib/project.sh
-  venice.bats               tests for lib/venice.sh
-  model.bats                tests for lib/model.sh
-  chat.bats                 tests for lib/chat.sh
-  scratch-doctor.bats
-  lint.bats                 self-reflection: shellcheck
-  formatting.bats           self-reflection: shfmt drift
-  permissions.bats          self-reflection: +x policy
-  anti-slop.bats            self-reflection: no smart quotes or em dashes
-  subcommand-contract.bats  self-reflection: subcommands honor --help
+              Files use 2-digit numerical prefixes (CPAN convention) so
+              they run in dependency order. Lib tests come first, bin
+              tests next, self-reflection tests last.
+  helpers.sh                   is, diag, make_stub, prepend_stub_path
+  00-base.bats                 tests for lib/base.sh
+  01-cmd.bats                  tests for lib/cmd.sh
+  02-dispatch.bats             tests for lib/dispatch.sh
+  03-project.bats              tests for lib/project.sh
+  04-venice.bats               tests for lib/venice.sh
+  05-model.bats                tests for lib/model.sh (registry + profiles)
+  06-chat.bats                 tests for lib/chat.sh
+  10-scratch-doctor.bats       tests for bin/scratch-doctor
+  90-lint.bats                 self-reflection: shellcheck
+  91-formatting.bats           self-reflection: shfmt drift
+  92-permissions.bats          self-reflection: +x policy
+  93-anti-slop.bats            self-reflection: unicode + AI attribution
+  94-subcommand-contract.bats  self-reflection: subcommands honor --help
 
 test/integration/   bats tests that hit the REAL venice API (opt-in only)
-  venice.bats       end-to-end smoke tests for venice + model + chat
+  00-venice.bats    end-to-end smoke tests for venice + model + chat
 
 docs/
   guides/     user-facing documentation
@@ -180,7 +183,7 @@ docs/
   Tracked in git, updated via code changes, never written by scratch at runtime.
   This is distinct from `~/.config/scratch/...` which is the user's runtime config and IS written by scratch.
 
-The `permissions.bats` test enforces these rules at test time.
+The `92-permissions.bats` test enforces these rules at test time.
 
 ## The Library Stack
 
@@ -387,11 +390,11 @@ When you add a new tool to scratch:
 
 Several bats files exist solely to enforce structural conventions:
 
-- `lint.bats` - shellcheck on bin/, helpers/, lib/, test/
-- `formatting.bats` - fails if shfmt would change any tracked file
-- `permissions.bats` - enforces +x on bin/helpers, -x on lib/libexec
-- `anti-slop.bats` - fails if smart quotes or em dashes appear anywhere in tracked files
-- `subcommand-contract.bats` - verifies every subcommand honors `--help` with exit 0
+- `90-lint.bats` - shellcheck on bin/, helpers/, lib/, test/
+- `91-formatting.bats` - fails if shfmt would change any tracked file
+- `92-permissions.bats` - enforces +x on bin/helpers, -x on lib/libexec/data
+- `93-anti-slop.bats` - fails on smart quotes, em dashes, or AI attribution in unpushed commits
+- `94-subcommand-contract.bats` - verifies every subcommand honors `--help` with exit 0
 
 These tests catch drift that code review might miss.
 They run under the same `env -i` harness as functional tests via `helpers/run-tests`.
