@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# Top-level dispatcher
+#
+# This script is the target of `bin/scratch` (the bash 3.2 shim) after the
+# version and dependency checks pass. It lives in helpers/ rather than bin/
+# because it is not itself a user-visible subcommand - users invoke it
+# transitively through `bin/scratch`.
+#
+# It is kept out of bin/ so that `dispatch:list "scratch"` (which globs
+# bin/scratch-*) does not accidentally see it as a child of itself.
+#
+# Responsibilities:
+#   - Handle the top-level --help / no-args case (render help via dispatch:usage).
+#   - Delegate to subcommands via dispatch:try.
+#
+# See docs/dev/architecture.md for a full description of the subcommand system.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/termio.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+  source "$SCRIPTDIR/../lib/dispatch.sh"
+}
+
+has-min-bash-version 5
+
+_ROOT_DESC="AI-powered project research and coding tool"
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+
+# Try to dispatch to a subcommand. Never returns on success.
+dispatch:try "scratch" "$@" || true
+
+# Fallthrough: no subcommand matched. Print usage.
+dispatch:usage "scratch" "$_ROOT_DESC"
+
+# Exit 0 if user asked for help explicitly, 1 if we got an unknown verb
+# or stray args.
+case "${1:-}" in
+  "" | -h | --help | help) exit 0 ;;
+  *) exit 1 ;;
+esac

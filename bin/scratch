@@ -104,6 +104,6 @@ fi
 
 #-------------------------------------------------------------------------------
 # Dispatch - exec replaces this process entirely. exec -a sets argv[0] so
-# the process shows up as "scratch" in ps/htop rather than "dispatch".
+# the process shows up as "scratch" in ps/htop rather than "root-dispatcher".
 #-------------------------------------------------------------------------------
-exec -a scratch "$SCRIPTDIR/dispatch" "$@"
+exec -a scratch "$SCRIPTDIR/../helpers/root-dispatcher" "$@"
