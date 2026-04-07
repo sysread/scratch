@@ -186,36 +186,65 @@ scan-envs() {
 }
 
 #-------------------------------------------------------------------------------
-# Walk all scratch subcommands and libraries, populating _CMD_DEPS and
-# _CMD_ENVS. Subcommands get per-command attribution. Libraries are folded
-# into a synthetic "lib" label.
+# Attribution helpers
+#
+# Each scan target (bin/lib/helpers/tools/...) attributes its dependencies
+# to a different label. These tiny functions take a file path and return
+# the attribution string. They're called by _scan-deps-in for every file
+# matched by a glob pattern.
 #-------------------------------------------------------------------------------
-scan-all-deps() {
+
+# Lib files are all folded into the synthetic "lib" label. Library deps
+# apply transitively to many subcommands; per-file attribution would be
+# misleadingly noisy.
+_attr-lib() { printf '%s\n' "lib"; }
+
+#-------------------------------------------------------------------------------
+# _scan-deps-in PATTERN ATTR_FN NEED_X
+#
+# Glob PATTERN, filter to regular files (and to executables if NEED_X is
+# "x"), then for each match call ATTR_FN with the file path to compute
+# the attribution label, and feed the file through scan-commands and
+# scan-envs.
+#
+# PATTERN is intentionally unquoted at expansion time so the shell expands
+# the glob. The caller passes a quoted string; we expand it inside.
+#
+# ATTR_FN is the name of a function (or external command) that takes one
+# argument (the file path) and prints the attribution label to stdout.
+# Use subcommand-name for bin/scratch-*, _attr-lib for lib/*.sh, basename
+# for helpers/*, _attr-tool for tools/*/is-available, etc.
+#-------------------------------------------------------------------------------
+_scan-deps-in() {
+  local pattern="$1"
+  local attr_fn="$2"
+  local need_x="$3"
   local f
   local n
 
-  for f in "$SCRIPTDIR"/scratch-*; do
-    [[ -f "$f" && -x "$f" ]] || continue
-    n="$(subcommand-name "$f")"
-    scan-commands "$f" "$n"
-    scan-envs "$f" "$n"
-  done
-
-  for f in "$SCRIPTDIR/../lib/"*.sh; do
+  # shellcheck disable=SC2086 # PATTERN is intentionally word-split for glob expansion
+  for f in $pattern; do
     [[ -f "$f" ]] || continue
-    scan-commands "$f" "lib"
-    scan-envs "$f" "lib"
-  done
-
-  # Also scan helpers/ so tools that only appear in helper scripts (like
-  # elixir in helpers/embed) are caught. Attribution uses the helper's
-  # basename, e.g. "embed" for helpers/embed.
-  for f in "$SCRIPTDIR/../helpers/"*; do
-    [[ -f "$f" && -x "$f" ]] || continue
-    n="$(basename "$f")"
+    [[ "$need_x" != "x" || -x "$f" ]] || continue
+    n="$("$attr_fn" "$f")"
     scan-commands "$f" "$n"
     scan-envs "$f" "$n"
   done
+}
+
+#-------------------------------------------------------------------------------
+# Walk all scratch dependency declarations across the four scan targets:
+#
+#   bin/scratch-*       attributed by verb (subcommand-name)
+#   lib/*.sh            folded into "lib"
+#   helpers/*           attributed by helper basename (e.g. "embed")
+#
+# All four use the same _scan-deps-in helper - one line per target.
+#-------------------------------------------------------------------------------
+scan-all-deps() {
+  _scan-deps-in "$SCRIPTDIR/scratch-*" subcommand-name x
+  _scan-deps-in "$SCRIPTDIR/../lib/*.sh" _attr-lib any
+  _scan-deps-in "$SCRIPTDIR/../helpers/*" basename x
 }
 
 #-------------------------------------------------------------------------------
