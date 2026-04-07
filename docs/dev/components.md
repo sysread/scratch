@@ -153,6 +153,23 @@ All read functions lazy-load the cache through the private `_model:ensure-cache`
 First call from a fresh install triggers `model:fetch` automatically.
 There is no TTL; refresh the cache by calling `model:fetch` explicitly.
 
+Profile functions (`model:profile:*`):
+- `model:profile:data-path` - print the path to `data/models.json` (the profile data file shipped in the repo)
+- `model:profile:list` - print all profile names (base + variants), sorted, one per line
+- `model:profile:exists NAME` - silent predicate; returns 0 if NAME is defined as either a base or a variant
+- `model:profile:resolve NAME` - print the fully-merged JSON for a profile, with variant overrides deep-merged onto the base via jq's `*` operator
+- `model:profile:model NAME` - convenience: print just the resolved profile's `.model` field
+- `model:profile:extras NAME` - print the JSON object shaped for `chat:completion`'s third argument (params flattened to top level, `venice_parameters` kept nested, omitted entirely if empty)
+- `model:profile:validate NAME` - check that the profile is internally consistent: profile exists, the model id exists in the registry cache, and every requested param/venice_parameter is supported by the model's declared capabilities. Reports ALL capability failures at once via `warn` before returning 1, so the user can fix everything in one pass instead of running validate repeatedly.
+
+Profiles live in `data/models.json` (tracked in the repo, not user-configurable). The file has two top-level groups:
+- `base` - standalone profiles (smart, balanced, fast)
+- `variants` - profiles that `extends` a base and add their own params/venice_parameters
+
+Resolution does a recursive deep-merge so variant overrides combine with their base's params rather than replacing them. Variants extending other variants works transitively (resolve calls itself recursively); cycles are not detected and would stack overflow, so don't write them.
+
+The capability mapping for validation lives in two private associative arrays at the top of the profile section: `_MODEL_PARAM_CAPABILITIES` (top-level params -> required capabilities) and `_MODEL_VENICE_PARAM_CAPABILITIES` (venice_parameters -> required capabilities). Adding a new mapping teaches validate about a new parameter without changing the validation logic.
+
 ### `lib/chat.sh`
 
 Venice chat completions wrapper.

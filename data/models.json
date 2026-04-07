@@ -1,0 +1,47 @@
+{
+  "_comment": "Model profiles - scratch's internal policy for how to use Venice models. Sourced by lib/model.sh (model:profile:* functions). Tracked in the repo, not user-configurable. Updates are code changes. Validated against the Venice model registry via model:profile:validate.",
+  "version": 1,
+  "base": {
+    "smart": {
+      "_comment": "Maximum reasoning. Use when correctness matters more than latency.",
+      "model": "zai-org-glm-5-1",
+      "params": {
+        "reasoning_effort": "medium"
+      }
+    },
+    "balanced": {
+      "_comment": "Same model as smart but with minimal reasoning. The default text profile for general work.",
+      "model": "zai-org-glm-5-1",
+      "params": {
+        "reasoning_effort": "minimal"
+      }
+    },
+    "fast": {
+      "_comment": "Reasoning disabled. Use for high-volume or latency-sensitive operations where some quality loss is acceptable.",
+      "model": "arcee-trinity-large-thinking",
+      "params": {
+        "reasoning_effort": "none"
+      }
+    }
+  },
+  "variants": {
+    "coding": {
+      "_comment": "Code generation and analysis. Extends smart for max reasoning, lowers temperature for determinism, disables Venice's default system preamble so strict instructions are not diluted.",
+      "extends": "smart",
+      "params": {
+        "temperature": 0.2
+      },
+      "venice_parameters": {
+        "include_venice_system_prompt": false
+      }
+    },
+    "web": {
+      "_comment": "Web-augmented research. Extends balanced and turns on Venice's web search with citations.",
+      "extends": "balanced",
+      "venice_parameters": {
+        "enable_web_search": "auto",
+        "enable_web_citations": true
+      }
+    }
+  }
+}

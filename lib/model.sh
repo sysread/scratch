@@ -216,3 +216,286 @@ model:jq() {
 }
 
 export -f model:jq
+
+#===============================================================================
+# MODEL PROFILES (model:profile:*)
+#
+# See the file header for the conceptual split. Profiles are sourced from
+# data/models.json (repo-internal config, not user settings) and resolved
+# via recursive object merge (jq `*`) so variants inherit their base.
+#===============================================================================
+
+#-------------------------------------------------------------------------------
+# Param-to-capability mapping for profile validation.
+#
+# Top-level params: each key is a chat completion request parameter name,
+# the value is a comma-separated list of model capability flags that must
+# all be true for the model to support that parameter.
+#
+# Venice-specific params: same shape, but the keys are venice_parameters
+# field names.
+#
+# Adding a new mapping here teaches model:profile:validate about a new
+# parameter without changing the validation logic.
+#-------------------------------------------------------------------------------
+declare -gA _MODEL_PARAM_CAPABILITIES=(
+  [reasoning_effort]="supportsReasoning,supportsReasoningEffort"
+  [tools]="supportsFunctionCalling"
+  [tool_choice]="supportsFunctionCalling"
+  [logprobs]="supportsLogProbs"
+)
+
+declare -gA _MODEL_VENICE_PARAM_CAPABILITIES=(
+  [enable_web_search]="supportsWebSearch"
+  [enable_web_scraping]="supportsWebSearch"
+  [enable_web_citations]="supportsWebSearch"
+)
+
+#-------------------------------------------------------------------------------
+# model:profile:data-path
+#
+# Print the absolute path to the profile data file (data/models.json).
+# Resolves relative to this library's location, so it works regardless of
+# where the caller invoked it from.
+#-------------------------------------------------------------------------------
+model:profile:data-path() {
+  printf '%s/../data/models.json\n' "$_MODEL_SCRIPTDIR"
+}
+
+export -f model:profile:data-path
+
+#-------------------------------------------------------------------------------
+# model:profile:list
+#
+# Print all profile names (base + variants), sorted, one per line.
+#-------------------------------------------------------------------------------
+model:profile:list() {
+  local data_path
+  data_path="$(model:profile:data-path)"
+  if [[ ! -f "$data_path" ]]; then
+    die "model:profile: data file missing: $data_path"
+    return 1
+  fi
+
+  jq -r '(.base // {} | keys[]), (.variants // {} | keys[])' "$data_path" | sort
+}
+
+export -f model:profile:list
+
+#-------------------------------------------------------------------------------
+# model:profile:exists NAME
+#
+# Return 0 if NAME is defined as either a base or a variant, 1 otherwise.
+# Silent; suitable for use in conditionals.
+#-------------------------------------------------------------------------------
+model:profile:exists() {
+  local name="$1"
+  local data_path
+  data_path="$(model:profile:data-path)"
+  [[ -f "$data_path" ]] || return 1
+
+  # Merge base and variants into one keyspace and check via has(). Returns
+  # boolean true/false; jq -e exits 0 for true and 1 for false.
+  jq -e --arg n "$name" '((.base // {}) + (.variants // {})) | has($n)' "$data_path" > /dev/null 2>&1
+}
+
+export -f model:profile:exists
+
+#-------------------------------------------------------------------------------
+# model:profile:resolve NAME
+#
+# Print the fully-resolved JSON for a profile. For a base profile, this is
+# the base entry as-is. For a variant, the base is recursively resolved
+# first and then merged with the variant's overrides via jq's `*`
+# operator (deep recursive merge).
+#
+# The resolved object always has these top-level fields:
+#   model              - the model id string
+#   params             - object of top-level chat completion params
+#   venice_parameters  - object of venice-specific params (may be empty)
+#
+# Variants extending other variants work transitively because resolve
+# calls itself recursively to resolve the parent. Cycles are not detected
+# (would stack overflow); don't write cyclic profile definitions.
+#-------------------------------------------------------------------------------
+model:profile:resolve() {
+  local name="$1"
+  local data_path
+  local data
+  local entry
+  local extends
+  local base_resolved
+
+  data_path="$(model:profile:data-path)"
+  if [[ ! -f "$data_path" ]]; then
+    die "model:profile: data file missing: $data_path"
+    return 1
+  fi
+
+  data="$(cat "$data_path")"
+
+  # Try base first
+  entry="$(jq -c --arg n "$name" '.base[$n] // empty' <<< "$data")"
+  if [[ -n "$entry" ]]; then
+    # Normalize: ensure params and venice_parameters are present, even if empty
+    jq -c '. + {params: (.params // {}), venice_parameters: (.venice_parameters // {})}' <<< "$entry"
+    return 0
+  fi
+
+  # Try variant
+  entry="$(jq -c --arg n "$name" '.variants[$n] // empty' <<< "$data")"
+  if [[ -z "$entry" ]]; then
+    die "model:profile: not found: $name"
+    return 1
+  fi
+
+  extends="$(jq -r '.extends // empty' <<< "$entry")"
+  if [[ -z "$extends" ]]; then
+    die "model:profile: variant '$name' missing 'extends' field"
+    return 1
+  fi
+
+  base_resolved="$(model:profile:resolve "$extends")" || return 1
+
+  # Recursive merge: base * variant. The variant's keys win where they
+  # collide, and nested objects (params, venice_parameters) are merged
+  # rather than replaced. The 'extends' field is dropped from the output.
+  jq -c -n \
+    --argjson base "$base_resolved" \
+    --argjson var "$entry" \
+    '$base * ($var | del(.extends) | . + {params: (.params // {}), venice_parameters: (.venice_parameters // {})})'
+}
+
+export -f model:profile:resolve
+
+#-------------------------------------------------------------------------------
+# model:profile:model NAME
+#
+# Convenience: print just the .model field of the resolved profile.
+#-------------------------------------------------------------------------------
+model:profile:model() {
+  local name="$1"
+  model:profile:resolve "$name" | jq -r '.model'
+}
+
+export -f model:profile:model
+
+#-------------------------------------------------------------------------------
+# model:profile:extras NAME
+#
+# Print the JSON object that should be passed as chat:completion's third
+# argument (EXTRA_JSON). The shape is the resolved profile's params
+# flattened to top-level, with venice_parameters kept as a nested object.
+#
+# Example output:
+#   {"reasoning_effort":"medium","venice_parameters":{"enable_web_search":"auto"}}
+#
+# Empty venice_parameters are omitted from the output entirely so the
+# request body stays clean.
+#-------------------------------------------------------------------------------
+model:profile:extras() {
+  local name="$1"
+  model:profile:resolve "$name" | jq -c '
+    .params + (
+      if (.venice_parameters | length) > 0
+      then {venice_parameters: .venice_parameters}
+      else {}
+      end
+    )
+  '
+}
+
+export -f model:profile:extras
+
+#-------------------------------------------------------------------------------
+# model:profile:validate NAME
+#
+# Validate that a profile is internally consistent against the Venice
+# model registry. Three checks, in order:
+#
+#   1. The profile exists in data/models.json.
+#   2. The model id named by the profile exists in the registry cache.
+#      (Lazy-loads the registry if missing.)
+#   3. Every param and venice_parameter in the resolved profile is
+#      supported by the model's declared capabilities.
+#
+# On failure, dies with a message naming the specific problem.
+# On success, returns 0 silently.
+#
+# Capability mapping comes from _MODEL_PARAM_CAPABILITIES and
+# _MODEL_VENICE_PARAM_CAPABILITIES at the top of the profile section.
+# Unknown params (not in the mapping) are skipped - we cannot validate
+# what we do not know about, and Venice's API will reject them at
+# request time anyway.
+#-------------------------------------------------------------------------------
+model:profile:validate() {
+  local name="$1"
+
+  # 1. Profile exists in our config?
+  if ! model:profile:exists "$name"; then
+    die "model:profile: not found: $name"
+    return 1
+  fi
+
+  local resolved
+  resolved="$(model:profile:resolve "$name")" || return 1
+
+  local model_id
+  model_id="$(jq -r '.model' <<< "$resolved")"
+
+  # 2. Model exists in the registry?
+  if ! model:exists "$model_id"; then
+    die "model:profile: '$name' references unknown model '$model_id' (run: model:fetch to refresh the registry)"
+    return 1
+  fi
+
+  # 3. For each param in the profile, check the corresponding capability.
+  #
+  # Capability failures don't abort early - we set a `failed` flag, finish
+  # walking the params (so the user sees ALL the problems at once instead
+  # of fixing them one by one), then return 1 at the end if anything failed.
+  local param
+  local caps
+  local cap
+  local cap_value
+  local failed=0
+
+  while IFS= read -r param; do
+    [[ -z "$param" ]] && continue
+    caps="${_MODEL_PARAM_CAPABILITIES[$param]:-}"
+    [[ -z "$caps" ]] && continue # unknown param, skip
+
+    while IFS= read -r cap; do
+      [[ -z "$cap" ]] && continue
+      cap_value="$(model:jq "$model_id" ".model_spec.capabilities.${cap} // false")"
+      if [[ "$cap_value" != "true" ]]; then
+        warn "model:profile: '$name' uses param '$param' which requires capability '$cap', but model '$model_id' does not support it"
+        failed=1
+      fi
+    done < <(printf '%s\n' "${caps//,/$'\n'}")
+  done < <(jq -r '.params | keys[]' <<< "$resolved")
+
+  # Same for venice_parameters
+  while IFS= read -r param; do
+    [[ -z "$param" ]] && continue
+    caps="${_MODEL_VENICE_PARAM_CAPABILITIES[$param]:-}"
+    [[ -z "$caps" ]] && continue
+
+    while IFS= read -r cap; do
+      [[ -z "$cap" ]] && continue
+      cap_value="$(model:jq "$model_id" ".model_spec.capabilities.${cap} // false")"
+      if [[ "$cap_value" != "true" ]]; then
+        warn "model:profile: '$name' uses venice_parameters.$param which requires capability '$cap', but model '$model_id' does not support it"
+        failed=1
+      fi
+    done < <(printf '%s\n' "${caps//,/$'\n'}")
+  done < <(jq -r '.venice_parameters | keys[]' <<< "$resolved")
+
+  if ((failed != 0)); then
+    return 1
+  fi
+
+  return 0
+}
+
+export -f model:profile:validate

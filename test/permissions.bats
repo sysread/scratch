@@ -7,6 +7,7 @@ set -euo pipefail
 # - Commands and entrypoints in bin/ must be executable.
 # - Helper scripts in helpers/ must be executable.
 # - Library files in lib/ and libexec/ must NOT be executable.
+# - Static data files in data/ must NOT be executable.
 
 load "./helpers.sh"
 
@@ -52,6 +53,23 @@ setup() {
   while IFS= read -r f; do
     files+=("$f")
   done < <(git -C "$SCRATCH_HOME" ls-files libexec/)
+
+  [[ ${#files[@]} -eq 0 ]] && return 0
+
+  for f in "${files[@]}"; do
+    if [[ -x "$SCRATCH_HOME/$f" ]]; then
+      echo "expected non-executable: $f"
+      return 1
+    fi
+  done
+}
+
+@test "data/ files are not executable" {
+  local -a files=()
+
+  while IFS= read -r f; do
+    files+=("$f")
+  done < <(git -C "$SCRATCH_HOME" ls-files data/)
 
   [[ ${#files[@]} -eq 0 ]] && return 0
 

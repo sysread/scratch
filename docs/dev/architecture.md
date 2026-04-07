@@ -116,6 +116,11 @@ lib/          sourced libraries (not executable)
 libexec/      internal non-bash executables
   embed.exs       Elixir embedding generator (called by helpers/embed)
 
+data/         static config data shipped in the repo (not user settings)
+  models.json     model profile definitions (smart/balanced/fast bases +
+                  coding/web variants), read by lib/model.sh's
+                  model:profile:* functions
+
 helpers/      bash scripts that are not subcommands
   setup                  runtime dep installer (bash 3.2 compatible)
   run-tests              clean-env bats runner with HOME isolation + curl guard
@@ -169,6 +174,11 @@ docs/
 - `libexec/` files are internal non-bash executables (e.g., Elixir scripts).
   They MUST NOT have the `+x` bit set.
   A wrapper in `helpers/` handles environment setup and execs them with the right interpreter.
+
+- `data/` files are static config data shipped with the repo (e.g., model profile definitions in `data/models.json`).
+  They MUST NOT have the `+x` bit set.
+  Tracked in git, updated via code changes, never written by scratch at runtime.
+  This is distinct from `~/.config/scratch/...` which is the user's runtime config and IS written by scratch.
 
 The `permissions.bats` test enforces these rules at test time.
 
