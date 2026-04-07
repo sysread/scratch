@@ -138,9 +138,26 @@ export -f tmp:cleanup
 # Install EXIT/INT/TERM/HUP traps once per process. Chains with any existing
 # trap handlers so we don't break other cleanup logic. Safe under set -euo
 # pipefail - cleanup is wrapped in || true.
+#
+# IMPORTANT: skipped in subshells (where $BASHPID != $$). Subshells inherit
+# the parent's traps, but installing our own AND chaining the inherited
+# parent traps causes problems when the parent's traps assume they're
+# running in the parent's context. Specifically, bats's bats_teardown_trap
+# inspects state that exists only in the test's main shell; if it fires
+# in a subshell created by `run`, bats reports a spurious test failure.
+#
+# In a subshell we're typically running for a short, well-scoped operation
+# that exits cleanly, and the parent's trap will still fire when the
+# parent eventually exits, so cleanup still happens. Skipping the install
+# in subshells is the right move.
 #-------------------------------------------------------------------------------
 tmp:install-traps() {
   if [[ "$_TMPFILES_TRAPS_INSTALLED" == "1" ]]; then
+    return 0
+  fi
+
+  # Skip in subshells - see header comment for why.
+  if [[ "$BASHPID" != "$$" ]]; then
     return 0
   fi
 
