@@ -111,6 +111,49 @@ Functions:
 
 See the "Entry Point and the Subcommand System" section in `architecture.md` for the full design.
 
+### `lib/venice.sh`
+
+Foundation for the Venice API integration.
+Depends on `base.sh`.
+Requires `curl` and `jq` at source time.
+
+Functions:
+- `venice:api-key` - print the API key; tries `SCRATCH_VENICE_API_KEY` first, then `VENICE_API_KEY`; dies with a clear message if neither is set
+- `venice:base-url` - print the hard-coded Venice API base URL
+- `venice:config-dir` - print (and create) `~/.config/scratch/venice/`; resolves under `$HOME`, so tests running with isolated HOME get isolated config automatically
+- `venice:curl METHOD PATH [BODY]` - authenticated request wrapper; body via stdin to avoid argv limits; translates Venice-specific error codes (401/402/429/503/504) into user-targeted `die` messages
+
+### `lib/model.sh`
+
+Cached Venice model registry.
+Depends on `base.sh` and `venice.sh`.
+Requires `jq`.
+
+Functions:
+- `model:cache-path` - print the absolute path to the cache file
+- `model:fetch` - pull `?type=all` from Venice, atomic write to the cache (tmp + mv)
+- `model:list [TYPE]` - print sorted model ids, optionally filtered by top-level `type` field
+- `model:get ID` - print the full JSON object for one model; dies if not found
+- `model:validate ID` - silent predicate; returns 0 if cached, 1 otherwise
+- `model:jq ID EXPR` - run an arbitrary jq expression rooted at one model's object
+
+All read functions lazy-load the cache through the private `_model:ensure-cache` helper.
+First call from a fresh install triggers `model:fetch` automatically.
+There is no TTL; refresh the cache by calling `model:fetch` explicitly.
+
+### `lib/chat.sh`
+
+Venice chat completions wrapper.
+Depends on `base.sh` and `venice.sh`.
+Requires `jq`.
+
+Functions:
+- `chat:completion MODEL MESSAGES_JSON [EXTRA_JSON]` - POST `/chat/completions` with a shallow-merged request body; returns the full response on stdout
+- `chat:extract-content` - stdin-only; reads a completion response and prints `.choices[0].message.content` with `// ""` fallback
+
+The library deliberately has no message builder API - callers construct messages arrays themselves and pass them as JSON.
+Extras (`temperature`, `venice_parameters`, `tools`, `response_format`, etc.) go in the third argument as a JSON object that gets merged shallowly into the request body.
+
 ### `lib/cmd.sh`
 
 Declarative command definition framework.
@@ -206,11 +249,32 @@ Also the target of `scratch setup` and `scratch doctor --fix`.
 
 ### `helpers/run-tests`
 
-Test runner.
+Unit test runner.
 Runs bats under `env -i` with a minimal allowlist (PATH, HOME, OSTYPE, TMPDIR, TERM) to prevent the user's shell profile from leaking into the test runner.
+
+Isolation guarantees:
+- `HOME` is overridden to a fresh `mktemp -d` directory, cleaned up on exit via trap.
+- A curl stub is installed on PATH that fails loudly if any test tries to hit the network without mocking it. Per-test stubs via `make_stub` override transparently.
+
+Test discovery is a non-recursive `test/*.bats` glob, so integration tests under `test/integration/` do not run by default.
 
 Detects GNU parallel and uses inter-file parallelism (`-j`) capped at 8 jobs.
 Warns and falls back to serial if parallel is missing.
+
+### `helpers/run-integration-tests`
+
+Integration test runner for tests that make real Venice API calls.
+
+Key differences from `run-tests`:
+- HOME is still isolated to a tmpdir (prevents polluting the user's real venice model cache).
+- NO curl network guard.
+- Forwards `SCRATCH_VENICE_API_KEY` and `VENICE_API_KEY` from the caller's environment.
+- Serial only (no parallelism against a paid, rate-limited API).
+- Runs only `test/integration/*.bats`.
+
+Individual tests `skip` cleanly if no API key is set, so contributors without one still get a green run.
+Never run automatically in CI.
+Opt in via `mise run test:integration` or by calling the script directly.
 
 ### `helpers/root-dispatcher`
 
@@ -252,6 +316,10 @@ Requires bash wrapper for the clang workaround (see `helpers/embed`).
 | `test/cmd.bats` | Tests for `lib/cmd.sh` |
 | `test/dispatch.bats` | Tests for `lib/dispatch.sh` |
 | `test/project.bats` | Tests for `lib/project.sh` |
+| `test/venice.bats` | Tests for `lib/venice.sh` (stubs curl binary) |
+| `test/model.bats` | Tests for `lib/model.sh` (overrides `venice:curl` function) |
+| `test/chat.bats` | Tests for `lib/chat.sh` (overrides `venice:curl`, captures request body) |
+| `test/integration/venice.bats` | Opt-in integration tests against the real Venice API |
 | `test/scratch-doctor.bats` | Tests for `bin/scratch-doctor` |
 | `test/lint.bats` | Self-reflection: shellcheck |
 | `test/formatting.bats` | Self-reflection: shfmt drift |

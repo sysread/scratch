@@ -108,28 +108,38 @@ lib/          sourced libraries (not executable)
   project.sh      project:save, project:load, project:detect (worktree-aware)
   cmd.sh          cmd:define, cmd:parse, cmd:get (declarative command framework)
   dispatch.sh     dispatch:try, dispatch:usage (parameterized subcommand dispatch)
+  venice.sh      venice:api-key, venice:curl (Venice API primitives)
+  model.sh       model:fetch, model:list, model:validate, model:jq (cached registry)
+  chat.sh        chat:completion, chat:extract-content (chat completions)
 
 libexec/      internal non-bash executables
   embed.exs       Elixir embedding generator (called by helpers/embed)
 
 helpers/      bash scripts that are not subcommands
-  setup              runtime dep installer (bash 3.2 compatible)
-  run-tests          clean-env bats runner with parallel support
-  embed              bash wrapper around libexec/embed.exs (sets CXX for EXLA)
-  root-dispatcher    target of bin/scratch exec; top-level subcommand dispatcher
+  setup                  runtime dep installer (bash 3.2 compatible)
+  run-tests              clean-env bats runner with HOME isolation + curl guard
+  run-integration-tests  real-API runner (no curl guard; forwards API key)
+  embed                  bash wrapper around libexec/embed.exs (sets CXX for EXLA)
+  root-dispatcher        target of bin/scratch exec; top-level subcommand dispatcher
 
-test/         bats test suite
+test/         bats test suite (unit tests only - non-recursive)
   helpers.sh                is, diag, make_stub, prepend_stub_path
   base.bats                 tests for lib/base.sh
   cmd.bats                  tests for lib/cmd.sh
   dispatch.bats             tests for lib/dispatch.sh
   project.bats              tests for lib/project.sh
+  venice.bats               tests for lib/venice.sh
+  model.bats                tests for lib/model.sh
+  chat.bats                 tests for lib/chat.sh
   scratch-doctor.bats
   lint.bats                 self-reflection: shellcheck
   formatting.bats           self-reflection: shfmt drift
   permissions.bats          self-reflection: +x policy
   anti-slop.bats            self-reflection: no smart quotes or em dashes
   subcommand-contract.bats  self-reflection: subcommands honor --help
+
+test/integration/   bats tests that hit the REAL venice API (opt-in only)
+  venice.bats       end-to-end smoke tests for venice + model + chat
 
 docs/
   guides/     user-facing documentation
@@ -180,6 +190,12 @@ base.sh              (no deps)
   +-- cmd.sh         (depends on base ONLY)
   |
   +-- dispatch.sh    (depends on base ONLY; optionally uses tui:format at runtime)
+  |
+  +-- venice.sh      (depends on base, requires curl + jq)
+        |
+        +-- model.sh (depends on base + venice, requires jq)
+        |
+        +-- chat.sh  (depends on base + venice, requires jq)
 ```
 
 `cmd.sh` deliberately does not source `tui.sh` at load time, because tui.sh requires `gum` and `jq` at source time.
@@ -254,6 +270,73 @@ Multi-return functions use bash namerefs (`local -n`).
 
 `bin/scratch-project` provides CRUD: `list`, `show`, `create`, `edit`, `delete`.
 Interactive commands use `gum` for input and confirmation.
+
+## Venice Integration (venice.sh, model.sh, chat.sh)
+
+Scratch talks to [Venice.ai](https://docs.venice.ai) via a three-layer library stack.
+The split keeps HTTP plumbing, registry caching, and chat request shaping each in their own place.
+
+### `lib/venice.sh` - the foundation
+
+Owns API key resolution, the base URL, and the `venice:curl` wrapper.
+
+Key resolution tries `SCRATCH_VENICE_API_KEY` first, then `VENICE_API_KEY`.
+The `SCRATCH_` prefix lets a contributor override the general key for scratch-specific work without touching their shell profile.
+Dies with a clear message if neither is set.
+
+`venice:curl METHOD PATH [BODY]` injects the `Authorization: Bearer $key` header, posts the body via stdin (`-d @-`) to avoid argv length limits, writes the response body to a temp file (`-o`) and captures the status code (`-w '%{http_code}'`) separately.
+Venice's documented error codes (401, 402, 429, 503, 504) get translated into user-targeted `die` messages: "insufficient credits, top up at...", "rate limited, wait and retry", etc.
+
+### `lib/model.sh` - the registry cache
+
+The model list is cached as the raw Venice response at `~/.config/scratch/venice/models.json`.
+`model:fetch` always requests `?type=all` so one call populates everything.
+Writes are atomic (`.tmp` then `mv`) so a failed fetch never corrupts a previously-good cache.
+
+All read functions (`model:list`, `model:get`, `model:validate`, `model:jq`) lazy-load the cache through a private `_model:ensure-cache` helper.
+First use from a fresh install triggers the fetch automatically.
+No TTL - the cache persists until the user calls `model:fetch` again to refresh.
+
+`model:jq ID EXPR` takes an arbitrary jq expression rooted at a single model's object.
+This is the escape hatch for reading capability flags without writing wrapper functions for every field.
+
+### `lib/chat.sh` - chat completions
+
+`chat:completion MODEL MESSAGES_JSON [EXTRA_JSON]` is the whole API.
+Callers build messages as JSON themselves (via jq, heredocs, or literal strings) and pass optional extras that get shallow-merged into the request body.
+That way the library has no opinion about temperature, venice_parameters, tools, response_format, or any of the other request fields - callers just pass them in `EXTRA_JSON`.
+
+`chat:extract-content` is stdin-oriented so it composes in pipelines:
+
+```bash
+chat:completion "$model" "$messages" | chat:extract-content
+```
+
+The `// ""` fallback in its jq expression means tool-call responses (where `.choices[0].message.content` is null) return an empty string instead of the literal text "null".
+
+## Test Isolation
+
+Unit tests run under `helpers/run-tests` with two isolation guarantees:
+
+1. **HOME is a fresh mktemp directory** for the whole run, cleaned up on exit via trap.
+   Any code that resolves `~/.config/scratch/...` lands in a throwaway location and cannot touch the developer's real config.
+   Individual test files additionally override `HOME=$BATS_TEST_TMPDIR/home` per test so cache state never leaks from one test to the next.
+
+2. **A curl network guard** is installed on PATH.
+   The guard is a curl stub that exits non-zero with a loud error message pointing the test writer at `docs/dev/conventions.md`.
+   Per-test stubs made via `make_stub` prepend `BATS_TEST_TMPDIR/stubbin` ahead of the guard, so tests that legitimately mock curl override transparently.
+
+Neither guarantee applies to integration tests.
+Integration tests run under `helpers/run-integration-tests`, which:
+
+- Still isolates HOME to a tmpdir (prevents polluting the user's real venice model cache).
+- Does NOT install the curl guard (integration tests hit the real network by definition).
+- Forwards `SCRATCH_VENICE_API_KEY` and `VENICE_API_KEY` from the caller's environment.
+- Runs serially - no parallelism against a paid, rate-limited API.
+
+Integration tests are never run in CI and never part of `mise run test`.
+Opt in via `mise run test:integration` or call the runner directly.
+Individual tests `skip` cleanly if no API key is set, so contributors without one still get a green run with a "skipped all" result.
 
 ## Dependency Declaration and Doctor
 

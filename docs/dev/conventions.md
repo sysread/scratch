@@ -131,22 +131,57 @@ No table-driven tests.
 Minimal custom helpers: `is()` for equality, `diag()` for diagnostics, `make_stub` / `prepend_stub_path` for command stubbing.
 No bats-assert or bats-support plugins.
 
-Mocking via function override (in-process) or PATH-prepended stub scripts (subprocess isolation).
-
-Tests run under `env -i` with an explicit allowlist (PATH, HOME, OSTYPE, TMPDIR, TERM).
-This prevents the user's shell profile from leaking into the test runner.
-
 `setup()` per file.
 No `setup_file()`.
 No `teardown()` - relies on `BATS_TEST_TMPDIR` lifecycle for cleanup.
 
 Fake repos constructed with `git init` in `$BATS_TEST_TMPDIR`.
 
-Network calls are never made in tests.
-External commands are stubbed or sentinel-guarded.
-
 Self-reflection tests (lint, formatting, permissions, anti-slop, subcommand-contract) enforce structural conventions at test time.
 These catch drift that code review might miss.
+
+### Isolation Guarantees
+
+Unit tests run under `helpers/run-tests` with two layers of isolation:
+
+1. **HOME is a fresh mktemp directory** for the whole run, cleaned up on exit via trap.
+   Any code that resolves `~/.config/scratch/...` lands in a throwaway location.
+   Individual test files should additionally override `HOME=$BATS_TEST_TMPDIR/home` in `setup()` so cache state never leaks from one test to the next within a run.
+
+2. **A curl network guard** is installed on PATH.
+   If a unit test tries to run curl without first stubbing it, the guard fires with a clear error message telling you what to do.
+
+Unit tests MUST NOT hit the network.
+External commands (curl, git in certain contexts, gcloud, etc.) must be mocked via `make_stub` (PATH-prepended stub scripts, subprocess-safe) or by overriding a wrapping bash function directly in the test body (simpler when the wrapper is a bash function you control).
+
+Example of function override (the recommended approach when the library under test wraps an external tool in a bash function):
+
+```bash
+@test "model:list returns the cached ids" {
+  venice:curl() { cat fixture.json; }  # overrides the wrapper, no curl needed
+  seed_cache
+  run model:list
+  ...
+}
+```
+
+The HOME override is a safety net; the network guard is a safety net; neither replaces good per-test hygiene.
+
+### Integration Tests
+
+Tests that need to make real API calls go under `test/integration/*.bats` and run via `helpers/run-integration-tests` (or `mise run test:integration`).
+
+Integration tests:
+- Are never run in CI.
+- Are never part of `mise run test`.
+- Still get HOME isolation (so they don't pollute the user's real config).
+- Do NOT get the curl network guard.
+- Forward `SCRATCH_VENICE_API_KEY` and `VENICE_API_KEY` from the caller's environment.
+- MUST call `skip` if no API key is set, so contributors without one still get a green run.
+- Run serially - no parallelism against a paid, rate-limited API.
+
+Integration tests are sanity checks: "our request body matches what the API accepts", "our response parser handles real responses", "known error codes come back as expected".
+They are not unit tests for logic - that's what the mocked unit tests are for.
 
 ## Comments
 
