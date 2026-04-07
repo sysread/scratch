@@ -11,6 +11,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history is needed for the anti-slop commit-message scan
+          # in test/anti-slop.bats - it walks commits between origin/main
+          # (or @{upstream}) and HEAD, which requires more than a shallow
+          # clone. fetch-depth: 0 means "complete history".
+          fetch-depth: 0
 
       # Explicit cache for mise-managed tool installations. The jdx/mise-action
       # has its own caching, but installing erlang/elixir from source is slow
