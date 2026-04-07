@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 
 # vim: set ft=bash
+# shellcheck disable=SC2016
 set -euo pipefail
 
 #-------------------------------------------------------------------------------
@@ -361,4 +362,128 @@ make_fake_tool() {
   run tool:invoke ghost '{}'
   is "$status" 1
   [[ "$output" == *"not found"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# tool:invoke-parallel
+# ---------------------------------------------------------------------------
+
+@test "tool:invoke-parallel returns [] for empty input" {
+  export SCRATCH_TOOL_SKIP_AVAILABILITY=1
+  local result
+  result="$(tool:invoke-parallel '[]')"
+  is "$result" "[]"
+}
+
+@test "tool:invoke-parallel runs a single tool and returns ok:true with stdout" {
+  make_fake_tool alpha 'echo "alpha output"'
+  export SCRATCH_TOOL_SKIP_AVAILABILITY=1
+
+  local calls='[{"id":"call_1","name":"alpha","args":{}}]'
+  local result
+  result="$(tool:invoke-parallel "$calls")"
+
+  run jq -r 'length' <<< "$result"
+  is "$output" "1"
+
+  run jq -r '.[0].tool_call_id' <<< "$result"
+  is "$output" "call_1"
+
+  run jq -r '.[0].ok' <<< "$result"
+  is "$output" "true"
+
+  run jq -r '.[0].content' <<< "$result"
+  is "$output" "alpha output"
+}
+
+@test "tool:invoke-parallel preserves input order regardless of completion order" {
+  # Create three tools where the FIRST sleeps the longest. If output
+  # respected wait order, slow would come last; we want input order.
+  make_fake_tool slow 'sleep 0.3; echo "from slow"'
+  make_fake_tool medium 'sleep 0.1; echo "from medium"'
+  make_fake_tool fast 'echo "from fast"'
+  export SCRATCH_TOOL_SKIP_AVAILABILITY=1
+
+  local calls='[
+    {"id":"call_1","name":"slow","args":{}},
+    {"id":"call_2","name":"medium","args":{}},
+    {"id":"call_3","name":"fast","args":{}}
+  ]'
+  local result
+  result="$(tool:invoke-parallel "$calls")"
+
+  run jq -r '.[0].tool_call_id' <<< "$result"
+  is "$output" "call_1"
+
+  run jq -r '.[0].content' <<< "$result"
+  is "$output" "from slow"
+
+  run jq -r '.[2].tool_call_id' <<< "$result"
+  is "$output" "call_3"
+
+  run jq -r '.[2].content' <<< "$result"
+  is "$output" "from fast"
+}
+
+@test "tool:invoke-parallel handles mixed success and failure" {
+  make_fake_tool good 'echo "all ok"'
+  make_fake_tool bad 'echo "kaboom" >&2; exit 1'
+  export SCRATCH_TOOL_SKIP_AVAILABILITY=1
+
+  local calls='[
+    {"id":"a","name":"good","args":{}},
+    {"id":"b","name":"bad","args":{}}
+  ]'
+  local result
+  result="$(tool:invoke-parallel "$calls")"
+
+  run jq -r '.[0].ok' <<< "$result"
+  is "$output" "true"
+
+  run jq -r '.[0].content' <<< "$result"
+  is "$output" "all ok"
+
+  run jq -r '.[1].ok' <<< "$result"
+  is "$output" "false"
+
+  run jq -r '.[1].content' <<< "$result"
+  is "$output" "kaboom"
+}
+
+@test "tool:invoke-parallel synthesizes content for silent failures" {
+  # Tool exits non-zero but writes nothing to stderr. The synthesized
+  # fallback should give the LLM something actionable.
+  make_fake_tool quiet 'exit 5'
+  export SCRATCH_TOOL_SKIP_AVAILABILITY=1
+
+  local calls='[{"id":"q","name":"quiet","args":{}}]'
+  local result
+  result="$(tool:invoke-parallel "$calls")"
+
+  run jq -r '.[0].ok' <<< "$result"
+  is "$output" "false"
+
+  run jq -r '.[0].content' <<< "$result"
+  [[ "$output" == *"ERROR"* ]]
+  [[ "$output" == *"quiet"* ]]
+  [[ "$output" == *"5"* ]]
+}
+
+@test "tool:invoke-parallel passes args from each call to its tool" {
+  # Each tool echoes its args back. We send different args per call.
+  make_fake_tool echoer 'echo "$SCRATCH_TOOL_ARGS_JSON"'
+  export SCRATCH_TOOL_SKIP_AVAILABILITY=1
+
+  local calls='[
+    {"id":"1","name":"echoer","args":{"x":1}},
+    {"id":"2","name":"echoer","args":{"y":2}}
+  ]'
+  local result
+  result="$(tool:invoke-parallel "$calls")"
+
+  run jq -r '.[0].content' <<< "$result"
+  is "$output" '{"x":1}'
+
+  run jq -r '.[1].content' <<< "$result"
+  is "$output" '{"y":2}'
 }

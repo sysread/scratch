@@ -364,3 +364,124 @@ tool:invoke() {
 }
 
 export -f tool:invoke
+
+#-------------------------------------------------------------------------------
+# tool:invoke-parallel CALLS_JSON
+#
+# Execute multiple tool calls in parallel and assemble the results.
+#
+# CALLS_JSON is a JSON array of {id, name, args} objects, matching the
+# OpenAI tool_calls response shape (with .args being the already-parsed
+# argument object, not the JSON string the API uses).
+#
+# Forks one background job per call. Each job writes its captured stdout,
+# stderr, and exit code to numbered temp files. The parent waits for all
+# jobs to finish, then assembles a JSON array of results in *input order*
+# (not wait order):
+#
+#   [{"tool_call_id": "...", "content": "...", "ok": true|false}, ...]
+#
+# Where:
+#   ok=true  -> content is the tool's stdout
+#   ok=false -> content is the tool's stderr (or a synthesized error if
+#               stderr was empty)
+#
+# Empty CALLS_JSON returns "[]".
+#
+# Failures are encoded as ok:false; the function does NOT die on individual
+# failures, so a single broken tool doesn't kill the whole batch.
+#
+# CRITICAL: tmp:make is called in the PARENT shell. Children inherit the
+# already-allocated paths via the bg job environment. tmp:make uses an
+# in-memory registry that lives in the parent process; calling it from a
+# subshell would lose the registration and the cleanup would skip the file.
+#-------------------------------------------------------------------------------
+tool:invoke-parallel() {
+  local calls_json="$1"
+  local count
+  local i
+  local id
+  local name
+  local args
+  local rc
+  local content
+  local ok
+  local results='[]'
+
+  # Empty input -> empty result, fast path
+  count="$(jq 'length' <<< "$calls_json")"
+  if ((count == 0)); then
+    printf '%s\n' "$results"
+    return 0
+  fi
+
+  # Allocate the work directory in the PARENT shell so tmp:track's registry
+  # records it. tmp:make is for files; for a directory we use mktemp -d
+  # directly and manually tmp:track.
+  local workdir
+  workdir="$(mktemp -d -t scratch-tool-parallel.XXXXXX)"
+  tmp:track "$workdir"
+  tmp:install-traps
+
+  # Fork one bg job per call. Each writes to:
+  #   <workdir>/<i>.id      the tool_call_id
+  #   <workdir>/<i>.out     stdout from main
+  #   <workdir>/<i>.err     stderr from main
+  #   <workdir>/<i>.status  the exit code
+  for ((i = 0; i < count; i++)); do
+    id="$(jq -r ".[$i].id" <<< "$calls_json")"
+    name="$(jq -r ".[$i].name" <<< "$calls_json")"
+    args="$(jq -c ".[$i].args" <<< "$calls_json")"
+
+    printf '%s' "$id" > "${workdir}/${i}.id"
+
+    # Background job. tool:invoke captures into globals, but we're in a
+    # subshell where the globals don't leak back to the parent. We cat
+    # them into the workdir files, then the parent reads those files.
+    #
+    # set +e in the subshell because tool:invoke is allowed to return
+    # non-zero - we capture the rc into the .status file rather than
+    # propagating it as a subshell failure.
+    {
+      set +e
+      tool:invoke "$name" "$args" 2> /dev/null
+      rc=$?
+      printf '%s' "$rc" > "${workdir}/${i}.status"
+      printf '%s' "$_TOOL_INVOKE_STDOUT" > "${workdir}/${i}.out"
+      printf '%s' "$_TOOL_INVOKE_STDERR" > "${workdir}/${i}.err"
+    } &
+  done
+
+  wait
+
+  # Reassemble results in input order
+  for ((i = 0; i < count; i++)); do
+    id="$(cat "${workdir}/${i}.id")"
+    rc="$(cat "${workdir}/${i}.status")"
+    name="$(jq -r ".[$i].name" <<< "$calls_json")"
+
+    if [[ "$rc" == "0" ]]; then
+      content="$(cat "${workdir}/${i}.out")"
+      ok=true
+    else
+      content="$(cat "${workdir}/${i}.err")"
+      ok=false
+      # Fallback for silent failures: tool exited non-zero but wrote
+      # nothing to stderr. Synthesize a usable error message so the LLM
+      # always gets actionable content.
+      if [[ -z "$content" ]]; then
+        content="ERROR: tool '$name' exited with status $rc"
+      fi
+    fi
+
+    results="$(jq -c \
+      --arg id "$id" \
+      --arg c "$content" \
+      --argjson ok "$ok" \
+      '. + [{tool_call_id: $id, content: $c, ok: $ok}]' <<< "$results")"
+  done
+
+  printf '%s\n' "$results"
+}
+
+export -f tool:invoke-parallel
