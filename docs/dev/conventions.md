@@ -111,6 +111,70 @@ Strict ordering:
 Libraries MUST NOT have the executable bit set.
 The permissions test enforces this.
 
+## LLM Tool Structure (tools/ directory)
+
+The `tools/` directory is **reserved for LLM tool calling**. Do not park unrelated scripts here. If you need a general-purpose script, it goes in `helpers/` (if it's a dev/build helper) or as a `bin/scratch-<verb>` subcommand (if it's a user-facing command).
+
+Each tool is a self-contained directory under `tools/<name>/` with three required files. The format borrows from fnord's "frob" system, with one scratch-specific addition.
+
+```
+tools/<name>/
+  spec.json     OpenAI function calling spec - the inner {name, description, parameters} object
+  main          executable, any language; receives args via SCRATCH_TOOL_ARGS_JSON env var
+  is-available  bash; runtime gate AND dependency manifest (see below)
+```
+
+Naming: tool names match `^[a-z][a-z0-9_-]*$`. The directory basename must equal the spec.json `.name` field. Both rules are enforced by `test/95-tool-contract.bats`.
+
+Output semantics: exit 0 + stdout content goes to the LLM as the tool result. Non-zero exit + stderr content goes to the LLM as the failure result. Strict separation, no merging. This lets tools write progress notes to stderr without polluting their success output.
+
+The environment contract for `main` (set by `tool:invoke`):
+- `SCRATCH_TOOL_ARGS_JSON` - the LLM's argument object as JSON (always set; `{}` for no-arg tools)
+- `SCRATCH_TOOL_DIR` - the tool's own directory
+- `SCRATCH_HOME` - scratch repo root (so bash tools can `source "$SCRATCH_HOME/lib/..."`)
+- `SCRATCH_PROJECT` and `SCRATCH_PROJECT_ROOT` - only set if `project:detect` succeeds
+
+### `is-available` is double-duty: runtime gate AND dependency manifest
+
+This is the scratch-specific addition to fnord's frob format and the rule that makes the tool subsystem self-documenting.
+
+Every tool's `is-available` script MUST:
+
+1. Source `lib/base.sh` (using `$SCRATCH_HOME` to locate it).
+2. Call `has-commands` for every external program the tool needs.
+
+Same line does both jobs:
+
+- **At runtime,** `has-commands` actually verifies the tool's dependencies are present and dies with the standard install hint if any are missing.
+- **At doctor scan time,** the textual scanner finds the `has-commands` line and attributes the declared commands to `tool:<name>` in the doctor's report. No separate registration step.
+
+Without the source line, `has-commands` would be undefined and the script would fail. Without the `has-commands` call, the script would be a no-op gate (passing always) AND the doctor would have nothing to discover. Both are wrong; the contract test enforces both properties.
+
+Example (`tools/notify/is-available`):
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"
+
+# notify wraps tui:* (which uses gum) and parses args via jq.
+has-commands gum jq
+```
+
+After this lands, `scratch doctor` shows `gum  (lib tool:notify)` - automatic combined attribution from both the lib stack and the notify tool, no manual registration anywhere.
+
+### Tool naming and reserved directory
+
+The `tools/` directory is generic-sounding but **reserved for LLM tools only**. Don't add general scripts there. The reasons:
+
+1. `dispatch:list` and the doctor scanner walk `tools/*` expecting the three-file contract.
+2. `test/95-tool-contract.bats` will fail loudly on any directory that doesn't match.
+3. Future tooling (agents, gating, sandboxing) will assume everything under `tools/` is an LLM tool.
+
+If you want to add a general script, use `helpers/` (dev/build helper) or `bin/scratch-<verb>` (user-facing command).
+
 ## Formatting
 
 `shfmt` via `.editorconfig`.
@@ -264,8 +328,8 @@ It guarantees that:
 - `scratch doctor` can give users a pre-flight checklist of what's installed and what isn't, with per-command attribution showing which scratch component needs each tool.
 - Adding or removing functionality automatically updates the reported dependency surface, since declarations track real usage.
 
-Runtime commands are declared via `has-commands <cmd1> <cmd2>` at library source time or at the top of a subcommand/helper script.
-Doctor scans `bin/`, `lib/`, and `helpers/` for these declarations.
+Runtime commands are declared via `has-commands <cmd1> <cmd2>` at library source time, at the top of a subcommand/helper script, or in an LLM tool's `is-available` script.
+Doctor scans `bin/`, `lib/`, `helpers/`, and `tools/<name>/is-available` for these declarations, attributing them to the file's component (subcommand verb, `lib`, helper basename, or `tool:<name>`).
 
 Environment variables are declared via `require-env-vars <VAR1> <VAR2>`.
 Same scanning/attribution pattern.

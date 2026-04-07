@@ -173,15 +173,44 @@ The capability mapping for validation lives in two private associative arrays at
 ### `lib/chat.sh`
 
 Venice chat completions wrapper.
-Depends on `base.sh` and `venice.sh`.
+Depends on `base.sh`, `venice.sh`, and `tool.sh`.
 Requires `jq`.
 
 Functions:
 - `chat:completion MODEL MESSAGES_JSON [EXTRA_JSON]` - POST `/chat/completions` with a shallow-merged request body; returns the full response on stdout
 - `chat:extract-content` - stdin-only; reads a completion response and prints `.choices[0].message.content` with `// ""` fallback
+- `chat:complete-with-tools MODEL MESSAGES_JSON TOOL_NAMES_JSON [EXTRA_JSON]` - the recursion driver. Wraps `chat:completion` in a loop that executes any tool_calls the model returns (via `tool:invoke-parallel`), appends the assistant message and tool result messages to the conversation, and recurses until the model returns a plain text response. No max-rounds cap by design. Defensive `.function.arguments | (fromjson? // {})` parsing so a malformed argument string falls back to `{}` instead of crashing the recursion. Empty `TOOL_NAMES_JSON` dies (use `chat:completion` directly for the no-tools case).
 
 The library deliberately has no message builder API - callers construct messages arrays themselves and pass them as JSON.
-Extras (`temperature`, `venice_parameters`, `tools`, `response_format`, etc.) go in the third argument as a JSON object that gets merged shallowly into the request body.
+Extras (`temperature`, `venice_parameters`, `tools`, `response_format`, etc.) go in the third argument as a JSON object that gets merged shallowly into the request body. Note that `chat:complete-with-tools` always overrides `tools` with what it built from `TOOL_NAMES_JSON`.
+
+### `lib/tool.sh`
+
+Tool calling infrastructure.
+Depends on `base.sh`, `tempfiles.sh`, `project.sh`.
+Requires `jq`.
+
+A "tool" is a self-contained directory under `tools/<name>/` with three required files:
+- `spec.json` - OpenAI function-calling JSON spec (the inner `{name, description, parameters}` object)
+- `main` - executable, any language. Receives args via `SCRATCH_TOOL_ARGS_JSON` env var. Exit 0 + stdout = success result; non-zero + stderr = failure result. Strict separation, no merging.
+- `is-available` - bash script that doubles as runtime gate AND dependency manifest. Sources `lib/base.sh` and calls `has-commands` for any external programs the tool needs. The doctor scanner picks up these declarations and attributes them to `tool:<name>`.
+
+Functions:
+- `tool:tools-dir` - print the tools directory (honors `SCRATCH_TOOLS_DIR` for tests)
+- `tool:list` - sorted tool names, one per line
+- `tool:exists NAME` - silent predicate
+- `tool:dir NAME` - absolute path; dies if missing
+- `tool:spec NAME` - raw spec.json contents
+- `tool:specs-json [NAMES...]` - JSON array of OpenAI-wire-format wrapped specs `[{type:"function", function:<spec>}]`. Filters out unavailable tools unless `SCRATCH_TOOL_SKIP_AVAILABILITY=1`.
+- `tool:available NAME` - runs `is-available` with the env contract; captures stderr in `_TOOL_AVAILABILITY_ERR`
+- `tool:invoke NAME ARGS_JSON` - synchronously execute `main` with the env contract. Captures stdout into `_TOOL_INVOKE_STDOUT` and stderr into `_TOOL_INVOKE_STDERR` via tempfile redirects (NOT process substitution, to preserve exit codes). Returns the tool's exit code. Returns 127 if `is-available` fails first.
+- `tool:invoke-parallel CALLS_JSON` - parallel execution via background jobs + wait. `CALLS_JSON` is a JSON array of `{id, name, args}` matching the OpenAI tool_calls shape. Forks one bg job per call, captures each tool's streams to numbered temp files in a `tmp:make`-allocated workdir (in the parent shell, NOT in subshells, because `tmp:make`'s registry lives in parent process memory). Results assemble in input order regardless of completion order. Failures encode as `ok:false`; silent failures get a synthesized `ERROR: tool '<name>' exited with status <code>` fallback.
+
+Environment contract for tool main scripts:
+- `SCRATCH_TOOL_ARGS_JSON` - LLM args as JSON object
+- `SCRATCH_TOOL_DIR` - the tool's own directory (for sibling files)
+- `SCRATCH_HOME` - scratch repo root (so bash tools can `source "$SCRATCH_HOME/lib/..."`)
+- `SCRATCH_PROJECT` and `SCRATCH_PROJECT_ROOT` - only set if `project:detect` succeeds; tools should test `[[ -n ${SCRATCH_PROJECT:-} ]]`
 
 ### `lib/cmd.sh`
 
@@ -218,7 +247,7 @@ Uses raw ANSI `printf` with TTY detection for output.
 
 Checks:
 - bash version (5+)
-- All commands declared via `has-commands` in `bin/`, `lib/`, and `helpers/`
+- All commands declared via `has-commands` in `bin/`, `lib/`, `helpers/`, and `tools/<name>/is-available`
 - All env vars declared via `require-env-vars` in the same scan set
 - Dev tools from `.mise.toml` + GNU parallel (with `--dev`)
 
@@ -226,6 +255,9 @@ Scan attribution:
 - `bin/scratch-<verb>` files attribute to `<verb>`
 - `lib/*.sh` files attribute to the synthetic label `lib` (since library deps apply transitively to many consumers)
 - `helpers/<name>` files attribute to `<name>` (e.g., `embed` for `helpers/embed`, which declares `has-commands elixir`)
+- `tools/<name>/is-available` files attribute to `tool:<name>` (e.g., `tool:notify` for `tools/notify/is-available`). The `tool:` prefix disambiguates tool deps from bin/lib/helper deps in the doctor output.
+
+The four scan targets share a single `_scan-deps-in` helper - one line per target in `scan-all-deps`. Adding a fifth scan target later is a one-line addition.
 
 Flags:
 - `--fix` - prompt to install missing deps via `helpers/setup`
@@ -340,6 +372,20 @@ Model cache: `~/.config/scratch/models/` via `BUMBLEBEE_CACHE_DIR`.
 EXLA pinned to `0.9.2` (avoid 0.10.0 duplicate symbol linker bug).
 Requires bash wrapper for the clang workaround (see `helpers/embed`).
 
+## Tools
+
+LLM tool calling lives under `tools/<name>/`. Each tool is a self-contained directory with three required files (see the `lib/tool.sh` entry above for the contract). Tools are reserved for LLM use - this is not a general scripts directory.
+
+### `tools/notify/`
+
+The first concrete tool. Wraps `tui:info` / `tui:warn` / `tui:error` so the LLM can communicate progress, status, warnings, or errors back to the user during long-running work. The notification renders in real time in the user's terminal; the tool's stdout response is a confirmation the LLM sees.
+
+- `spec.json` - takes `level` (enum: `info|warning|error`) and `message` (string)
+- `main` - bash; sources `lib/base.sh`, `lib/termio.sh`, `lib/tui.sh` from `$SCRATCH_HOME`; parses `$SCRATCH_TOOL_ARGS_JSON`; dispatches on level
+- `is-available` - bash; sources `lib/base.sh`; calls `has-commands gum jq`. Doctor scanner picks up `gum` and `jq` under `tool:notify`.
+
+This is the simplest possible scratch tool. It exists to (a) exercise the full tool calling pipeline end to end and (b) give LLMs a way to talk to the user during multi-step work without requiring response streaming.
+
 ## Test Files
 
 Test files use 2-digit numerical prefixes (CPAN convention) so they run in dependency order: lib tests first (00-06), bin tests next (10+), self-reflection tests last (90+). Gaps between groups leave room to wedge in new tests without renumbering.
@@ -353,11 +399,13 @@ Test files use 2-digit numerical prefixes (CPAN convention) so they run in depen
 | `test/03-project.bats` | Tests for `lib/project.sh` |
 | `test/04-venice.bats` | Tests for `lib/venice.sh` (stubs curl binary) |
 | `test/05-model.bats` | Tests for `lib/model.sh` (registry + profiles; overrides `venice:curl`) |
-| `test/06-chat.bats` | Tests for `lib/chat.sh` (overrides `venice:curl`, captures request body) |
+| `test/06-chat.bats` | Tests for `lib/chat.sh` including `chat:complete-with-tools` recursion (multi-response capture queue, stubbed tool layer) |
+| `test/07-tool.bats` | Tests for `lib/tool.sh` (sync half + parallel) using fake tool fixtures under `SCRATCH_TOOLS_DIR` |
 | `test/10-scratch-doctor.bats` | Tests for `bin/scratch-doctor` |
 | `test/90-lint.bats` | Self-reflection: shellcheck |
 | `test/91-formatting.bats` | Self-reflection: shfmt drift |
 | `test/92-permissions.bats` | Self-reflection: +x policy |
 | `test/93-anti-slop.bats` | Self-reflection: unicode + AI attribution in unpushed commits |
 | `test/94-subcommand-contract.bats` | Self-reflection: subcommands honor --help |
+| `test/95-tool-contract.bats` | Self-reflection: every tool dir under `tools/` follows the structural contract (spec.json shape, name match, +x bits, is-available sources base + calls has-commands) |
 | `test/integration/00-venice.bats` | Opt-in integration tests against the real Venice API |

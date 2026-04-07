@@ -108,10 +108,11 @@ lib/          sourced libraries (not executable)
   project.sh      project:save, project:load, project:detect (worktree-aware)
   cmd.sh          cmd:define, cmd:parse, cmd:get (declarative command framework)
   dispatch.sh     dispatch:try, dispatch:usage (parameterized subcommand dispatch)
-  venice.sh      venice:api-key, venice:curl (Venice API primitives)
-  model.sh       model:fetch, model:list, model:exists, model:jq (registry) +
+  venice.sh       venice:api-key, venice:curl (Venice API primitives)
+  model.sh        model:fetch, model:list, model:exists, model:jq (registry) +
                   model:profile:* (profile system, sourced from data/models.json)
-  chat.sh        chat:completion, chat:extract-content (chat completions)
+  chat.sh         chat:completion, chat:extract-content, chat:complete-with-tools
+  tool.sh         tool:list, tool:invoke, tool:invoke-parallel (tool calling)
 
 libexec/      internal non-bash executables
   embed.exs       Elixir embedding generator (called by helpers/embed)
@@ -120,6 +121,12 @@ data/         static config data shipped in the repo (not user settings)
   models.json     model profile definitions (smart/balanced/fast bases +
                   coding/web variants), read by lib/model.sh's
                   model:profile:* functions
+
+tools/        LLM tool calling. Each subdirectory is a self-contained tool:
+              <name>/spec.json     OpenAI function spec (the inner function obj)
+              <name>/main          executable, any language
+              <name>/is-available  bash; runtime gate AND dep manifest
+  notify/         proxies tui:info/warn/error so the LLM can talk to the user
 
 helpers/      bash scripts that are not subcommands
   setup                  runtime dep installer (bash 3.2 compatible)
@@ -139,13 +146,15 @@ test/         bats test suite (unit tests only - non-recursive)
   03-project.bats              tests for lib/project.sh
   04-venice.bats               tests for lib/venice.sh
   05-model.bats                tests for lib/model.sh (registry + profiles)
-  06-chat.bats                 tests for lib/chat.sh
+  06-chat.bats                 tests for lib/chat.sh (incl. complete-with-tools)
+  07-tool.bats                 tests for lib/tool.sh (sync + parallel)
   10-scratch-doctor.bats       tests for bin/scratch-doctor
   90-lint.bats                 self-reflection: shellcheck
   91-formatting.bats           self-reflection: shfmt drift
   92-permissions.bats          self-reflection: +x policy
   93-anti-slop.bats            self-reflection: unicode + AI attribution
   94-subcommand-contract.bats  self-reflection: subcommands honor --help
+  95-tool-contract.bats        self-reflection: every tool dir follows the contract
 
 test/integration/   bats tests that hit the REAL venice API (opt-in only)
   00-venice.bats    end-to-end smoke tests for venice + model + chat
@@ -205,11 +214,13 @@ base.sh              (no deps)
   |
   +-- dispatch.sh    (depends on base ONLY; optionally uses tui:format at runtime)
   |
-  +-- venice.sh      (depends on base, requires curl + jq)
+  +-- tool.sh        (depends on base + tempfiles + project, requires jq)
+  |
+  +-- venice.sh      (depends on base, requires curl + jq + bc)
         |
         +-- model.sh (depends on base + venice, requires jq)
         |
-        +-- chat.sh  (depends on base + venice, requires jq)
+        +-- chat.sh  (depends on base + venice + tool, requires jq)
 ```
 
 `cmd.sh` deliberately does not source `tui.sh` at load time, because tui.sh requires `gum` and `jq` at source time.
@@ -358,6 +369,69 @@ Integration tests are never run in CI and never part of `mise run test`.
 Opt in via `mise run test:integration` or call the runner directly.
 Individual tests `skip` cleanly if no API key is set, so contributors without one still get a green run with a "skipped all" result.
 
+## Tool Calling Pipeline (tool.sh + chat:complete-with-tools)
+
+Tool calling lets the LLM execute things in the user's environment (read files, run commands, send notifications, etc.) instead of just producing text. The architecture has three layers, each with one job.
+
+### Layer 1: tools/ (the tool definitions)
+
+Each tool is a self-contained directory under `tools/<name>/` with three required files - the format borrowed from fnord's "frob" system, with one scratch addition.
+
+`spec.json` - the OpenAI function calling spec. Contains `name`, `description`, and `parameters` (a JSON Schema object). The LLM uses this to decide when and how to invoke the tool. The directory basename must match `.name` (enforced by `test/95-tool-contract.bats`).
+
+`main` - the executable. Any language. Reads its arguments from `SCRATCH_TOOL_ARGS_JSON` (an env var holding the LLM's parsed argument object). Writes its result to stdout on success or stderr on failure. The exit code determines which stream becomes the result content sent back to the LLM:
+
+- exit 0 -> stdout content goes to the LLM
+- non-zero -> stderr content goes to the LLM
+
+This is **strict separation** with no merging - different from fnord which uses `stderr_to_stdout: true`. Strict separation lets tools write progress notes to stderr without polluting the success result.
+
+Tools also receive these env vars from the contract:
+
+- `SCRATCH_TOOL_ARGS_JSON` - the LLM's args (always set; `{}` for no-arg tools)
+- `SCRATCH_TOOL_DIR` - the tool's own directory (for fixtures or sub-scripts)
+- `SCRATCH_HOME` - scratch repo root (so bash tools can `source "$SCRATCH_HOME/lib/..."`)
+- `SCRATCH_PROJECT` and `SCRATCH_PROJECT_ROOT` - only set if `project:detect` succeeds
+
+`is-available` - bash, mandatory, scratch's addition to fnord's frob format. Two purposes in one file:
+
+1. **Runtime gate:** Sources `lib/base.sh` and calls `has-commands` for any external programs the tool needs. If any are missing, the script dies with an install hint via the standard `has-commands` error path. Returns 0 if everything is present.
+
+2. **Dependency manifest:** The doctor's textual scanner reads `is-available` looking for `has-commands` declarations, attributing them to `tool:<name>` (e.g. `gum (tool:notify)`). Same line does double duty: real runtime check AND scannable token. The contract test enforces both properties so no tool author can write a no-op gate.
+
+### Layer 2: lib/tool.sh (the runtime)
+
+`lib/tool.sh` provides discovery, schema reading, availability gating, and synchronous + parallel invocation. See the `lib/tool.sh` entry in `components.md` for the full API.
+
+The tricky function is `tool:invoke-parallel`. It takes a JSON array of `{id, name, args}` calls and forks one background job per call. Each job writes captured stdout, stderr, and exit code to numbered temp files in a workdir allocated by the parent shell. After `wait`, the parent reassembles the results in **input order** (not wait order, which would be non-deterministic).
+
+The workdir is allocated via `mktemp -d` in the parent shell, then registered with `tmp:track` so it's cleaned up on exit. **Critical:** `tmp:make` cannot be called from inside the bg jobs - the registry lives in parent process memory and subshell registrations are lost.
+
+Failures are encoded as `ok:false` rather than dying, so a single broken tool doesn't kill the whole batch. Silent failures (non-zero exit + empty stderr) get a synthesized `ERROR: tool '<name>' exited with status <code>` content fallback so the model always has something actionable.
+
+### Layer 3: chat:complete-with-tools (the recursion driver)
+
+`chat:complete-with-tools MODEL MESSAGES_JSON TOOL_NAMES_JSON [EXTRA_JSON]` wraps `chat:completion` in a loop. Each iteration:
+
+1. Calls `chat:completion` with the current messages and the tools array (built from `TOOL_NAMES_JSON` via `tool:specs-json`).
+2. Checks the response for `.choices[0].message.tool_calls`.
+3. If empty, returns the response (text content, recursion done).
+4. If present, executes the calls via `tool:invoke-parallel`, appends the assistant message and one tool result message per call to the messages array, and continues to the next iteration.
+
+There is **no max-rounds cap** by design. A runaway model burns API credit until Ctrl-C; in practice this hasn't been a problem.
+
+The tool argument parsing is defensive: `.function.arguments` is a JSON string per the OpenAI spec, but malformed strings shouldn't crash the recursion. The driver uses `(fromjson? // {})` to fall back to an empty object on parse failure, so the tool sees a clean (if useless) `{}` arg shape and can fail with its own clear error message.
+
+### Why this layered design
+
+Each layer has exactly one job:
+
+- **`tools/<name>/`** is *what* the tool does and *whether* it's available.
+- **`lib/tool.sh`** is *how* tools are discovered, gated, and run.
+- **`chat:complete-with-tools`** is *when* tools fire during a model conversation.
+
+A future agent system can use any combination of these without coupling. An agent that uses tools without an LLM (e.g. cron-driven) would call `tool:invoke` directly. An agent that uses an LLM without tools would call `chat:completion` directly. An agent that uses both calls `chat:complete-with-tools`. The layers compose; you don't pay for what you don't use.
+
 ## Dependency Declaration and Doctor
 
 The doctor subcommand is a declarative dependency checker.
@@ -375,16 +449,20 @@ If a script shells out to a tool that isn't guaranteed by POSIX, it MUST declare
 Never rely on git/jq/curl/gum/bc/etc. being "obviously" present - declare and let the scanner find it.
 The only exception is tools used optionally with a graceful fallback (e.g. `stdbuf` in `lib/termio.sh` - the fallback is passthrough, so declaring would defeat the design).
 
-The three scan sets have different attribution labels:
+The four scan sets have different attribution labels:
 - `bin/scratch-<verb>` declarations attribute to the verb name
 - `lib/*.sh` declarations attribute to the synthetic label `lib` (library deps apply transitively to many commands)
 - `helpers/<name>` declarations attribute to the helper's basename (e.g., `helpers/embed` -> `embed`)
+- `tools/<name>/is-available` declarations attribute to `tool:<name>` (e.g., `tool:notify`); the `tool:` prefix disambiguates tool deps from bin/lib/helper deps in the doctor output
+
+All four scan loops use a single `_scan-deps-in` helper - one line per target in `scan-all-deps`. Adding a fifth scan target later is a one-line addition.
 
 When you add a new tool to scratch:
 1. If it goes in a library, declare it in that library's source-time `has-commands` line.
 2. If it's specific to one subcommand, declare it at the top of that subcommand's script.
 3. If it's specific to one helper, declare it at the top of that helper.
-4. If it's a runtime dep that `scratch setup` should install, also add it to `helpers/setup`'s `RUNTIME_DEPS` list.
+4. If it's specific to an LLM tool, declare it in that tool's `is-available` script.
+5. If it's a runtime dep that `scratch setup` should install, also add it to `helpers/setup`'s `RUNTIME_DEPS` list.
 
 ## Self-Reflection Tests
 
@@ -392,9 +470,10 @@ Several bats files exist solely to enforce structural conventions:
 
 - `90-lint.bats` - shellcheck on bin/, helpers/, lib/, test/
 - `91-formatting.bats` - fails if shfmt would change any tracked file
-- `92-permissions.bats` - enforces +x on bin/helpers, -x on lib/libexec/data
+- `92-permissions.bats` - enforces +x on bin/helpers/tools, -x on lib/libexec/data
 - `93-anti-slop.bats` - fails on smart quotes, em dashes, or AI attribution in unpushed commits
 - `94-subcommand-contract.bats` - verifies every subcommand honors `--help` with exit 0
+- `95-tool-contract.bats` - verifies every tool dir under tools/ has spec.json + main + is-available with the correct shape, and is-available sources base.sh + calls has-commands
 
 These tests catch drift that code review might miss.
 They run under the same `env -i` harness as functional tests via `helpers/run-tests`.
