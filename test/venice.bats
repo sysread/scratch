@@ -27,6 +27,17 @@ setup() {
 
   # Defaults used by venice:curl tests
   export SCRATCH_VENICE_API_KEY="test-key"
+
+  # Disable retry by default so non-retry tests assert single-shot
+  # behavior. Retry-specific tests override this to a higher value.
+  export SCRATCH_VENICE_MAX_ATTEMPTS=1
+
+  # Override sleep so retry tests never actually wait. Exported so it
+  # propagates into subshells created by bats `run`. Tests that need
+  # real sleep (none currently) can `unset -f sleep` locally.
+  # shellcheck disable=SC2329 # called indirectly by venice:curl after it's sourced
+  sleep() { :; }
+  export -f sleep
 }
 
 # Install a curl stub that replays canned body + status for venice:curl tests.
@@ -167,20 +178,23 @@ STUB
   [[ "$output" == *"401"* ]]
 }
 
-@test "venice:curl dies with rate-limit message on 429" {
+@test "venice:curl dies with rate-limit message on 429 (single attempt)" {
   install_curl_stub '{"error":"rate limited"}' "429"
-  run bash -c 'set -e; export SCRATCH_VENICE_API_KEY=test-key; export PATH="'"${BATS_TEST_TMPDIR}"'/stubbin:$PATH"; source '"${SCRATCH_HOME}"'/lib/venice.sh; venice:curl GET /models 2>&1'
+  # MAX_ATTEMPTS=1 from setup() - single shot, no retry
+  run bash -c 'set -e; export SCRATCH_VENICE_API_KEY=test-key; export SCRATCH_VENICE_MAX_ATTEMPTS=1; export PATH="'"${BATS_TEST_TMPDIR}"'/stubbin:$PATH"; source '"${SCRATCH_HOME}"'/lib/venice.sh; venice:curl GET /models 2>&1'
   is "$status" 1
   [[ "$output" == *"rate limited"* ]]
   [[ "$output" == *"429"* ]]
+  [[ "$output" == *"exhausted"* ]]
 }
 
-@test "venice:curl dies with capacity message on 503" {
+@test "venice:curl dies with capacity message on 503 (single attempt)" {
   install_curl_stub '{"error":"busy"}' "503"
-  run bash -c 'set -e; export SCRATCH_VENICE_API_KEY=test-key; export PATH="'"${BATS_TEST_TMPDIR}"'/stubbin:$PATH"; source '"${SCRATCH_HOME}"'/lib/venice.sh; venice:curl GET /models 2>&1'
+  run bash -c 'set -e; export SCRATCH_VENICE_API_KEY=test-key; export SCRATCH_VENICE_MAX_ATTEMPTS=1; export PATH="'"${BATS_TEST_TMPDIR}"'/stubbin:$PATH"; source '"${SCRATCH_HOME}"'/lib/venice.sh; venice:curl GET /models 2>&1'
   is "$status" 1
   [[ "$output" == *"at capacity"* ]]
   [[ "$output" == *"503"* ]]
+  [[ "$output" == *"exhausted"* ]]
 }
 
 @test "venice:curl dies with unknown-status message on 418" {
@@ -189,4 +203,196 @@ STUB
   is "$status" 1
   [[ "$output" == *"418"* ]]
   [[ "$output" == *"teapot"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# _venice:_backoff-seconds - log10 curve math
+#
+# Verify the expected curve at the default base. These assertions lock in
+# the specific values from the design table in lib/venice.sh so any
+# accidental change to the formula or base is caught immediately.
+# ---------------------------------------------------------------------------
+
+@test "_venice:_backoff-seconds: attempt 1 is 2 seconds" {
+  run _venice:_backoff-seconds 1
+  is "$status" 0
+  is "$output" "2"
+}
+
+@test "_venice:_backoff-seconds: attempt 2 is 3 seconds" {
+  run _venice:_backoff-seconds 2
+  is "$output" "3"
+}
+
+@test "_venice:_backoff-seconds: attempt 5 is 4 seconds" {
+  run _venice:_backoff-seconds 5
+  is "$output" "4"
+}
+
+@test "_venice:_backoff-seconds: attempt 10 is 4 seconds" {
+  run _venice:_backoff-seconds 10
+  is "$output" "4"
+}
+
+@test "_venice:_backoff-seconds: attempt 100 is 6 seconds (self-capping)" {
+  run _venice:_backoff-seconds 100
+  is "$output" "6"
+}
+
+@test "_venice:_backoff-seconds: attempt 1000 is 8 seconds (still capped)" {
+  run _venice:_backoff-seconds 1000
+  is "$output" "8"
+}
+
+# ---------------------------------------------------------------------------
+# venice:curl retry behavior
+#
+# Uses a multi-response curl stub that reads a counter file and returns
+# different status/body pairs per attempt. Tests override sleep (already
+# done in setup) so retries are instant.
+# ---------------------------------------------------------------------------
+
+# Install a curl stub that returns different responses per call attempt.
+# Pass pairs of "STATUS:BODY" arguments in order. The stub increments a
+# counter file to track which pair to return on each call.
+install_multi_curl_stub() {
+  local counter_file="${BATS_TEST_TMPDIR}/curl-attempt.counter"
+  printf '0' > "$counter_file"
+
+  local i=1
+  local pair
+  for pair in "$@"; do
+    local status="${pair%%:*}"
+    local body="${pair#*:}"
+    printf '%s' "$status" > "${BATS_TEST_TMPDIR}/curl-response.status.${i}"
+    printf '%s' "$body" > "${BATS_TEST_TMPDIR}/curl-response.body.${i}"
+    i=$((i + 1))
+  done
+
+  make_stub curl "$(
+    cat << STUB
+#!/usr/bin/env bash
+# Increment the attempt counter
+counter_file='${BATS_TEST_TMPDIR}/curl-attempt.counter'
+n=\$(cat "\$counter_file")
+n=\$((n + 1))
+printf '%s' "\$n" > "\$counter_file"
+
+# Find -o FILE in args
+body_file=""
+while [[ \$# -gt 0 ]]; do
+  case "\$1" in
+    -o) body_file="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+# Write the body for this attempt, print the status
+body_src='${BATS_TEST_TMPDIR}/curl-response.body.'"\${n}"
+status_src='${BATS_TEST_TMPDIR}/curl-response.status.'"\${n}"
+if [[ -n "\$body_file" && -f "\$body_src" ]]; then
+  cat "\$body_src" > "\$body_file"
+fi
+if [[ -f "\$status_src" ]]; then
+  cat "\$status_src"
+else
+  printf '500'
+fi
+STUB
+  )" > /dev/null
+
+  prepend_stub_path
+}
+
+@test "venice:curl retries on 429 then succeeds on second attempt" {
+  install_multi_curl_stub "429:{\"err\":\"slow down\"}" "200:{\"ok\":true}"
+  export SCRATCH_VENICE_MAX_ATTEMPTS=3
+
+  run --separate-stderr venice:curl GET /models
+  is "$status" 0
+  is "$output" '{"ok":true}'
+  # stderr should contain the retry warning for the first attempt
+  [[ "$stderr" == *"retrying"* ]]
+  [[ "$stderr" == *"429"* ]]
+}
+
+@test "venice:curl retries on 503 then succeeds on second attempt" {
+  install_multi_curl_stub "503:{\"err\":\"busy\"}" "200:{\"ok\":true}"
+  export SCRATCH_VENICE_MAX_ATTEMPTS=3
+
+  run --separate-stderr venice:curl GET /models
+  is "$status" 0
+  is "$output" '{"ok":true}'
+  [[ "$stderr" == *"retrying"* ]]
+  [[ "$stderr" == *"503"* ]]
+}
+
+@test "venice:curl retries on 504 then succeeds on third attempt" {
+  install_multi_curl_stub "504:{}" "504:{}" "200:{\"ok\":true}"
+  export SCRATCH_VENICE_MAX_ATTEMPTS=3
+
+  run --separate-stderr venice:curl GET /models
+  is "$status" 0
+  is "$output" '{"ok":true}'
+  # Two retry warnings expected (attempts 1 and 2 both failed with 504)
+  [[ "$stderr" == *"attempt 1/3"* ]]
+  [[ "$stderr" == *"attempt 2/3"* ]]
+}
+
+@test "venice:curl dies with exhausted message after max attempts of 429" {
+  install_multi_curl_stub "429:{}" "429:{}" "429:{}"
+  export SCRATCH_VENICE_MAX_ATTEMPTS=3
+
+  run bash -c '
+    set -e
+    export SCRATCH_VENICE_API_KEY=test-key
+    export SCRATCH_VENICE_MAX_ATTEMPTS=3
+    export PATH="'"${BATS_TEST_TMPDIR}"'/stubbin:$PATH"
+    sleep() { :; }
+    export -f sleep
+    source '"${SCRATCH_HOME}"'/lib/venice.sh
+    venice:curl GET /models 2>&1
+  '
+  is "$status" 1
+  [[ "$output" == *"exhausted 3 attempts"* ]]
+  [[ "$output" == *"rate limited"* ]]
+}
+
+@test "venice:curl does NOT retry on 401 (non-retryable)" {
+  install_multi_curl_stub "401:{\"err\":\"bad key\"}" "200:{\"ok\":true}"
+  export SCRATCH_VENICE_MAX_ATTEMPTS=3
+
+  run bash -c '
+    set -e
+    export SCRATCH_VENICE_API_KEY=test-key
+    export SCRATCH_VENICE_MAX_ATTEMPTS=3
+    export PATH="'"${BATS_TEST_TMPDIR}"'/stubbin:$PATH"
+    sleep() { :; }
+    export -f sleep
+    source '"${SCRATCH_HOME}"'/lib/venice.sh
+    venice:curl GET /models 2>&1
+  '
+  # Should die on first attempt, never reach the "200" second response
+  is "$status" 1
+  [[ "$output" == *"authentication failed"* ]]
+  [[ "$output" != *"exhausted"* ]]
+}
+
+@test "venice:curl does NOT retry on 402 (non-retryable)" {
+  install_multi_curl_stub "402:{\"err\":\"broke\"}" "200:{\"ok\":true}"
+  export SCRATCH_VENICE_MAX_ATTEMPTS=3
+
+  run bash -c '
+    set -e
+    export SCRATCH_VENICE_API_KEY=test-key
+    export SCRATCH_VENICE_MAX_ATTEMPTS=3
+    export PATH="'"${BATS_TEST_TMPDIR}"'/stubbin:$PATH"
+    sleep() { :; }
+    export -f sleep
+    source '"${SCRATCH_HOME}"'/lib/venice.sh
+    venice:curl GET /models 2>&1
+  '
+  is "$status" 1
+  [[ "$output" == *"insufficient credits"* ]]
+  [[ "$output" != *"exhausted"* ]]
 }
