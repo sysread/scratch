@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# notify - availability gate
+#
+# Sources lib/base.sh and uses has-commands to declare runtime dependencies.
+# This script does double duty:
+#
+#   1. Runtime gate: returns 0 if every required command is on PATH, dies
+#      with a helpful install hint via has-commands otherwise.
+#
+#   2. Dependency manifest: scratch-doctor's scanner reads this script
+#      textually for `has-commands ` lines and attributes the discovered
+#      tools under the label "tool:notify". This means a user running
+#      `scratch doctor` will see notify's deps reported automatically,
+#      no separate registration required.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"
+
+# notify wraps the tui:info / tui:warn / tui:error functions, which are gum
+# log calls under the hood. jq is used to parse SCRATCH_TOOL_ARGS_JSON in
+# main. Both must be present for the tool to work.
+has-commands gum jq

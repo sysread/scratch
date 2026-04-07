@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# notify - send a notification to the user via tui:* logging
+#
+# Reads its arguments from $SCRATCH_TOOL_ARGS_JSON (set by tool:invoke):
+#
+#   {"level": "info|warning|error", "message": "..."}
+#
+# Calls the corresponding tui:info / tui:warn / tui:error function so the
+# notification renders in real time in the user's terminal. The tool's
+# stdout response is a short confirmation that the LLM sees, so it knows
+# the notification was delivered.
+#
+# This is the simplest possible scratch tool. It exists to (a) exercise
+# the full tool calling pipeline end to end and (b) give LLMs a way to
+# communicate with the user during long-running work.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# Source scratch's libraries via the SCRATCH_HOME contract.
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/termio.sh"
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/tui.sh"
+
+level="$(jq -r '.level' <<< "$SCRATCH_TOOL_ARGS_JSON")"
+message="$(jq -r '.message' <<< "$SCRATCH_TOOL_ARGS_JSON")"
+
+# Validate the level enum locally. The spec declares an enum but the model
+# can still send garbage; better to fail with a clear message than to call
+# the wrong tui function silently.
+case "$level" in
+  info)
+    tui:info "$message"
+    ;;
+  warning)
+    tui:warn "$message"
+    ;;
+  error)
+    tui:error "$message"
+    ;;
+  *)
+    echo "notify: invalid level '$level' (must be one of: info, warning, error)" >&2
+    exit 1
+    ;;
+esac
+
+# Confirmation back to the LLM
+printf 'notification delivered: [%s] %s\n' "$level" "$message"

@@ -1,0 +1,19 @@
+{
+  "name": "notify",
+  "description": "Send a notification to the user via the scratch TUI. Use this to communicate progress, status, warnings, or errors while you're doing other work. The user sees the notification in real time; the tool's response confirms delivery.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "level": {
+        "type": "string",
+        "enum": ["info", "warning", "error"],
+        "description": "Severity level. Use 'info' for status updates and progress, 'warning' for non-fatal issues the user should know about, 'error' for serious problems that may need attention."
+      },
+      "message": {
+        "type": "string",
+        "description": "The notification message to display to the user."
+      }
+    },
+    "required": ["level", "message"]
+  }
+}
