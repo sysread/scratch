@@ -283,3 +283,29 @@ project:resolve-name() {
 }
 
 export -f project:resolve-name
+
+#-------------------------------------------------------------------------------
+# project:is-git PATH
+#
+# Print "true" if PATH is inside a git work tree, "false" otherwise.
+# Always returns 0 so the function composes cleanly with command
+# substitution under set -e.
+#
+# Used by create/edit to auto-populate the is_git field - it's derivable
+# state, never asked from the user.
+#
+# Example:
+#   local flag
+#   flag="$(project:is-git "$some_path")"
+#-------------------------------------------------------------------------------
+project:is-git() {
+  local path="$1"
+  if git -C "$path" rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+    printf 'true\n'
+  else
+    printf 'false\n'
+  fi
+  return 0
+}
+
+export -f project:is-git

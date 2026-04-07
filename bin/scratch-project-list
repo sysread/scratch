@@ -52,6 +52,7 @@ main() {
   local name
   local root
   local is_git
+  # shellcheck disable=SC2034 # populated by project:load via nameref but unused here
   local exclude
   local git_badge
 

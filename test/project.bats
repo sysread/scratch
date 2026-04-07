@@ -136,6 +136,45 @@ setup() {
 }
 
 # ---------------------------------------------------------------------------
+# project:is-git
+# ---------------------------------------------------------------------------
+
+@test "project:is-git returns true for a git work tree" {
+  local repo="${BATS_TEST_TMPDIR}/gitrepo"
+  mkdir -p "$repo"
+  (cd "$repo" && git init -q)
+
+  run project:is-git "$repo"
+  is "$status" 0
+  is "$output" "true"
+}
+
+@test "project:is-git returns true from a subdirectory of a git work tree" {
+  local repo="${BATS_TEST_TMPDIR}/gitrepo2"
+  mkdir -p "$repo/sub/dir"
+  (cd "$repo" && git init -q)
+
+  run project:is-git "$repo/sub/dir"
+  is "$status" 0
+  is "$output" "true"
+}
+
+@test "project:is-git returns false for a non-git directory" {
+  local plain="${BATS_TEST_TMPDIR}/plain"
+  mkdir -p "$plain"
+
+  run project:is-git "$plain"
+  is "$status" 0
+  is "$output" "false"
+}
+
+@test "project:is-git returns false for a nonexistent path" {
+  run project:is-git "${BATS_TEST_TMPDIR}/does-not-exist"
+  is "$status" 0
+  is "$output" "false"
+}
+
+# ---------------------------------------------------------------------------
 # project:detect
 # ---------------------------------------------------------------------------
 

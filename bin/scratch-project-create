@@ -76,10 +76,8 @@ main() {
     die "project already exists: $name"
   fi
 
-  local is_git=false
-  if git -C "$target_path" rev-parse --is-inside-work-tree > /dev/null 2>&1; then
-    is_git=true
-  fi
+  local is_git
+  is_git="$(project:is-git "$target_path")"
 
   local -a excludes=()
   local add_more=true
@@ -100,18 +98,11 @@ main() {
 
   project:save "$name" "$target_path" "$is_git" "${excludes[@]}"
 
-  echo
-  gum format -- "Created project **${name}**"
-  echo
-  printf '  %-12s %s\n' "root:" "$target_path"
-  printf '  %-12s %s\n' "git:" "$is_git"
-  if ((${#excludes[@]} > 0)); then
-    local p
-    printf '  %-12s\n' "exclude:"
-    for p in "${excludes[@]}"; do
-      printf '    - %s\n' "$p"
-    done
-  fi
+  # Mutation feedback goes to stderr (tui:info uses gum log). Then exec into
+  # scratch-project-show to print the canonical rendering of the new project.
+  # This is the separation-of-concerns win: create creates, show displays.
+  tui:info "Created project ${name}"
+  exec "$SCRIPTDIR/scratch-project-show" "$name"
 }
 
 main

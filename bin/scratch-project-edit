@@ -63,9 +63,10 @@ main() {
     --value "$root")" || die "cancelled"
   [[ -n "$new_root" ]] || die "root cannot be empty"
 
+  # Auto-detect git status from the (possibly changed) root. is_git is
+  # derivable state, not something we should ask the user to maintain.
   local new_is_git
-  new_is_git="$(gum choose --header "Is this a git repository?" "true" "false" \
-    --selected "$is_git")" || die "cancelled"
+  new_is_git="$(project:is-git "$new_root")"
 
   local -a new_excludes=()
   local pattern
@@ -91,8 +92,10 @@ main() {
 
   project:save "$name" "$new_root" "$new_is_git" "${new_excludes[@]}"
 
-  echo
-  gum format -- "Updated project **${name}**"
+  # Same pattern as create: feedback to stderr, then exec into show for
+  # the canonical rendering.
+  tui:info "Updated project ${name}"
+  exec "$SCRIPTDIR/scratch-project-show" "$name"
 }
 
 main
