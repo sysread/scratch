@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch project show - print a project's config
+#
+# If NAME is omitted, auto-detects the project from the current directory
+# (including git worktree resolution).
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="Show a project's config (auto-detects from cwd)"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/termio.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/project.sh"
+}
+
+has-min-bash-version 5
+
+cmd:define "project show" "$_DESC"
+cmd:define-cli-usage "EXAMPLES" "$(
+  cat << 'EOF'
+scratch project show          # auto-detect from cwd
+scratch project show myproj   # show a specific project
+EOF
+)"
+cmd:parse "$@"
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+main() {
+  local name
+  local arg=""
+
+  # Take the first positional as the project name, if any
+  while IFS= read -r arg; do
+    break
+  done < <(cmd:rest || true)
+
+  project:resolve-name name "$arg"
+
+  project:exists "$name" || die "project not found: $name"
+
+  local root
+  local is_git
+  local exclude
+  project:load "$name" root is_git exclude
+
+  # Detect if we're currently in this project and/or a worktree
+  local detected_name
+  local detected_wt
+  local in_project=false
+  local in_worktree=false
+  if project:detect detected_name detected_wt; then
+    if [[ "$detected_name" == "$name" ]]; then
+      in_project=true
+      in_worktree="$detected_wt"
+    fi
+  fi
+
+  gum format -- "# ${name}"
+  echo
+  printf '  %-12s %s\n' "root:" "$root"
+  printf '  %-12s %s\n' "git:" "$is_git"
+
+  if [[ -n "$exclude" ]]; then
+    local pattern
+    printf '  %-12s\n' "exclude:"
+    while IFS= read -r pattern; do
+      [[ -n "$pattern" ]] && printf '    - %s\n' "$pattern"
+    done <<< "$exclude"
+  fi
+
+  if [[ "$in_project" == "true" ]]; then
+    echo
+    if [[ "$in_worktree" == "true" ]]; then
+      tui:info "cwd is a worktree of this project"
+    else
+      tui:info "cwd is inside this project"
+    fi
+  fi
+}
+
+main

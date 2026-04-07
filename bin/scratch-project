@@ -1,20 +1,30 @@
 #!/usr/bin/env bash
 
 #-------------------------------------------------------------------------------
-# Project management
+# scratch project - parent dispatcher for project management
 #
-# CRUD operations for scratch project configurations. Projects are named
-# directory associations stored under ~/.config/scratch/projects/.
+# This is a parent command with no behavior of its own. It delegates to
+# leaf subcommands via dispatch:try:
 #
-# Subcommands:
-#   list              List all configured projects
-#   show [name]       Show a project's config (auto-detects from cwd)
-#   create [path]     Create a new project (interactive)
-#   edit [name]       Edit an existing project's settings
-#   delete [name]     Remove a project (with confirmation)
+#   scratch project list     -> bin/scratch-project-list
+#   scratch project show     -> bin/scratch-project-show
+#   scratch project create   -> bin/scratch-project-create
+#   scratch project edit     -> bin/scratch-project-edit
+#   scratch project delete   -> bin/scratch-project-delete
+#
+# See docs/dev/architecture.md for the subcommand system design.
 #-------------------------------------------------------------------------------
 
 set -euo pipefail
+
+_PROJECT_DESC="Manage project configurations"
+
+# Respond to synopsis BEFORE loading any libraries - dispatch calls this
+# frequently to build the top-level help listing and it must stay fast.
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_PROJECT_DESC"
+  exit 0
+fi
 
 SCRIPT="${BASH_SOURCE[0]}"
 while [[ -L "$SCRIPT" ]]; do
@@ -31,315 +41,22 @@ SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
   source "$SCRIPTDIR/../lib/base.sh"
   source "$SCRIPTDIR/../lib/termio.sh"
   source "$SCRIPTDIR/../lib/tui.sh"
-  source "$SCRIPTDIR/../lib/project.sh"
+  source "$SCRIPTDIR/../lib/dispatch.sh"
 }
 
 has-min-bash-version 5
 
 #-------------------------------------------------------------------------------
-# Helpers
-#-------------------------------------------------------------------------------
-
-# Resolve a project name from an argument or auto-detect from cwd
-resolve-name() {
-  local -n _rn_out="$1"
-  local arg="${2:-}"
-
-  if [[ -n "$arg" ]]; then
-    # shellcheck disable=SC2034
-    _rn_out="$arg"
-    return 0
-  fi
-
-  # Auto-detect from cwd
-  local detected_name detected_wt
-  if project:detect detected_name detected_wt; then
-    # shellcheck disable=SC2034
-    _rn_out="$detected_name"
-    return 0
-  fi
-
-  die "no project name given and none detected from cwd"
-}
-
-#-------------------------------------------------------------------------------
-# Subcommand: list
-#-------------------------------------------------------------------------------
-do-list() {
-  local names
-  names="$(project:list)"
-
-  if [[ -z "$names" ]]; then
-    tui:info "No projects configured"
-    return 0
-  fi
-
-  local name root is_git exclude
-  while IFS= read -r name; do
-    [[ -n "$name" ]] || continue
-    project:load "$name" root is_git exclude
-
-    local git_badge=""
-    [[ "$is_git" == "true" ]] && git_badge=" (git)"
-
-    gum format -- "**${name}**${git_badge}" "  ${root}"
-    echo
-  done <<< "$names"
-}
-
-#-------------------------------------------------------------------------------
-# Subcommand: show
-#-------------------------------------------------------------------------------
-do-show() {
-  local name
-  resolve-name name "${1:-}"
-
-  project:exists "$name" || die "project not found: $name"
-
-  local root is_git exclude
-  project:load "$name" root is_git exclude
-
-  # Detect if we're currently in this project and/or a worktree
-  local detected_name detected_wt
-  local in_project=false
-  local in_worktree=false
-  if project:detect detected_name detected_wt; then
-    if [[ "$detected_name" == "$name" ]]; then
-      in_project=true
-      in_worktree="$detected_wt"
-    fi
-  fi
-
-  gum format -- "# ${name}"
-  echo
-  printf '  %-12s %s\n' "root:" "$root"
-  printf '  %-12s %s\n' "git:" "$is_git"
-
-  if [[ -n "$exclude" ]]; then
-    printf '  %-12s\n' "exclude:"
-    while IFS= read -r pattern; do
-      [[ -n "$pattern" ]] && printf '    - %s\n' "$pattern"
-    done <<< "$exclude"
-  fi
-
-  if [[ "$in_project" == "true" ]]; then
-    echo
-    if [[ "$in_worktree" == "true" ]]; then
-      tui:info "cwd is a worktree of this project"
-    else
-      tui:info "cwd is inside this project"
-    fi
-  fi
-}
-
-#-------------------------------------------------------------------------------
-# Subcommand: create
-#-------------------------------------------------------------------------------
-do-create() {
-  local target_path="${1:-$(pwd)}"
-
-  # Resolve to absolute path
-  target_path="$(cd "$target_path" 2> /dev/null && pwd -P)" \
-    || die "path does not exist: ${1:-$(pwd)}"
-
-  # Suggest a name from the directory basename
-  local suggested_name
-  suggested_name="$(basename "$target_path")"
-
-  local name
-  name="$(gum input \
-    --header "Project name" \
-    --placeholder "$suggested_name" \
-    --value "$suggested_name")" || die "cancelled"
-
-  [[ -n "$name" ]] || die "project name cannot be empty"
-
-  if project:exists "$name"; then
-    die "project already exists: $name"
-  fi
-
-  # Detect git status
-  local is_git=false
-  if git -C "$target_path" rev-parse --is-inside-work-tree > /dev/null 2>&1; then
-    is_git=true
-  fi
-
-  # Collect exclude patterns
-  local -a excludes=()
-  local add_more=true
-
-  tui:info "Adding exclude patterns (empty input to finish)"
-  while [[ "$add_more" == "true" ]]; do
-    local pattern
-    pattern="$(gum input \
-      --header "Exclude glob (empty to finish)" \
-      --placeholder "e.g. node_modules/**")" || break
-
-    if [[ -z "$pattern" ]]; then
-      add_more=false
-    else
-      excludes+=("$pattern")
-    fi
-  done
-
-  project:save "$name" "$target_path" "$is_git" "${excludes[@]}"
-
-  echo
-  gum format -- "Created project **${name}**"
-  echo
-  printf '  %-12s %s\n' "root:" "$target_path"
-  printf '  %-12s %s\n' "git:" "$is_git"
-  if ((${#excludes[@]} > 0)); then
-    printf '  %-12s\n' "exclude:"
-    for p in "${excludes[@]}"; do
-      printf '    - %s\n' "$p"
-    done
-  fi
-}
-
-#-------------------------------------------------------------------------------
-# Subcommand: edit
-#-------------------------------------------------------------------------------
-do-edit() {
-  local name
-  resolve-name name "${1:-}"
-
-  project:exists "$name" || die "project not found: $name"
-
-  local root is_git exclude
-  project:load "$name" root is_git exclude
-
-  # Edit root
-  local new_root
-  new_root="$(gum input \
-    --header "Project root" \
-    --value "$root")" || die "cancelled"
-  [[ -n "$new_root" ]] || die "root cannot be empty"
-
-  # Edit git status
-  local new_is_git
-  new_is_git="$(gum choose --header "Is this a git repository?" "true" "false" \
-    --selected "$is_git")" || die "cancelled"
-
-  # Edit excludes
-  local -a new_excludes=()
-
-  # Show existing patterns and let user keep/remove/add
-  if [[ -n "$exclude" ]]; then
-    tui:info "Current exclude patterns (empty input to finish, enter new ones to add)"
-    while IFS= read -r pattern; do
-      [[ -n "$pattern" ]] || continue
-      local keep
-      keep="$(gum choose --header "Keep '$pattern'?" "yes" "no")" || continue
-      [[ "$keep" == "yes" ]] && new_excludes+=("$pattern")
-    done <<< "$exclude"
-  fi
-
-  tui:info "Add new exclude patterns (empty to finish)"
-  while true; do
-    local pattern
-    pattern="$(gum input \
-      --header "Exclude glob (empty to finish)" \
-      --placeholder "e.g. vendor/**")" || break
-    [[ -z "$pattern" ]] && break
-    new_excludes+=("$pattern")
-  done
-
-  project:save "$name" "$new_root" "$new_is_git" "${new_excludes[@]}"
-
-  echo
-  gum format -- "Updated project **${name}**"
-}
-
-#-------------------------------------------------------------------------------
-# Subcommand: delete
-#-------------------------------------------------------------------------------
-do-delete() {
-  local name
-  resolve-name name "${1:-}"
-
-  project:exists "$name" || die "project not found: $name"
-
-  gum confirm "Delete project '$name'?" || {
-    tui:info "Cancelled"
-    return 0
-  }
-
-  project:delete "$name"
-  gum format -- "Deleted project **${name}**"
-}
-
-_PROJECT_DESC="Manage project configurations"
-
-#-------------------------------------------------------------------------------
-# Usage
-#-------------------------------------------------------------------------------
-usage() {
-  {
-    cat << 'EOF'
-# USAGE
-`scratch project <command> [args...]`
-
-# SYNOPSIS
-Manage project configurations.
-
-# COMMANDS
-  `list`              List all configured projects
-  `show [name]`       Show a project's config (auto-detects from cwd)
-  `create [path]`     Create a new project (defaults to cwd)
-  `edit [name]`       Edit an existing project's settings
-  `delete [name]`     Remove a project (with confirmation)
-EOF
-  } | _format_help >&2
-}
-
-_format_help() {
-  if type -t tui:format &> /dev/null; then
-    tui:format
-  else
-    cat
-  fi
-}
-
-#-------------------------------------------------------------------------------
 # Main
 #-------------------------------------------------------------------------------
+
+# Try to dispatch to a leaf subcommand. Never returns on success.
+dispatch:try "scratch-project" "$@" || true
+
+# Fallthrough: no subcommand matched. Print usage.
+dispatch:usage "scratch-project" "$_PROJECT_DESC"
+
 case "${1:-}" in
-  synopsis)
-    printf '%s\n' "$_PROJECT_DESC"
-    exit 0
-    ;;
-  list)
-    shift
-    do-list "$@"
-    ;;
-  show)
-    shift
-    do-show "$@"
-    ;;
-  create)
-    shift
-    do-create "$@"
-    ;;
-  edit)
-    shift
-    do-edit "$@"
-    ;;
-  delete)
-    shift
-    do-delete "$@"
-    ;;
-  --help | -h | help)
-    usage
-    exit 0
-    ;;
-  "")
-    usage
-    exit 1
-    ;;
-  *)
-    warn "scratch project: unknown command '$1'"
-    usage
-    exit 1
-    ;;
+  "" | -h | --help | help) exit 0 ;;
+  *) exit 1 ;;
 esac

@@ -250,3 +250,36 @@ project:detect() {
 }
 
 export -f project:detect
+
+#-------------------------------------------------------------------------------
+# project:resolve-name OUT_NAME [ARG]
+#
+# Resolve a project name from an explicit argument or, if empty, from the
+# current working directory via project:detect. Dies if neither yields a
+# project name.
+#
+# Used by subcommands that accept an optional project name argument and fall
+# back to cwd detection.
+#-------------------------------------------------------------------------------
+project:resolve-name() {
+  local -n _prn_out="$1"
+  local arg="${2:-}"
+
+  if [[ -n "$arg" ]]; then
+    # shellcheck disable=SC2034
+    _prn_out="$arg"
+    return 0
+  fi
+
+  # shellcheck disable=SC2034 # detected_wt is populated by project:detect via nameref but unused here
+  local detected_name detected_wt
+  if project:detect detected_name detected_wt; then
+    # shellcheck disable=SC2034
+    _prn_out="$detected_name"
+    return 0
+  fi
+
+  die "no project name given and none detected from cwd"
+}
+
+export -f project:resolve-name

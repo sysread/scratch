@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch project edit - interactively edit an existing project's settings
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="Edit an existing project's settings"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/termio.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/project.sh"
+}
+
+has-min-bash-version 5
+
+cmd:define "project edit" "$_DESC"
+cmd:parse "$@"
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+main() {
+  local arg=""
+  local name
+
+  while IFS= read -r arg; do
+    break
+  done < <(cmd:rest || true)
+
+  project:resolve-name name "$arg"
+
+  project:exists "$name" || die "project not found: $name"
+
+  local root
+  local is_git
+  local exclude
+  project:load "$name" root is_git exclude
+
+  local new_root
+  new_root="$(gum input \
+    --header "Project root" \
+    --value "$root")" || die "cancelled"
+  [[ -n "$new_root" ]] || die "root cannot be empty"
+
+  local new_is_git
+  new_is_git="$(gum choose --header "Is this a git repository?" "true" "false" \
+    --selected "$is_git")" || die "cancelled"
+
+  local -a new_excludes=()
+  local pattern
+  local keep
+
+  if [[ -n "$exclude" ]]; then
+    tui:info "Current exclude patterns"
+    while IFS= read -r pattern; do
+      [[ -n "$pattern" ]] || continue
+      keep="$(gum choose --header "Keep '$pattern'?" "yes" "no")" || continue
+      [[ "$keep" == "yes" ]] && new_excludes+=("$pattern")
+    done <<< "$exclude"
+  fi
+
+  tui:info "Add new exclude patterns (empty to finish)"
+  while true; do
+    pattern="$(gum input \
+      --header "Exclude glob (empty to finish)" \
+      --placeholder "e.g. vendor/**")" || break
+    [[ -z "$pattern" ]] && break
+    new_excludes+=("$pattern")
+  done
+
+  project:save "$name" "$new_root" "$new_is_git" "${new_excludes[@]}"
+
+  echo
+  gum format -- "Updated project **${name}**"
+}
+
+main

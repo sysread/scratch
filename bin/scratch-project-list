@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch project list - print all configured projects with their roots
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="List all configured projects"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/termio.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/project.sh"
+}
+
+has-min-bash-version 5
+
+cmd:define "project list" "$_DESC"
+cmd:parse "$@"
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+main() {
+  local names
+  names="$(project:list)"
+
+  if [[ -z "$names" ]]; then
+    tui:info "No projects configured"
+    return 0
+  fi
+
+  local name
+  local root
+  local is_git
+  local exclude
+  local git_badge
+
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    project:load "$name" root is_git exclude
+
+    git_badge=""
+    [[ "$is_git" == "true" ]] && git_badge=" (git)"
+
+    gum format -- "**${name}**${git_badge}" "  ${root}"
+    echo
+  done <<< "$names"
+}
+
+main

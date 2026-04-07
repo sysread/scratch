@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch project create - interactively create a new project
+#
+# Takes an optional path argument (defaults to cwd), prompts for the project
+# name and exclude patterns, and writes the settings.json.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="Create a new project (defaults to cwd)"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/termio.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/project.sh"
+}
+
+has-min-bash-version 5
+
+cmd:define "project create" "$_DESC"
+cmd:define-cli-usage "EXAMPLES" "$(
+  cat << 'EOF'
+scratch project create           # create from cwd
+scratch project create /some/path
+EOF
+)"
+cmd:parse "$@"
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+main() {
+  local arg=""
+  local target_path
+
+  while IFS= read -r arg; do
+    break
+  done < <(cmd:rest || true)
+
+  target_path="${arg:-$(pwd)}"
+  target_path="$(cd "$target_path" 2> /dev/null && pwd -P)" \
+    || die "path does not exist: ${arg:-$(pwd)}"
+
+  local suggested_name
+  suggested_name="$(basename "$target_path")"
+
+  local name
+  name="$(gum input \
+    --header "Project name" \
+    --placeholder "$suggested_name" \
+    --value "$suggested_name")" || die "cancelled"
+
+  [[ -n "$name" ]] || die "project name cannot be empty"
+
+  if project:exists "$name"; then
+    die "project already exists: $name"
+  fi
+
+  local is_git=false
+  if git -C "$target_path" rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+    is_git=true
+  fi
+
+  local -a excludes=()
+  local add_more=true
+  local pattern
+
+  tui:info "Adding exclude patterns (empty input to finish)"
+  while [[ "$add_more" == "true" ]]; do
+    pattern="$(gum input \
+      --header "Exclude glob (empty to finish)" \
+      --placeholder "e.g. node_modules/**")" || break
+
+    if [[ -z "$pattern" ]]; then
+      add_more=false
+    else
+      excludes+=("$pattern")
+    fi
+  done
+
+  project:save "$name" "$target_path" "$is_git" "${excludes[@]}"
+
+  echo
+  gum format -- "Created project **${name}**"
+  echo
+  printf '  %-12s %s\n' "root:" "$target_path"
+  printf '  %-12s %s\n' "git:" "$is_git"
+  if ((${#excludes[@]} > 0)); then
+    local p
+    printf '  %-12s\n' "exclude:"
+    for p in "${excludes[@]}"; do
+      printf '    - %s\n' "$p"
+    done
+  fi
+}
+
+main
