@@ -20,6 +20,11 @@ setup() {
   source "${SCRIPTDIR}/helpers.sh"
   source "${SCRATCH_HOME}/lib/venice.sh"
 
+  # Per-test HOME so anything resolving under $HOME/.config/scratch/...
+  # is fresh for every test.
+  export HOME="${BATS_TEST_TMPDIR}/home"
+  mkdir -p "$HOME"
+
   # Defaults used by venice:curl tests
   export SCRATCH_VENICE_API_KEY="test-key"
 }
