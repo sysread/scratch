@@ -8,6 +8,8 @@ set -euo pipefail
 # - Helper scripts in helpers/ must be executable.
 # - Library files in lib/ and libexec/ must NOT be executable.
 # - Static data files in data/ must NOT be executable.
+# - Tool main and is-available scripts in tools/<name>/ must be executable.
+# - Tool spec.json files must NOT be executable (they're data, not code).
 
 load "./helpers.sh"
 
@@ -70,6 +72,40 @@ setup() {
   while IFS= read -r f; do
     files+=("$f")
   done < <(git -C "$SCRATCH_HOME" ls-files data/)
+
+  [[ ${#files[@]} -eq 0 ]] && return 0
+
+  for f in "${files[@]}"; do
+    if [[ -x "$SCRATCH_HOME/$f" ]]; then
+      echo "expected non-executable: $f"
+      return 1
+    fi
+  done
+}
+
+@test "tools/<name>/main and is-available are executable" {
+  local -a files=()
+
+  while IFS= read -r f; do
+    files+=("$f")
+  done < <(git -C "$SCRATCH_HOME" ls-files 'tools/*/main' 'tools/*/is-available')
+
+  [[ ${#files[@]} -eq 0 ]] && return 0
+
+  for f in "${files[@]}"; do
+    if [[ ! -x "$SCRATCH_HOME/$f" ]]; then
+      echo "expected executable: $f"
+      return 1
+    fi
+  done
+}
+
+@test "tools/<name>/spec.json files are not executable" {
+  local -a files=()
+
+  while IFS= read -r f; do
+    files+=("$f")
+  done < <(git -C "$SCRATCH_HOME" ls-files 'tools/*/spec.json')
 
   [[ ${#files[@]} -eq 0 ]] && return 0
 

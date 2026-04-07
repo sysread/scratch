@@ -199,6 +199,11 @@ scan-envs() {
 # misleadingly noisy.
 _attr-lib() { printf '%s\n' "lib"; }
 
+# Tool is-available scripts are attributed to "tool:<name>" where <name>
+# is the parent directory's basename. The tool: prefix disambiguates from
+# bin/lib/helper attribution in the doctor output.
+_attr-tool() { printf 'tool:%s\n' "$(basename "$(dirname "$1")")"; }
+
 #-------------------------------------------------------------------------------
 # _scan-deps-in PATTERN ATTR_FN NEED_X
 #
@@ -235,9 +240,10 @@ _scan-deps-in() {
 #-------------------------------------------------------------------------------
 # Walk all scratch dependency declarations across the four scan targets:
 #
-#   bin/scratch-*       attributed by verb (subcommand-name)
-#   lib/*.sh            folded into "lib"
-#   helpers/*           attributed by helper basename (e.g. "embed")
+#   bin/scratch-*           attributed by verb (subcommand-name)
+#   lib/*.sh                folded into "lib"
+#   helpers/*               attributed by helper basename (e.g. "embed")
+#   tools/*/is-available    attributed by tool name with "tool:" prefix
 #
 # All four use the same _scan-deps-in helper - one line per target.
 #-------------------------------------------------------------------------------
@@ -245,6 +251,7 @@ scan-all-deps() {
   _scan-deps-in "$SCRIPTDIR/scratch-*" subcommand-name x
   _scan-deps-in "$SCRIPTDIR/../lib/*.sh" _attr-lib any
   _scan-deps-in "$SCRIPTDIR/../helpers/*" basename x
+  _scan-deps-in "$SCRIPTDIR/../tools/*/is-available" _attr-tool x
 }
 
 #-------------------------------------------------------------------------------
