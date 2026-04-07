@@ -283,3 +283,18 @@ Add a comment explaining why the tool is not declared.
 POSIX-guaranteed commands do not need declarations: `sh`/`bash`, `printf`, `echo`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `grep`, `sed`, `awk`, `tr`, `cut`, `sort`, `head`, `tail`, `wc`, `find`, `test`, `basename`, `dirname`, `pwd`, `cd`, `mktemp`, `chmod`, `readlink`, `env`, `sleep`, `kill`, `trap`, etc.
 When in doubt, declare.
 The cost of a spurious declaration is one line; the cost of a missing one is a user hitting an unfriendly error.
+
+### POSIX features within POSIX tools
+
+Stay inside POSIX feature sets when using POSIX tools.
+The tool being POSIX does not mean every flag and regex syntax is.
+
+Specifically for `grep` and `sed`:
+- Use POSIX character classes (`[[:space:]]`, `[[:alpha:]]`, `[[:digit:]]`, etc.) instead of GNU/Perl backslash shortcuts (`\s`, `\w`, `\d`).
+  The character class form works on every POSIX-compliant grep and sed; the backslash form is silently undefined on BSD grep.
+- Use BRE (basic regular expressions) by default; switch to ERE with `grep -E` or `sed -E` when needed.
+  Avoid `grep -P` (PCRE - GNU only) and `sed -E -i ''` (BSD/GNU `-i` divergence).
+- `grep -h`, `grep -v`, `grep -c`, `grep -l`, `grep -F`, `grep -E` are all POSIX. `grep -P`, `grep -z`, `grep -o` (some flag combinations) are GNU extensions.
+
+If you ever genuinely need a GNU-only feature, prefer adding a small wrapper function (the `gnu-grep` pattern) that aliases to `ggrep` on macOS and `grep` on Linux, rather than declaring `has-commands grep` and pretending it's enough.
+For complex pattern work where ripgrep or silver searcher would be more readable, prefer `ag` (silver searcher) over `rg` (ripgrep) - ag is friendlier in scripting contexts (rg's directory exclusion semantics are awkward).

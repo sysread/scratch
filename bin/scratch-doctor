@@ -160,7 +160,7 @@ scan-commands() {
         _CMD_DEPS[$cmd]+=" $name"
       fi
     done
-  done < <(grep -h "${_KW_HAS_CMD} " "$file" 2> /dev/null | grep -v '^\s*#')
+  done < <(grep -h "${_KW_HAS_CMD} " "$file" 2> /dev/null | grep -v '^[[:space:]]*#')
 }
 
 #-------------------------------------------------------------------------------
@@ -182,7 +182,7 @@ scan-envs() {
         _CMD_ENVS[$var]+=" $name"
       fi
     done
-  done < <(grep -h "${_KW_REQ_ENV} " "$file" 2> /dev/null | grep -v '^\s*#')
+  done < <(grep -h "${_KW_REQ_ENV} " "$file" 2> /dev/null | grep -v '^[[:space:]]*#')
 }
 
 #-------------------------------------------------------------------------------
