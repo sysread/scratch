@@ -167,6 +167,26 @@ Example of function override (the recommended approach when the library under te
 
 The HOME override is a safety net; the network guard is a safety net; neither replaces good per-test hygiene.
 
+### Verifying stdout and stderr independently
+
+bats's `run` merges stdout and stderr into `$output` by default.
+For tests that need to verify *where* output went - especially tests of functions that both produce data on stdout and log to stderr - use `run --separate-stderr`, which puts stderr in `$stderr` and leaves `$output` as pure stdout.
+
+```bash
+@test "venice:curl retries and emits warning to stderr" {
+  install_multi_curl_stub "429:{}" "200:{\"ok\":true}"
+  export SCRATCH_VENICE_MAX_ATTEMPTS=3
+
+  run --separate-stderr venice:curl GET /models
+  is "$status" 0
+  is "$output" '{"ok":true}'           # pure stdout
+  [[ "$stderr" == *"retrying"* ]]      # log messages on stderr
+}
+```
+
+This is the right pattern whenever you're asserting that something writes to stdout AND logs feedback to stderr.
+The merged-output default is fine for tests that only care about one stream.
+
 ### Integration Tests
 
 Tests that need to make real API calls go under `test/integration/*.bats` and run via `helpers/run-integration-tests` (or `mise run test:integration`).

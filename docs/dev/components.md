@@ -115,13 +115,25 @@ See the "Entry Point and the Subcommand System" section in `architecture.md` for
 
 Foundation for the Venice API integration.
 Depends on `base.sh`.
-Requires `curl` and `jq` at source time.
+Requires `curl`, `jq`, and `bc` at source time.
 
 Functions:
 - `venice:api-key` - print the API key; tries `SCRATCH_VENICE_API_KEY` first, then `VENICE_API_KEY`; dies with a clear message if neither is set
 - `venice:base-url` - print the hard-coded Venice API base URL
 - `venice:config-dir` - print (and create) `~/.config/scratch/venice/`; resolves under `$HOME`, so tests running with isolated HOME get isolated config automatically
-- `venice:curl METHOD PATH [BODY]` - authenticated request wrapper; body via stdin to avoid argv limits; translates Venice-specific error codes (401/402/429/503/504) into user-targeted `die` messages
+- `venice:curl METHOD PATH [BODY]` - authenticated request wrapper with automatic retry on transient errors; body via stdin to avoid argv limits; translates Venice-specific error codes (401/402/429/503/504) into user-targeted `die` messages
+
+Private helpers:
+- `_venice:_backoff-seconds ATTEMPT` - compute retry delay via a log10 curve (`ceil(2 * (1 + log10(attempt)))`); uses `bc -l` for the floating-point math
+
+Retry behavior:
+- Transient errors (429 rate-limited, 503 at capacity, 504 timeout) retry up to `SCRATCH_VENICE_MAX_ATTEMPTS` times (default 3).
+- Each retry sleeps for a log10-scaled backoff and logs a warn to stderr with `(attempt N/max)` so long pauses have visible cause.
+- Non-retryable errors (401, 402, 415, other 4xx) die immediately without retrying.
+- The log10 curve: attempt 1 -> 2s, attempt 10 -> 4s, attempt 100 -> 6s, attempt 1000 -> 8s. Self-caps in practice because log grows so slowly.
+
+Tunables (env vars):
+- `SCRATCH_VENICE_MAX_ATTEMPTS` - max HTTP attempts before giving up. Set to 1 to disable retry entirely (useful in tests).
 
 ### `lib/model.sh`
 

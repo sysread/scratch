@@ -47,17 +47,19 @@ scratch project list [options]
 ## Requirements
 
 Runtime:
-- `bash` 5+
-- `jq`
-- `gum`
-- `curl`
-- `elixir` (for the embedding helper)
+- [bash](https://www.gnu.org/software/bash/) 5+
+- [jq](https://jqlang.org/)
+- [gum](https://github.com/charmbracelet/gum)
+- [curl](https://curl.se/)
+- [bc](https://www.gnu.org/software/bc/) (for log10 backoff math in the Venice client)
+- [elixir](https://elixir-lang.org/) (for the embedding helper)
 
 Development (installed via `mise install`):
-- `bats` for tests
-- `shellcheck` for linting
-- `shfmt` for formatting
-- GNU `parallel` for inter-file test parallelism
+- [mise](https://mise.jdx.dev/) to manage the other dev tools
+- [bats](https://github.com/bats-core/bats-core) for tests
+- [shellcheck](https://www.shellcheck.net/) for linting
+- [shfmt](https://github.com/mvdan/sh) for formatting
+- GNU [parallel](https://www.gnu.org/software/parallel/) for inter-file test parallelism
 
 Run `scratch doctor --dev` to verify the full dev environment.
 

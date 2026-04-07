@@ -287,6 +287,12 @@ Dies with a clear message if neither is set.
 `venice:curl METHOD PATH [BODY]` injects the `Authorization: Bearer $key` header, posts the body via stdin (`-d @-`) to avoid argv length limits, writes the response body to a temp file (`-o`) and captures the status code (`-w '%{http_code}'`) separately.
 Venice's documented error codes (401, 402, 429, 503, 504) get translated into user-targeted `die` messages: "insufficient credits, top up at...", "rate limited, wait and retry", etc.
 
+Transient errors (429, 503, 504) are automatically retried up to `SCRATCH_VENICE_MAX_ATTEMPTS` times (default 3) with a log10 backoff between attempts.
+The backoff formula is `ceil(2 * (1 + log10(attempt)))`, which ramps quickly from the start - the first retry is a real 2-second wait - but self-caps: even 1000 failed attempts only reaches an 8-second delay.
+Log10 is a better shape here than exponential for two reasons: it starts with a meaningful delay instead of fractional seconds, and it implicitly bounds the worst-case wait rather than requiring an arbitrary clamp.
+Each retry logs a warn to stderr so long pauses have visible cause.
+Non-retryable errors (401, 402, 415, other 4xx) die immediately without retrying, since retrying cannot fix them.
+
 ### `lib/model.sh` - the registry cache
 
 The model list is cached as the raw Venice response at `~/.config/scratch/venice/models.json`.

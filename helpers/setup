@@ -32,7 +32,7 @@ SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
 # Runtime dependencies - the commands scratch needs at runtime.
 # Keep this list in sync with what subcommands declare via has-commands.
 #-------------------------------------------------------------------------------
-RUNTIME_DEPS="bash jq gum curl elixir"
+RUNTIME_DEPS="bash jq gum curl bc elixir"
 
 #-------------------------------------------------------------------------------
 # Map a command name to its brew formula when they differ
