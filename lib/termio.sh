@@ -20,6 +20,14 @@ _TERMIO_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$_TERMIO_SCRIPTDIR/base.sh"
 
 #-------------------------------------------------------------------------------
+# Note on stdbuf: io:autoflush and io:sedl use stdbuf when available but
+# fall back gracefully when it is not. We intentionally do NOT declare
+# `has-commands stdbuf` here because that would die at source time on
+# systems without it, defeating the fallback. stdbuf is an optional
+# performance enhancement, not a hard requirement.
+#-------------------------------------------------------------------------------
+
+#-------------------------------------------------------------------------------
 # io:is-tty [FD]
 #
 # Test whether the given file descriptor (default: 1 / stdout) is connected

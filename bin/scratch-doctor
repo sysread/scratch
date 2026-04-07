@@ -206,6 +206,16 @@ scan-all-deps() {
     scan-commands "$f" "lib"
     scan-envs "$f" "lib"
   done
+
+  # Also scan helpers/ so tools that only appear in helper scripts (like
+  # elixir in helpers/embed) are caught. Attribution uses the helper's
+  # basename, e.g. "embed" for helpers/embed.
+  for f in "$SCRIPTDIR/../helpers/"*; do
+    [[ -f "$f" && -x "$f" ]] || continue
+    n="$(basename "$f")"
+    scan-commands "$f" "$n"
+    scan-envs "$f" "$n"
+  done
 }
 
 #-------------------------------------------------------------------------------

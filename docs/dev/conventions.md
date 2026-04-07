@@ -255,10 +255,31 @@ It detects GNU parallel and uses inter-file parallelism (capped at 8 jobs).
 
 ## Dependency Declaration
 
-Runtime commands are declared via `has-commands <cmd1> <cmd2>` at library source time or subcommand startup.
-The doctor subcommand scans bin/ and lib/ for these declarations and reports status with per-command attribution.
+**Rule:** every non-POSIX tool that a script invokes MUST be declared via `has-commands` somewhere doctor can scan.
+
+This is not a nice-to-have.
+It guarantees that:
+
+- Missing tools produce the `has-commands` error message (with install hint) instead of a cryptic `command not found` in the middle of a function.
+- `scratch doctor` can give users a pre-flight checklist of what's installed and what isn't, with per-command attribution showing which scratch component needs each tool.
+- Adding or removing functionality automatically updates the reported dependency surface, since declarations track real usage.
+
+Runtime commands are declared via `has-commands <cmd1> <cmd2>` at library source time or at the top of a subcommand/helper script.
+Doctor scans `bin/`, `lib/`, and `helpers/` for these declarations.
 
 Environment variables are declared via `require-env-vars <VAR1> <VAR2>`.
 Same scanning/attribution pattern.
 
-`_INSTALL_HINTS` in `lib/base.sh` maps command names to install hints when they differ from the package name.
+`_INSTALL_HINTS` in `lib/base.sh` maps command names to install hints when they differ from the package name (e.g., `gcloud` installs via `brew install google-cloud-sdk`).
+
+### Exception: optional tools with a graceful fallback
+
+If a tool is used optionally with a graceful fallback (e.g. `stdbuf` in `lib/termio.sh`, where the fallback is a passthrough), do NOT declare it via `has-commands`.
+Declaring would trigger a die at source time, defeating the fallback.
+Add a comment explaining why the tool is not declared.
+
+### POSIX tools
+
+POSIX-guaranteed commands do not need declarations: `sh`/`bash`, `printf`, `echo`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `grep`, `sed`, `awk`, `tr`, `cut`, `sort`, `head`, `tail`, `wc`, `find`, `test`, `basename`, `dirname`, `pwd`, `cd`, `mktemp`, `chmod`, `readlink`, `env`, `sleep`, `kill`, `trap`, etc.
+When in doubt, declare.
+The cost of a spurious declaration is one line; the cost of a missing one is a user hitting an unfriendly error.

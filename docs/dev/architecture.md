@@ -347,13 +347,30 @@ Individual tests `skip` cleanly if no API key is set, so contributors without on
 ## Dependency Declaration and Doctor
 
 The doctor subcommand is a declarative dependency checker.
-It scans `bin/` and `lib/` for `has-commands` and `require-env-vars` declarations, then verifies each one and reports status with per-command attribution.
+It scans `bin/`, `lib/`, and `helpers/` for `has-commands` and `require-env-vars` declarations, then verifies each one and reports status with per-command attribution.
 
 Doctor is intentionally independent of `cmd.sh`, `tui.sh`, and `gum`.
 It uses raw ANSI via `printf` because its whole purpose is to run when dependencies are broken.
 It DOES respect TTY detection: ANSI codes are auto-suppressed when stdout is piped.
 
 The scanner keywords (`has-commands`, `require-env-vars`) are held in variables inside doctor to prevent the scanner from matching its own grep arguments.
+
+### Rule: every non-POSIX tool gets a declaration
+
+If a script shells out to a tool that isn't guaranteed by POSIX, it MUST declare it via `has-commands` somewhere doctor can scan.
+Never rely on git/jq/curl/gum/bc/etc. being "obviously" present - declare and let the scanner find it.
+The only exception is tools used optionally with a graceful fallback (e.g. `stdbuf` in `lib/termio.sh` - the fallback is passthrough, so declaring would defeat the design).
+
+The three scan sets have different attribution labels:
+- `bin/scratch-<verb>` declarations attribute to the verb name
+- `lib/*.sh` declarations attribute to the synthetic label `lib` (library deps apply transitively to many commands)
+- `helpers/<name>` declarations attribute to the helper's basename (e.g., `helpers/embed` -> `embed`)
+
+When you add a new tool to scratch:
+1. If it goes in a library, declare it in that library's source-time `has-commands` line.
+2. If it's specific to one subcommand, declare it at the top of that subcommand's script.
+3. If it's specific to one helper, declare it at the top of that helper.
+4. If it's a runtime dep that `scratch setup` should install, also add it to `helpers/setup`'s `RUNTIME_DEPS` list.
 
 ## Self-Reflection Tests
 

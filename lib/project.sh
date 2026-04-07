@@ -29,7 +29,7 @@ _PROJECT_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$_PROJECT_SCRIPTDIR/base.sh"
 
-has-commands jq
+has-commands jq git
 
 #-------------------------------------------------------------------------------
 # Global config root for all scratch data

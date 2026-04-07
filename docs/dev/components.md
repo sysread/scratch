@@ -201,9 +201,14 @@ Uses raw ANSI `printf` with TTY detection for output.
 
 Checks:
 - bash version (5+)
-- All commands declared via `has-commands` in bin/ and lib/
-- All env vars declared via `require-env-vars` in bin/ and lib/
+- All commands declared via `has-commands` in `bin/`, `lib/`, and `helpers/`
+- All env vars declared via `require-env-vars` in the same scan set
 - Dev tools from `.mise.toml` + GNU parallel (with `--dev`)
+
+Scan attribution:
+- `bin/scratch-<verb>` files attribute to `<verb>`
+- `lib/*.sh` files attribute to the synthetic label `lib` (since library deps apply transitively to many consumers)
+- `helpers/<name>` files attribute to `<name>` (e.g., `embed` for `helpers/embed`, which declares `has-commands elixir`)
 
 Flags:
 - `--fix` - prompt to install missing deps via `helpers/setup`
