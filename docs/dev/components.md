@@ -91,6 +91,26 @@ Globals:
 - `SCRATCH_CONFIG_DIR` - `~/.config/scratch`
 - `SCRATCH_PROJECTS_DIR` - `~/.config/scratch/projects`
 
+### `lib/dispatch.sh`
+
+Parameterized subcommand dispatch.
+Depends on `base.sh` only.
+Optionally uses `tui:format` at runtime (via `type -t` check) for markdown rendering in `dispatch:usage`.
+
+Functions:
+- `dispatch:list PREFIX` - print verb names of all direct-child subcommands of PREFIX, sorted, one per line (grandchildren excluded via the "no hyphens in verb" rule)
+- `dispatch:path PREFIX VERB` - print the absolute path to the binary implementing VERB under PREFIX; returns 1 if not found
+- `dispatch:usage PREFIX DESC` - render a markdown help page to stderr listing all direct children with their synopsis lines
+- `dispatch:try PREFIX "$@"` - resolve first non-flag arg to a child subcommand and exec it; returns 1 on no match so the caller can handle fallthrough
+- `dispatch:bindir` - (private) print the absolute path to `bin/`
+
+`dispatch:try` handles these special cases without execing:
+- `-h` / `--help` - returns 1 (caller prints usage)
+- `help <verb>` - execs `<verb> --help` (walks the tree)
+- `synopsis` - returns 1 (caller must handle synopsis itself before calling)
+
+See the "Entry Point and the Subcommand System" section in `architecture.md` for the full design.
+
 ### `lib/cmd.sh`
 
 Declarative command definition framework.
@@ -137,17 +157,38 @@ Flags:
 The scanner reads files with `grep` and strips the keyword prefix to extract command/env names.
 Keywords are held in variables (`_KW_HAS_CMD`, `_KW_REQ_ENV`) so the literal strings never appear in code lines that would otherwise match the scanner's own grep.
 
-### `bin/scratch-project`
+### `bin/scratch-project` (parent)
 
-Project management CRUD.
-Uses `lib/project.sh` for storage and `lib/tui.sh` for interactive prompts.
+Parent dispatcher for project management.
+Has no behavior of its own - delegates to leaves via `dispatch:try`, falling through to `dispatch:usage` if no child matched.
 
-Subcommands:
-- `list` - all configured projects
-- `show [name]` - project config (auto-detects from cwd if name omitted)
-- `create [path]` - interactive creation (defaults to cwd)
-- `edit [name]` - interactive edit (auto-detects from cwd if name omitted)
-- `delete [name]` - delete with confirmation
+### `bin/scratch-project-list` (leaf)
+
+Prints all configured projects with their root paths.
+Uses `cmd.sh` for the interface, `project:list` + `project:load` for data.
+
+### `bin/scratch-project-show` (leaf)
+
+Prints a single project's configuration.
+Takes an optional positional NAME; if omitted, auto-detects via `project:resolve-name` (which falls back to `project:detect` on cwd).
+Shows a "cwd is a worktree of this project" banner when applicable.
+
+### `bin/scratch-project-create` (leaf)
+
+Interactive project creation.
+Takes an optional positional PATH (defaults to cwd).
+Prompts via `gum input` for name and exclude patterns; detects git status automatically.
+
+### `bin/scratch-project-edit` (leaf)
+
+Interactive project editing.
+Takes an optional positional NAME with the same resolution rules as `show`.
+Prompts for each field via `gum input` / `gum choose`.
+
+### `bin/scratch-project-delete` (leaf)
+
+Interactive project deletion with `gum confirm` prompt.
+Takes an optional positional NAME with the same resolution rules as `show`.
 
 ## Helper Scripts
 
@@ -170,6 +211,14 @@ Runs bats under `env -i` with a minimal allowlist (PATH, HOME, OSTYPE, TMPDIR, T
 
 Detects GNU parallel and uses inter-file parallelism (`-j`) capped at 8 jobs.
 Warns and falls back to serial if parallel is missing.
+
+### `helpers/root-dispatcher`
+
+The target of `bin/scratch`'s `exec` after the version and dependency checks pass.
+Kept out of `bin/` so `dispatch:list "scratch"` does not accidentally see it as a child.
+
+It is structurally identical to any other parent command: try `dispatch:try "scratch" "$@"`, and on fallthrough print `dispatch:usage` and exit.
+Has no behavior of its own.
 
 ### `helpers/embed`
 
@@ -201,6 +250,7 @@ Requires bash wrapper for the clang workaround (see `helpers/embed`).
 | `test/base.bats` | Tests for `lib/base.sh` |
 | `test/termio.bats` | Tests for `lib/termio.sh` (if present) |
 | `test/cmd.bats` | Tests for `lib/cmd.sh` |
+| `test/dispatch.bats` | Tests for `lib/dispatch.sh` |
 | `test/project.bats` | Tests for `lib/project.sh` |
 | `test/scratch-doctor.bats` | Tests for `bin/scratch-doctor` |
 | `test/lint.bats` | Self-reflection: shellcheck |

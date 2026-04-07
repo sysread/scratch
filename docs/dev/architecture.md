@@ -3,12 +3,12 @@
 Scratch is a multi-layer bash application with a polyglot embedding pipeline.
 This document describes how the pieces fit together.
 
-## Three-Layer Entry Point
+## Entry Point and the Subcommand System
 
-The invocation path from shell to running subcommand has three layers.
-Each layer has a distinct job and runs under distinct constraints.
+The invocation path from shell to running subcommand is a chain of execs.
+Each level has a distinct job and runs under distinct constraints.
 
-### Layer 1: `bin/scratch` (bash 3.2 shim)
+### The Shim: `bin/scratch` (bash 3.2)
 
 The user-facing entry point.
 This script MUST remain compatible with bash 3.2 (macOS system default) because its job may be to install bash 5+ when it is missing.
@@ -18,40 +18,87 @@ It does four things, in order:
 1. Intercepts `scratch setup` and delegates to `helpers/setup`.
 2. Verifies the running bash is 5+, prints upgrade instructions if not.
 3. Runs `helpers/setup --check` to verify runtime deps; prompts to install if interactive.
-4. `exec -a scratch bin/dispatch "$@"` to hand off to the real dispatcher.
+4. `exec -a scratch helpers/root-dispatcher "$@"` to hand off to the real dispatcher.
 
-`exec -a scratch` sets argv[0] so the process shows up as "scratch" in `ps` / `htop` rather than "dispatch".
+`exec -a scratch` sets argv[0] so the process shows up as "scratch" in `ps` / `htop` rather than "root-dispatcher".
 
 The script explicitly forbids bash 4+ features (no associative arrays, no namerefs, no globstar, no `readarray`, no `${var^^}`, no `|&`).
 Any bash 4+ syntax here would cause a parse error in bash 3.2 before the version check could run.
 
-### Layer 2: `bin/dispatch` (bash 5+)
+### Root Dispatcher: `helpers/root-dispatcher` (bash 5+)
 
-The subcommand resolver.
-It assumes bash 5+ because the shim guarantees it.
+The target of the shim's `exec`.
+Lives in `helpers/` rather than `bin/` so that `dispatch:list "scratch"` (which globs `bin/scratch-*`) does not accidentally see it as a child of itself.
 
-Responsibilities:
-- Resolve a subcommand name (`foo`) to its executable (`bin/scratch-foo`).
-- Build the top-level help by calling `scratch-<name> synopsis` on each subcommand and rendering the result through `tui:format`.
-- Wire built-in meta-commands (`help`, `-h`, `--help`).
-- Execute the resolved subcommand with `exec`.
+Its job is trivial: try `dispatch:try "scratch" "$@"` to resolve the first arg to a subcommand binary and exec it.
+If that returns (no match, `--help`, or no args), it prints the top-level usage via `dispatch:usage` and exits.
 
-### Layer 3: `bin/scratch-<name>` (individual subcommands)
+This is intentionally the same shape as any other parent command (see below).
+It has no behavior of its own; it is a generic dispatcher parameterized with the prefix `"scratch"`.
 
-The actual command implementations.
-Each script declares its own interface via `cmd.sh`, sources its own libraries, and runs its own logic.
+### Parent Commands: `bin/scratch-<name>` with children
 
-Subcommands MUST respond to `synopsis` with a one-line description on stdout (this is what dispatch calls to build the help menu).
-`cmd.sh` handles this automatically; scripts that can't use `cmd.sh` (doctor) handle it in their manual arg loop.
+A "parent" is a subcommand binary that itself has children.
+`bin/scratch-project` is the first example.
+
+A parent command has this shape:
+
+```bash
+# Respond to synopsis fast, before loading libraries
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "Manage project configurations"; exit 0
+fi
+
+# ... symlink resolution ...
+# ... source libs including dispatch.sh ...
+
+# Try to dispatch to a child
+dispatch:try "scratch-project" "$@" || true
+
+# Fallthrough: no child matched. Usage + exit.
+dispatch:usage "scratch-project" "Manage project configurations"
+```
+
+Because `dispatch:try` returns non-zero on no-match, parents are free to do whatever they want in the fallthrough: print usage (the common case), run a default action, show a dancing ASCII hamster, etc.
+
+### Leaf Commands: `bin/scratch-<parent>-<verb>`
+
+A "leaf" is a subcommand binary with no children.
+It's a normal command script that uses `cmd.sh` to declare its interface and parse its own argv.
+
+Naming rule: each hyphen in a binary name is a level separator.
+`bin/scratch-project-list` is a child of `scratch-project`, which is a child of `scratch`.
+This means subcommand verb names cannot contain hyphens.
+
+`dispatch:list` enforces this: when globbing children of prefix P, it only includes binaries whose verb (basename minus `P-`) contains no further hyphens.
+That way `dispatch:list "scratch"` yields `[doctor, project, ...]` but NOT `[doctor, project, project-list, project-show, ...]`.
+
+### Synopsis Protocol
+
+Every subcommand binary (parent or leaf) MUST respond to the single argument `synopsis` by printing its one-line description on stdout and exiting 0.
+`dispatch:usage` calls this to build the subcommand listing.
+
+For leaves using `cmd.sh`, this is handled automatically by `cmd:parse`.
+For parents and for commands that bypass `cmd.sh` (like `doctor`), handle synopsis manually BEFORE sourcing any libraries so the response stays fast.
+
+### The `help` Verb
+
+`scratch help <verb>` walks the tree.
+`dispatch:try` intercepts the literal token `help` and, if followed by a known verb, execs that verb's binary with `--help`.
+This works at any level: `scratch project help list` runs `scratch-project-list --help`.
 
 ## Directory Structure
 
 ```
-bin/          user-facing executables
-  scratch         entry point shim (bash 3.2)
-  dispatch        subcommand dispatcher (bash 5+)
-  scratch-doctor  env health check
-  scratch-project project management CRUD
+bin/          user-facing subcommand executables
+  scratch                  entry point shim (bash 3.2)
+  scratch-doctor           env health check (leaf)
+  scratch-project          project management (parent dispatcher)
+  scratch-project-list     leaf
+  scratch-project-show     leaf
+  scratch-project-create   leaf
+  scratch-project-edit     leaf
+  scratch-project-delete   leaf
 
 lib/          sourced libraries (not executable)
   base.sh         warn, die, has-commands, require-env-vars
@@ -60,25 +107,28 @@ lib/          sourced libraries (not executable)
   tempfiles.sh    tmp:make, tmp:cleanup (trap-based temp file registry)
   project.sh      project:save, project:load, project:detect (worktree-aware)
   cmd.sh          cmd:define, cmd:parse, cmd:get (declarative command framework)
+  dispatch.sh     dispatch:try, dispatch:usage (parameterized subcommand dispatch)
 
-libexec/      internal executables called only by other scripts
+libexec/      internal non-bash executables
   embed.exs       Elixir embedding generator (called by helpers/embed)
 
-helpers/      user-callable helper scripts
-  setup           runtime dep installer (bash 3.2 compatible)
-  run-tests       clean-env bats runner with parallel support
-  embed           bash wrapper around libexec/embed.exs (sets CXX for EXLA)
+helpers/      bash scripts that are not subcommands
+  setup              runtime dep installer (bash 3.2 compatible)
+  run-tests          clean-env bats runner with parallel support
+  embed              bash wrapper around libexec/embed.exs (sets CXX for EXLA)
+  root-dispatcher    target of bin/scratch exec; top-level subcommand dispatcher
 
 test/         bats test suite
-  helpers.sh        is, diag, make_stub, prepend_stub_path
-  base.bats         tests for lib/base.sh
-  cmd.bats          tests for lib/cmd.sh
-  project.bats      tests for lib/project.sh
+  helpers.sh                is, diag, make_stub, prepend_stub_path
+  base.bats                 tests for lib/base.sh
+  cmd.bats                  tests for lib/cmd.sh
+  dispatch.bats             tests for lib/dispatch.sh
+  project.bats              tests for lib/project.sh
   scratch-doctor.bats
-  lint.bats               self-reflection: shellcheck
-  formatting.bats         self-reflection: shfmt drift
-  permissions.bats        self-reflection: +x policy
-  anti-slop.bats          self-reflection: no smart quotes or em dashes
+  lint.bats                 self-reflection: shellcheck
+  formatting.bats           self-reflection: shfmt drift
+  permissions.bats          self-reflection: +x policy
+  anti-slop.bats            self-reflection: no smart quotes or em dashes
   subcommand-contract.bats  self-reflection: subcommands honor --help
 
 docs/
@@ -91,20 +141,23 @@ docs/
 
 ## Layer Separation Rules
 
-- `bin/` files are executables.
+- `bin/` files are subcommand executables.
   They MUST have the `+x` bit set.
-  Directly invocable by users.
+  Named with the `scratch-` prefix (and `scratch-parent-verb` for leaves).
+  Directly invocable by users via the dispatcher.
 
 - `lib/` files are sourced, never executed.
   They MUST NOT have the `+x` bit set.
   Each has a multiple-inclusion guard.
 
-- `helpers/` files are user-callable scripts (`scratch setup`, `scratch run-tests` patterns).
+- `helpers/` files are bash scripts that are NOT subcommands.
   They MUST have the `+x` bit set.
+  This includes both user-callable scripts (`setup`, `run-tests`, `embed`) and internal targets of the shim (`root-dispatcher`).
+  They are kept out of `bin/` so they don't accidentally appear in `dispatch:list "scratch"` output.
 
-- `libexec/` files are internal implementation details, called only by other scripts.
+- `libexec/` files are internal non-bash executables (e.g., Elixir scripts).
   They MUST NOT have the `+x` bit set.
-  They're not meant to be invoked directly; a wrapper in `helpers/` or `bin/` handles environment setup.
+  A wrapper in `helpers/` handles environment setup and execs them with the right interpreter.
 
 The `permissions.bats` test enforces these rules at test time.
 
@@ -125,6 +178,8 @@ base.sh              (no deps)
   +-- project.sh     (depends on base, requires jq)
   |
   +-- cmd.sh         (depends on base ONLY)
+  |
+  +-- dispatch.sh    (depends on base ONLY; optionally uses tui:format at runtime)
 ```
 
 `cmd.sh` deliberately does not source `tui.sh` at load time, because tui.sh requires `gum` and `jq` at source time.
