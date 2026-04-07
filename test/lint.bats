@@ -61,7 +61,15 @@ setup() {
   # SC1091: library paths are resolved dynamically from SCRATCH_HOME
   # SC2030/SC2031: every @test is a bats subshell by design; variable
   #   modifications are always local to the test, which is correct behavior.
-  run shellcheck -e SC1091,SC2030,SC2031 "${SCRATCH_HOME}/test/"*.bats "${SCRATCH_HOME}/test/"helpers.sh
+  local -a files=()
+  while IFS= read -r rel; do
+    [[ -z "$rel" ]] && continue
+    files+=("${SCRATCH_HOME}/${rel}")
+  done < <(git -C "$SCRATCH_HOME" ls-files 'test/*.bats' 'test/*/*.bats' 'test/helpers.sh')
+
+  [[ ${#files[@]} -eq 0 ]] && return 0
+
+  run shellcheck -e SC1091,SC2030,SC2031 "${files[@]}"
   if [[ "$status" -ne 0 ]]; then
     echo "shellcheck failed (exit $status):"
     echo "$output"

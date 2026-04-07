@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# Run the scratch integration test suite
+#
+# Integration tests make real API calls against https://api.venice.ai and
+# cost real money. They are never run automatically - not in CI, not as
+# part of `mise run test`. Opt in via `mise run test:integration` or by
+# calling this script directly.
+#
+# Isolation notes:
+#
+#   1. HOME is still overridden to a fresh mktemp directory (cleaned up on
+#      exit). This prevents integration runs from polluting the developer's
+#      real ~/.config/scratch/venice/models.json cache.
+#
+#   2. There is NO curl network guard. Integration tests need the network
+#      by definition.
+#
+#   3. SCRATCH_VENICE_API_KEY and VENICE_API_KEY are forwarded from the
+#      caller's environment. If neither is set, individual tests should
+#      skip (via bats `skip`) rather than fail.
+#
+# Usage:
+#   helpers/run-integration-tests              # run all integration tests
+#   helpers/run-integration-tests [bats args]  # forward extra args to bats
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPTDIR/.." && pwd)"
+
+#-------------------------------------------------------------------------------
+# HOME isolation (same pattern as helpers/run-tests)
+#-------------------------------------------------------------------------------
+TEST_HOME="$(mktemp -d -t scratch-integration-home.XXXXXX)"
+trap 'rm -rf "$TEST_HOME"' EXIT INT TERM HUP
+
+#-------------------------------------------------------------------------------
+# Integration test file discovery
+#-------------------------------------------------------------------------------
+shopt -s nullglob
+INTEGRATION_TESTS=("$REPO_ROOT/test/integration"/*.bats)
+shopt -u nullglob
+
+if ((${#INTEGRATION_TESTS[@]} == 0)); then
+  echo "No integration tests found under $REPO_ROOT/test/integration/" >&2
+  exit 0
+fi
+
+#-------------------------------------------------------------------------------
+# API key check - warn up front if missing, but let individual tests skip
+# rather than failing the whole run.
+#-------------------------------------------------------------------------------
+if [[ -z "${SCRATCH_VENICE_API_KEY:-}" && -z "${VENICE_API_KEY:-}" ]]; then
+  echo "WARNING: neither SCRATCH_VENICE_API_KEY nor VENICE_API_KEY is set." >&2
+  echo "         Integration tests will skip individually." >&2
+  echo "" >&2
+fi
+
+#-------------------------------------------------------------------------------
+# Run bats
+#
+# No parallelism - we do not hammer the real API with concurrent requests,
+# and serial execution makes debugging failures easier.
+#-------------------------------------------------------------------------------
+status=0
+env -i \
+  PATH="$PATH" \
+  HOME="$TEST_HOME" \
+  OSTYPE="$OSTYPE" \
+  TMPDIR="${TMPDIR:-/tmp}" \
+  TERM="${TERM:-dumb}" \
+  SCRATCH_VENICE_API_KEY="${SCRATCH_VENICE_API_KEY:-}" \
+  VENICE_API_KEY="${VENICE_API_KEY:-}" \
+  bats -T "$@" "${INTEGRATION_TESTS[@]}" || status=$?
+
+exit "$status"

@@ -91,6 +91,22 @@ if ! command -v parallel > /dev/null 2>&1; then
 fi
 
 #-------------------------------------------------------------------------------
+# Test file selection
+#
+# Non-recursive glob of test/*.bats only. Integration tests live under
+# test/integration/ and run via helpers/run-integration-tests - they need
+# network access and skip individually without an API key.
+#-------------------------------------------------------------------------------
+shopt -s nullglob
+UNIT_TESTS=("$REPO_ROOT/test"/*.bats)
+shopt -u nullglob
+
+if ((${#UNIT_TESTS[@]} == 0)); then
+  echo "No unit tests found under $REPO_ROOT/test/" >&2
+  exit 1
+fi
+
+#-------------------------------------------------------------------------------
 # Run bats under the isolated environment
 #
 # Note we do NOT exec here - we need the script to survive to run the EXIT
@@ -103,6 +119,6 @@ env -i \
   OSTYPE="$OSTYPE" \
   TMPDIR="${TMPDIR:-/tmp}" \
   TERM="${TERM:-dumb}" \
-  bats "${BATS_JOBS[@]}" -T -r "$REPO_ROOT/test/" "$@" || status=$?
+  bats "${BATS_JOBS[@]}" -T "$@" "${UNIT_TESTS[@]}" || status=$?
 
 exit "$status"
