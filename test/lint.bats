@@ -58,7 +58,10 @@ setup() {
 }
 
 @test "shellcheck ./test" {
-  run shellcheck -e SC1091 "${SCRATCH_HOME}/test/"*.bats "${SCRATCH_HOME}/test/"helpers.sh
+  # SC1091: library paths are resolved dynamically from SCRATCH_HOME
+  # SC2030/SC2031: every @test is a bats subshell by design; variable
+  #   modifications are always local to the test, which is correct behavior.
+  run shellcheck -e SC1091,SC2030,SC2031 "${SCRATCH_HOME}/test/"*.bats "${SCRATCH_HOME}/test/"helpers.sh
   if [[ "$status" -ne 0 ]]; then
     echo "shellcheck failed (exit $status):"
     echo "$output"
