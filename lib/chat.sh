@@ -25,6 +25,7 @@ _CHAT_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 {
   source "$_CHAT_SCRIPTDIR/base.sh"
   source "$_CHAT_SCRIPTDIR/venice.sh"
+  source "$_CHAT_SCRIPTDIR/tool.sh"
 }
 
 has-commands jq
@@ -95,3 +96,114 @@ chat:extract-content() {
 }
 
 export -f chat:extract-content
+
+#-------------------------------------------------------------------------------
+# chat:complete-with-tools MODEL MESSAGES_JSON TOOL_NAMES_JSON [EXTRA_JSON]
+#
+# Like chat:completion, but loops on Venice tool_calls responses. Each round:
+#
+#   1. Send the current messages + tools to the model.
+#   2. If the response has .choices[0].message.tool_calls, execute them in
+#      parallel via tool:invoke-parallel, append the assistant message and
+#      one tool result message per call to the messages array, and repeat.
+#   3. If the response is plain text (no tool_calls), return it as-is.
+#
+# MODEL            model id string
+# MESSAGES_JSON    initial JSON array of messages
+# TOOL_NAMES_JSON  non-empty JSON array of tool names; tool:specs-json wraps
+#                  each into the OpenAI function envelope before sending.
+#                  Tools that fail their is-available check are silently
+#                  filtered out.
+# EXTRA_JSON       optional extras object (temperature, venice_parameters,
+#                  response_format, etc.). The "tools" key is set by us;
+#                  any "tools" key in EXTRA_JSON will be overridden.
+#
+# Returns the FINAL response body JSON (after the model has stopped asking
+# for tool calls). Dies on API errors via venice:curl.
+#
+# Empty TOOL_NAMES_JSON dies with a hint to use chat:completion directly.
+# No max recursion cap by user decision; runaway models burn API credit
+# until Ctrl-C.
+#
+# Defensive .function.arguments parsing: the model's tool argument JSON is
+# parsed via `fromjson? // {}` so a malformed argument string surfaces as
+# an empty object instead of killing the recursion. The tool then sees
+# {} for SCRATCH_TOOL_ARGS_JSON and can fail with its own clear error.
+#
+# Example:
+#   messages='[{"role":"user","content":"notify me with hello"}]'
+#   tools='["notify"]'
+#   chat:complete-with-tools llama-3-large "$messages" "$tools"
+#-------------------------------------------------------------------------------
+chat:complete-with-tools() {
+  local model="$1"
+  local messages="$2"
+  local tool_names_json="$3"
+  local extras="${4:-}"
+
+  [[ -n "$extras" ]] || extras='{}'
+
+  # Validate the tools array up front
+  local tool_count
+  tool_count="$(jq 'length' <<< "$tool_names_json" 2> /dev/null || echo "")"
+  if [[ -z "$tool_count" || "$tool_count" == "0" ]]; then
+    die "chat:complete-with-tools: TOOL_NAMES_JSON must be a non-empty JSON array (use chat:completion directly for the no-tools case)"
+    return 1
+  fi
+
+  # Resolve tool names to specs (filters out unavailable tools)
+  local tool_names_args
+  mapfile -t tool_names_args < <(jq -r '.[]' <<< "$tool_names_json")
+
+  local specs
+  specs="$(tool:specs-json "${tool_names_args[@]}")"
+
+  # Inject tools into extras (overriding any caller-provided tools key)
+  local merged_extras
+  merged_extras="$(jq -c --argjson t "$specs" '. + {tools: $t}' <<< "$extras")"
+
+  local response
+  local tool_calls
+  local calls
+  local results
+  local assistant_msg
+
+  while :; do
+    response="$(chat:completion "$model" "$messages" "$merged_extras")"
+
+    # Extract tool_calls. // empty makes the test below uniform - if
+    # there are no tool_calls, $tool_calls is empty string.
+    tool_calls="$(jq -c '.choices[0].message.tool_calls // empty' <<< "$response")"
+
+    if [[ -z "$tool_calls" || "$tool_calls" == "null" ]]; then
+      # Plain text response (or any non-tool-call response). Return it.
+      printf '%s' "$response"
+      return 0
+    fi
+
+    # Build calls array for tool:invoke-parallel. .function.arguments is
+    # a JSON STRING per OpenAI spec; parse it defensively. fromjson? returns
+    # null on malformed input; // {} substitutes an empty object so the
+    # tool author sees a clear arg shape rather than a crash.
+    calls="$(jq -c '[.[] | {
+      id: .id,
+      name: .function.name,
+      args: (.function.arguments | (fromjson? // {}))
+    }]' <<< "$tool_calls")"
+
+    results="$(tool:invoke-parallel "$calls")"
+
+    # Append the assistant message (with its tool_calls) and one tool
+    # result message per call to the messages array. Order matters: the
+    # tool messages must come AFTER the assistant message that requested
+    # them, in the same order as the calls.
+    assistant_msg="$(jq -c '.choices[0].message' <<< "$response")"
+    messages="$(jq -c \
+      --argjson assistant "$assistant_msg" \
+      --argjson results "$results" \
+      '. + [$assistant] + ($results | map({role: "tool", tool_call_id: .tool_call_id, content: .content}))' \
+      <<< "$messages")"
+  done
+}
+
+export -f chat:complete-with-tools
