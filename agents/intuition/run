@@ -1,34 +1,40 @@
 #!/usr/bin/env bash
 
 #-------------------------------------------------------------------------------
-# intuition agent - reference implementation of a complex multi-phase agent
+# intuition agent - reference implementation of a multi-phase agent
 #
 # Adapted from fnord's AI.Agent.Intuition (~370 lines of Elixir, 10 drives).
 # This bash version is structurally identical but smaller for cost reasons:
 # 4 drives instead of 10, smaller prompts, same three phases.
 #
+# All three phases use the `fast` profile with venice_parameters.disable_thinking
+# enabled, because the intuition workflow values low latency over reasoning
+# depth - the value comes from running multiple distinct lenses in parallel,
+# not from any single phase being a deep thinker. The fan-out is the
+# reasoning, in aggregate.
+#
 # Phase 1: Perception
-#   Read the transcript on stdin (potentially huge - chat history with
-#   tool call results, code, etc.) and reduce it via the accumulator
-#   into a structured perception of the situation. Uses the long-context
-#   profile (qwen-3-6-plus) so we have the largest possible window for
-#   the chunking.
+#   Read the transcript on stdin and run a single completion to summarize
+#   the situation. Earlier versions used the accumulator here, but in real
+#   use the input is a chat transcript that fits comfortably in the fast
+#   model's context window. The accumulator was overkill and added latency.
 #
 # Phase 2: Drive reactions (parallel)
 #   For each drive prompt under data/prompts/intuition/drives/, run a
 #   chat:completion against the perception with that drive's specific
 #   system prompt. All drives run in parallel via workers:run-parallel.
-#   Uses the fast profile because the drive prompts are short and we
-#   want low latency for the fan-out.
 #
 # Phase 3: Synthesis
 #   Concatenate the drive reactions and run a single chat:completion
 #   that synthesizes them into a coherent first-person directive.
-#   Uses the smart profile - this is the highest-quality decision
-#   point in the workflow.
 #
 # stdout: the synthesized intuition (plain text, ~1 paragraph)
-# stderr: progress logs via tui:info
+# stderr: empty by default; debug output when SCRATCH_DEBUG_INTUITION is set
+#
+# Debugging:
+#   SCRATCH_DEBUG_INTUITION=1  Logs each phase's full output to stderr,
+#                              labeled (perception, drive:<name>, synthesis)
+#                              via tui:info.
 #-------------------------------------------------------------------------------
 
 set -euo pipefail
@@ -39,39 +45,66 @@ set -euo pipefail
   source "$SCRATCH_HOME/lib/tempfiles.sh"
   source "$SCRATCH_HOME/lib/prompt.sh"
   source "$SCRATCH_HOME/lib/chat.sh"
-  source "$SCRATCH_HOME/lib/accumulator.sh"
   source "$SCRATCH_HOME/lib/workers.sh"
   source "$SCRATCH_HOME/lib/model.sh"
   source "$SCRATCH_HOME/lib/tui.sh"
 }
 
+# Debug helper. When SCRATCH_DEBUG_INTUITION is set (any value), log a
+# label and a content payload to stderr via tui:info. When the debug
+# flag is unset this is a no-op.
+#
+# Exported because the drive reaction worker (which runs in a subshell
+# under workers:run-parallel) calls it.
+# shellcheck disable=SC2329 # invoked from the main script and from worker subshells
+_intuition_debug() {
+  [[ -n "${SCRATCH_DEBUG_INTUITION:-}" ]] || return 0
+  local label="$1"
+  local content="$2"
+  tui:info "intuition[${label}]" content "$content"
+}
+export -f _intuition_debug
+
+# Resolve the model + extras once. Every chat call in this agent uses
+# the fast profile with disable_thinking layered on top, since the
+# whole agent is optimized for fan-out latency rather than per-call
+# reasoning depth.
+INTUITION_MODEL="$(model:profile:model fast)"
+INTUITION_EXTRAS="$(
+  model:profile:extras fast \
+    | jq -c '. + {venice_parameters: ((.venice_parameters // {}) + {disable_thinking: true})}'
+)"
+export INTUITION_MODEL INTUITION_EXTRAS
+
 # ---------------------------------------------------------------------------
-# Phase 1: perception via accumulator
+# Phase 1: perception (single completion, no accumulator)
 # ---------------------------------------------------------------------------
 
-tui:info "intuition: phase 1 - perception"
 transcript="$(cat)"
 
-# A genuinely empty transcript breaks the accumulator's reduce loop and
-# leaves the model with nothing to react to. Bail out early with a
-# clear message rather than spending API calls on noise.
 if [[ -z "$transcript" ]]; then
   die "intuition: empty transcript on stdin"
   exit 1
 fi
 
-perception="$(
-  accumulate:run-profile long-context \
-    "$(prompt:load intuition/perception)" \
-    "$transcript" \
-    '{"question":"Respond with your subconscious perception."}'
+perception_system="$(prompt:load intuition/perception)"
+perception_messages="$(
+  jq -c -n \
+    --arg s "$perception_system" \
+    --arg u "$transcript" \
+    '[{role:"system",content:$s},{role:"user",content:$u}]'
 )"
+
+perception="$(
+  chat:completion "$INTUITION_MODEL" "$perception_messages" "$INTUITION_EXTRAS" \
+    | chat:extract-content
+)"
+
+_intuition_debug perception "$perception"
 
 # ---------------------------------------------------------------------------
 # Phase 2: parallel drive reactions
 # ---------------------------------------------------------------------------
-
-tui:info "intuition: phase 2 - drive reactions"
 
 # The set of drives the agent considers. Order does not matter; the
 # synthesis pass concatenates results regardless. To add a drive: drop
@@ -87,9 +120,7 @@ tmp:install-traps
 
 PERCEPTION="$perception"
 DRIVE_BASE="$(prompt:load intuition/drive-base)"
-DRIVE_MODEL="$(model:profile:model fast)"
-DRIVE_EXTRAS="$(model:profile:extras fast)"
-export DRIVES PERCEPTION DRIVE_BASE DRIVE_MODEL DRIVE_EXTRAS DRIVE_WORKDIR
+export DRIVES PERCEPTION DRIVE_BASE DRIVE_WORKDIR
 
 # Worker function: looks up its drive name from DRIVES[i], loads the
 # drive's specific prompt, builds the messages, calls chat:completion,
@@ -112,9 +143,11 @@ _intuition_drive_worker() {
       '[{role:"system",content:$s},{role:"user",content:$u}]'
   )"
 
-  chat:completion "$DRIVE_MODEL" "$messages" "$DRIVE_EXTRAS" \
+  chat:completion "$INTUITION_MODEL" "$messages" "$INTUITION_EXTRAS" \
     | chat:extract-content \
     > "${DRIVE_WORKDIR}/${i}.out"
+
+  _intuition_debug "drive:${drive}" "$(cat "${DRIVE_WORKDIR}/${i}.out")"
 }
 export -f _intuition_drive_worker
 
@@ -126,8 +159,6 @@ workers:run-parallel \
 # ---------------------------------------------------------------------------
 # Phase 3: synthesis
 # ---------------------------------------------------------------------------
-
-tui:info "intuition: phase 3 - synthesis"
 
 # Concatenate the reactions in input order. The synthesis prompt does
 # not need to know which drive said what; it just needs the union of
@@ -152,7 +183,11 @@ synthesis_messages="$(
     ]'
 )"
 
-synthesis_model="$(model:profile:model smart)"
-synthesis_extras="$(model:profile:extras smart)"
-chat:completion "$synthesis_model" "$synthesis_messages" "$synthesis_extras" \
-  | chat:extract-content
+synthesis="$(
+  chat:completion "$INTUITION_MODEL" "$synthesis_messages" "$INTUITION_EXTRAS" \
+    | chat:extract-content
+)"
+
+_intuition_debug synthesis "$synthesis"
+
+printf '%s\n' "$synthesis"

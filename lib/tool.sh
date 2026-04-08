@@ -209,7 +209,7 @@ tool:available() {
   # so a die() inside the script (via has-commands) propagates as a real
   # exit code rather than aborting the calling test or function.
   # SC2030/SC2031: subshell-local modification is intentional here.
-  # shellcheck disable=SC2030
+  # shellcheck disable=SC2030,SC2031
   (
     export SCRATCH_HOME
     SCRATCH_HOME="$(cd "$_TOOL_SCRIPTDIR/.." && pwd -P)"
