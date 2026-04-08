@@ -121,14 +121,16 @@ Functions:
 - `venice:api-key` - print the API key; tries `SCRATCH_VENICE_API_KEY` first, then `VENICE_API_KEY`; dies with a clear message if neither is set
 - `venice:base-url` - print the hard-coded Venice API base URL
 - `venice:config-dir` - print (and create) `~/.config/scratch/venice/`; resolves under `$HOME`, so tests running with isolated HOME get isolated config automatically
-- `venice:curl METHOD PATH [BODY]` - authenticated request wrapper with automatic retry on transient errors; body via stdin to avoid argv limits; translates Venice-specific error codes (401/402/429/503/504) into user-targeted `die` messages
+- `venice:curl METHOD PATH [BODY]` - authenticated request wrapper with automatic retry on transient errors; body via stdin to avoid argv limits; dumps response headers via `curl -D` so the retry path can read Venice's rate-limit headers; translates Venice-specific error codes (401/402/429/500/503/504) into user-targeted `die` messages
 
 Private helpers:
 - `_venice:_backoff-seconds ATTEMPT` - compute retry delay via a log10 curve (`ceil(2 * (1 + log10(attempt)))`); uses `bc -l` for the floating-point math
+- `_venice:_reset-wait HEADERS_FILE` - parse `x-ratelimit-reset-requests` (a unix timestamp) from a curl header dump and return seconds-until-reset, capped at `_VENICE_MAX_RESET_WAIT` (60s); empty when the header is missing, malformed, or stale
 
 Retry behavior:
-- Transient errors (429 rate-limited, 503 at capacity, 504 timeout) retry up to `SCRATCH_VENICE_MAX_ATTEMPTS` times (default 3).
-- Each retry sleeps for a log10-scaled backoff and logs a warn to stderr with `(attempt N/max)` so long pauses have visible cause.
+- Transient errors (429 rate-limited, 500 server error, 503 at capacity, 504 timeout) retry up to `SCRATCH_VENICE_MAX_ATTEMPTS` times (default 3). 429/500/503 are documented retryable codes for Venice; 504 is included defensively.
+- For 429, the wait honors Venice's `x-ratelimit-reset-requests` header when present (capped at 60s); otherwise, and for the other transient codes, it falls back to the log10 backoff curve. This avoids the trap where our short backoff guarantees a second 429.
+- Each retry logs a warn to stderr with `(attempt N/max)` so long pauses have visible cause.
 - Non-retryable errors (401, 402, 415, other 4xx) die immediately without retrying.
 - The log10 curve: attempt 1 -> 2s, attempt 10 -> 4s, attempt 100 -> 6s, attempt 1000 -> 8s. Self-caps in practice because log grows so slowly.
 
