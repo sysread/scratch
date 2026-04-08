@@ -204,6 +204,11 @@ _attr-lib() { printf '%s\n' "lib"; }
 # bin/lib/helper attribution in the doctor output.
 _attr-tool() { printf 'tool:%s\n' "$(basename "$(dirname "$1")")"; }
 
+# Agent is-available scripts use the same parent-directory-basename trick
+# with an "agent:" prefix. Same double-duty contract as tools: the
+# is-available script is both a runtime gate and a dep manifest.
+_attr-agent() { printf 'agent:%s\n' "$(basename "$(dirname "$1")")"; }
+
 #-------------------------------------------------------------------------------
 # _scan-deps-in PATTERN ATTR_FN NEED_X
 #
@@ -238,20 +243,22 @@ _scan-deps-in() {
 }
 
 #-------------------------------------------------------------------------------
-# Walk all scratch dependency declarations across the four scan targets:
+# Walk all scratch dependency declarations across the five scan targets:
 #
 #   bin/scratch-*           attributed by verb (subcommand-name)
 #   lib/*.sh                folded into "lib"
 #   helpers/*               attributed by helper basename (e.g. "embed")
 #   tools/*/is-available    attributed by tool name with "tool:" prefix
+#   agents/*/is-available   attributed by agent name with "agent:" prefix
 #
-# All four use the same _scan-deps-in helper - one line per target.
+# All five use the same _scan-deps-in helper - one line per target.
 #-------------------------------------------------------------------------------
 scan-all-deps() {
   _scan-deps-in "$SCRIPTDIR/scratch-*" subcommand-name x
   _scan-deps-in "$SCRIPTDIR/../lib/*.sh" _attr-lib any
   _scan-deps-in "$SCRIPTDIR/../helpers/*" basename x
   _scan-deps-in "$SCRIPTDIR/../tools/*/is-available" _attr-tool x
+  _scan-deps-in "$SCRIPTDIR/../agents/*/is-available" _attr-agent x
 }
 
 #-------------------------------------------------------------------------------

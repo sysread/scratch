@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# echo agent (stub)
+#
+# Reads stdin and prints it back unchanged. Exists in this state so the
+# agent contract test has a real fixture to validate against. The real
+# implementation lands in 03-2 and uses agent:simple-completion to call
+# a model.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+cat
