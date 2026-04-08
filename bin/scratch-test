@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch test - quick debug invocation of the intuition agent
+#
+# Takes a prompt as positional args (or reads stdin if no args are given)
+# and pipes it through agents/intuition. The intuition agent returns a
+# synthesized first-person directive based on its 4-drive subconscious
+# reaction to the input.
+#
+# Useful for ad-hoc testing of the agent layer end-to-end. Not a long-
+# lived feature; expect this to evolve into `scratch agent run <name>`
+# once the user-facing agent CLI lands.
+#
+# Examples:
+#   scratch test "what should I work on next?"
+#   git log --oneline -20 | scratch test
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="Run the intuition agent against a prompt (debug; positional or stdin)"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/agent.sh"
+}
+
+has-min-bash-version 5
+has-commands jq
+
+cmd:define "test" "$_DESC"
+cmd:define-cli-usage "EXAMPLES" "$(
+  cat << 'EOF'
+scratch test "what should I work on next?"
+git log --oneline -20 | scratch test
+echo "user said: hello" | scratch test
+EOF
+)"
+cmd:parse "$@"
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+main() {
+  local -a positionals=()
+  local arg
+  while IFS= read -r arg; do
+    [[ -z "$arg" ]] && continue
+    positionals+=("$arg")
+  done < <(cmd:rest || true)
+
+  if ((${#positionals[@]} > 0)); then
+    # Positional args: join them with spaces and pipe to the agent.
+    printf '%s' "${positionals[*]}" | agent:run intuition
+  else
+    # No positional args: read stdin and pipe through.
+    agent:run intuition
+  fi
+}
+
+main
