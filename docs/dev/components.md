@@ -263,6 +263,15 @@ Functions:
 - `tool:dir NAME` - absolute path; dies if missing
 - `tool:spec NAME` - raw spec.json contents
 - `tool:specs-json [NAMES...]` - JSON array of OpenAI-wire-format wrapped specs `[{type:"function", function:<spec>}]`. Filters out unavailable tools unless `SCRATCH_TOOL_SKIP_AVAILABILITY=1`. Filtered-tool warnings are deduped per process via `_TOOL_SPECS_WARNED` so a multi-phase agent that calls the function across rounds does not produce repeated noise.
+
+Toolbox functions:
+- `tool:boxes-dir` - print the toolboxes directory (honors `SCRATCH_TOOLBOXES_DIR` for tests)
+- `tool:box-list` - sorted toolbox names, one per line
+- `tool:box-exists NAME` - silent predicate
+- `tool:box-dir NAME` - absolute path; dies if missing
+- `tool:box NAME` - the headline function. Returns the toolbox's `tools.json` content (the full `{description, tools}` object) on success. On failure (is-available exits non-zero), returns the same shape with `tools` replaced by `[]` and warns ONCE per process via `_TOOLBOX_WARNED`. Dies on unknown toolbox or malformed `tools.json`. Honors `SCRATCH_TOOL_SKIP_AVAILABILITY=1` for tests.
+
+A toolbox is a named bundle of tool names with its own `is-available` gate. See the "Toolboxes" section below for the layout and the three reference toolboxes.
 - `tool:available NAME` - runs `is-available` with the env contract; captures stderr in `_TOOL_AVAILABILITY_ERR`
 - `tool:invoke NAME ARGS_JSON` - synchronously execute `main` with the env contract. Captures stdout into `_TOOL_INVOKE_STDOUT` and stderr into `_TOOL_INVOKE_STDERR` via tempfile redirects (NOT process substitution, to preserve exit codes). Returns the tool's exit code. Returns 127 if `is-available` fails first.
 - `tool:invoke-parallel CALLS_JSON` - parallel execution via background jobs + wait. `CALLS_JSON` is a JSON array of `{id, name, args}` matching the OpenAI tool_calls shape. Forks one bg job per call, captures each tool's streams to numbered temp files in a `tmp:make`-allocated workdir (in the parent shell, NOT in subshells, because `tmp:make`'s registry lives in parent process memory). Results assemble in input order regardless of completion order. Failures encode as `ok:false`; silent failures get a synthesized `ERROR: tool '<name>' exited with status <code>` fallback.
@@ -350,8 +359,9 @@ Scan attribution:
 - `helpers/<name>` files attribute to `<name>` (e.g., `embed` for `helpers/embed`, which declares `has-commands elixir`)
 - `tools/<name>/is-available` files attribute to `tool:<name>` (e.g., `tool:notify` for `tools/notify/is-available`). The `tool:` prefix disambiguates tool deps from bin/lib/helper deps in the doctor output.
 - `agents/<name>/is-available` files attribute to `agent:<name>` (e.g., `agent:intuition` for `agents/intuition/is-available`). Same prefix-disambiguation rationale as tools.
+- `toolboxes/<name>/is-available` files attribute to `toolbox:<name>`. Most toolboxes are pure policy gates with no binary deps of their own, so this scan target usually finds nothing - but the loop is one line and gets cross-attribution for free if a toolbox ever does declare a binary.
 
-All five scan targets share a single `_scan-deps-in` helper - one line per target in `scan-all-deps`. The same binary may show up under multiple labels: `jq` reports as `(lib tool:notify agent:echo agent:intuition)`, surfacing the full set of consumers in one row.
+All six scan targets share a single `_scan-deps-in` helper - one line per target in `scan-all-deps`. The same binary may show up under multiple labels: `jq` reports as `(lib tool:notify agent:echo agent:intuition)`, surfacing the full set of consumers in one row.
 
 Flags:
 - `--fix` - prompt to install missing deps via `helpers/setup`
@@ -530,6 +540,51 @@ Files:
 
 The companion subcommand `bin/scratch-intuit` is the operator-facing entry point.
 
+## Toolboxes
+
+A toolbox is a named bundle of tool names with its own `is-available` gate. Lets agents reference logical bundles ("read-only filesystem", "editing", "git-archaeology") instead of enumerating tool names, and lets the policy gate live with the bundle rather than at every call site.
+
+Layout (mirrors `tools/` and `agents/`):
+
+```
+toolboxes/<name>/
+  tools.json     {"description": "...", "tools": ["tool_a", "tool_b"]}
+  is-available   bash; runtime gate
+```
+
+`tools.json` is an object (not a flat array) so we have room to grow - future fields might include `requires_edit_mode`, `mutually_exclusive_with`, etc.
+
+The `is-available` script follows the same relaxed contract as tools and agents: must source `lib/base.sh`, may declare `has-commands` for any binaries the box needs, but no requirement to declare anything if the toolbox is pure policy.
+
+Composition with `tool:specs-json`:
+
+```bash
+tool:specs-json $(tool:box read-only | jq -r '.tools[]')
+```
+
+Three reference toolboxes ship in v1:
+
+### `toolboxes/interactive/`
+
+Tools that need a TTY to be useful. Gated on `[[ -t 2 ]]`. Currently contains `notify` (which uses gum and only makes sense in an interactive terminal).
+
+- `tools.json` - `{"description": "...", "tools": ["notify"]}`
+- `is-available` - sources base.sh, checks `[[ -t 2 ]]`, exits 1 with a warn otherwise
+
+### `toolboxes/read-only/`
+
+Tools safe to run anywhere because they do not mutate state. Always available, no policy checks. Currently contains `notify` (the same tool as `interactive/`, demonstrating that tools can appear in multiple toolboxes).
+
+- `tools.json` - `{"description": "...", "tools": ["notify"]}`
+- `is-available` - sources base.sh, no checks (always available)
+
+### `toolboxes/editing/`
+
+Tools that mutate state (file edits, config changes, anything that writes). Gated on `SCRATCH_EDIT_MODE=1`. Currently empty (`tools: []`) because no editing tools have been built yet. Future write-capable tools land in the array as they get built.
+
+- `tools.json` - `{"description": "...", "tools": []}`
+- `is-available` - sources base.sh, checks `SCRATCH_EDIT_MODE=1`, exits 1 with a warn otherwise. Has a TODO comment about edit mode being a placeholder until the broader concept lands.
+
 ## Test Files
 
 Test files use 2-digit numerical prefixes (CPAN convention) so they run in dependency order: lib tests first (00-06), bin tests next (10+), self-reflection tests last (90+). Gaps between groups leave room to wedge in new tests without renumbering.
@@ -559,6 +614,7 @@ Test files use 2-digit numerical prefixes (CPAN convention) so they run in depen
 | `test/94-subcommand-contract.bats` | Self-reflection: subcommands honor --help |
 | `test/95-tool-contract.bats` | Self-reflection: every tool dir under `tools/` follows the structural contract (spec.json shape, name match, +x bits, is-available sources base + calls has-commands) |
 | `test/96-agent-contract.bats` | Self-reflection: every agent dir under `agents/` follows the structural contract (mirror of `95-tool-contract.bats`) |
+| `test/97-toolbox-contract.bats` | Self-reflection: every toolbox dir under `toolboxes/` follows the structural contract; additionally cross-references that every tool name in `tools.json` resolves to an existing tool |
 | `test/integration/00-venice.bats` | Opt-in integration tests against the real Venice API |
 | `test/integration/01-accumulator.bats` | Opt-in: accumulator end-to-end against real models |
 | `test/integration/02-agent.bats` | Opt-in: echo + intuition agents end-to-end against real models |

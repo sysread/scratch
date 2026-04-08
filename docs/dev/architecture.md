@@ -152,6 +152,13 @@ agents/       Reusable LLM workflows. Each subdirectory is a self-contained agen
   echo/           single-shot reference; built on agent:simple-completion
   intuition/      complex multi-phase reference (perception + parallel drives + synthesis)
 
+toolboxes/    Named bundles of tool names with their own is-available gate.
+              <name>/tools.json    {"description": "...", "tools": [...]}
+              <name>/is-available  bash; runtime policy gate
+  interactive/    notify and similar; gated on stderr being a TTY
+  read-only/      tools safe to run anywhere; always available
+  editing/        tools that mutate state; gated on SCRATCH_EDIT_MODE; empty for now
+
 helpers/      bash scripts that are not subcommands
   setup                  runtime dep installer (bash 3.2 compatible)
   run-tests              clean-env bats runner with HOME isolation + curl guard
@@ -186,6 +193,7 @@ test/         bats test suite (unit tests only - non-recursive)
   94-subcommand-contract.bats  self-reflection: subcommands honor --help
   95-tool-contract.bats        self-reflection: every tool dir follows the contract
   96-agent-contract.bats       self-reflection: every agent dir follows the contract
+  97-toolbox-contract.bats     self-reflection: every toolbox dir follows the contract
 
 test/integration/   bats tests that hit the REAL venice API (opt-in only)
   00-venice.bats         end-to-end smoke tests for venice + model + chat
@@ -466,6 +474,42 @@ Each layer has exactly one job:
 
 A future agent system can use any combination of these without coupling. An agent that uses tools without an LLM (e.g. cron-driven) would call `tool:invoke` directly. An agent that uses an LLM without tools would call `chat:completion` directly. An agent that uses both calls `chat:complete-with-tools`. The layers compose; you don't pay for what you don't use.
 
+### Toolboxes: named bundles with policy gates
+
+`toolboxes/<name>/` adds a layer above individual tools.
+A toolbox is a named bundle of tool names with its own `is-available` gate, defined as:
+
+```
+toolboxes/<name>/
+  tools.json     {"description": "...", "tools": ["a", "b"]}
+  is-available   bash; runtime policy gate
+```
+
+An agent that wants "all the safe filesystem tools" references the bundle by name instead of enumerating tools.
+The policy lives with the bundle: `toolboxes/read-only/is-available` decides whether read-only is on right now (almost always yes), `toolboxes/editing/is-available` decides whether editing is on (only when `SCRATCH_EDIT_MODE=1`), and so on.
+
+`tool:box NAME` returns the bundle's full `tools.json` content on success or the same shape with `tools` replaced by `[]` on failure.
+The empty fallback lets callers always do `... | jq -r '.tools[]'` without branching on the error case.
+Failure also emits a tui:debug warning ONCE per process per unavailable toolbox via `_TOOLBOX_WARNED`, so a multi-phase agent that probes the same disabled box across rounds does not produce repeated noise.
+
+Composition with the existing primitives is one line:
+
+```bash
+tool:specs-json $(tool:box read-only | jq -r '.tools[]')
+```
+
+The same tool can appear in multiple toolboxes (e.g. `notify` is in both `interactive/` and `read-only/`).
+Toolboxes do not have ownership semantics over tools.
+
+### Layer ownership for toolboxes
+
+- **`toolboxes/<name>/`** is *which* tools are in the bundle and *whether* the bundle is available.
+- **`tools/<name>/`** is still *what* an individual tool does and *whether* it specifically is available.
+- **`tool:box NAME`** returns the resolved bundle (or the empty fallback).
+- **`tool:specs-json`** is unchanged - it works on tool names regardless of where they came from.
+
+The layers compose: an agent can ask for a toolbox, get a list of tool names, hand them to `tool:specs-json`, and the per-tool `is-available` gates still fire individually. A toolbox failing closed (`tools: []`) and a tool failing closed (filtered out by `tool:specs-json`) are independent failure modes that compose naturally.
+
 ## Accumulator Pattern (accumulator.sh + prompt.sh)
 
 `lib/accumulator.sh` processes inputs that exceed a model's context window by chunking the input, running a chat completion round per chunk that builds up structured `accumulated_notes`, then a final cleanup pass that returns the user-facing answer.
@@ -634,14 +678,15 @@ If a script shells out to a tool that isn't guaranteed by POSIX, it MUST declare
 Never rely on git/jq/curl/gum/bc/etc. being "obviously" present - declare and let the scanner find it.
 The only exception is tools used optionally with a graceful fallback (e.g. `stdbuf` in `lib/termio.sh` - the fallback is passthrough, so declaring would defeat the design).
 
-The five scan sets have different attribution labels:
+The six scan sets have different attribution labels:
 - `bin/scratch-<verb>` declarations attribute to the verb name
 - `lib/*.sh` declarations attribute to the synthetic label `lib` (library deps apply transitively to many commands)
 - `helpers/<name>` declarations attribute to the helper's basename (e.g., `helpers/embed` -> `embed`)
 - `tools/<name>/is-available` declarations attribute to `tool:<name>` (e.g., `tool:notify`); the `tool:` prefix disambiguates tool deps from bin/lib/helper deps in the doctor output
 - `agents/<name>/is-available` declarations attribute to `agent:<name>` (e.g., `agent:intuition`); same prefix-disambiguation rationale as tools
+- `toolboxes/<name>/is-available` declarations attribute to `toolbox:<name>`; most toolboxes are pure policy gates with no binary deps of their own, so this scan target usually finds nothing in practice
 
-All five scan loops use a single `_scan-deps-in` helper - one line per target in `scan-all-deps`.
+All six scan loops use a single `_scan-deps-in` helper - one line per target in `scan-all-deps`.
 The same binary may show up under multiple labels: `jq` reports as `(lib tool:notify agent:echo agent:intuition)`, surfacing the full set of consumers in one row.
 
 When you add a new tool to scratch:
@@ -650,7 +695,8 @@ When you add a new tool to scratch:
 3. If it's specific to one helper, declare it at the top of that helper.
 4. If it's specific to an LLM tool, declare it in that tool's `is-available` script.
 5. If it's specific to an agent, declare it in that agent's `is-available` script.
-6. If it's a runtime dep that `scratch setup` should install, also add it to `helpers/setup`'s `RUNTIME_DEPS` list.
+6. If it's specific to a toolbox (rare; toolboxes are usually pure policy), declare it in that toolbox's `is-available` script.
+7. If it's a runtime dep that `scratch setup` should install, also add it to `helpers/setup`'s `RUNTIME_DEPS` list.
 
 ## Self-Reflection Tests
 
@@ -663,6 +709,7 @@ Several bats files exist solely to enforce structural conventions:
 - `94-subcommand-contract.bats` - verifies every subcommand honors `--help` with exit 0
 - `95-tool-contract.bats` - verifies every tool dir under tools/ has spec.json + main + is-available with the correct shape, and is-available sources base.sh + calls has-commands
 - `96-agent-contract.bats` - mirror of `95` for agents/<name>/ (spec.json + run + is-available, same is-available double-duty contract)
+- `97-toolbox-contract.bats` - mirror of `95`/`96` for toolboxes/<name>/ (tools.json + is-available); additionally cross-references that every tool name in tools.json resolves to an existing tool
 
 These tests catch drift that code review might miss.
 They run under the same `env -i` harness as functional tests via `helpers/run-tests`.

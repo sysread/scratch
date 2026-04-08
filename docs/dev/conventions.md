@@ -239,9 +239,45 @@ Prompts live under `data/prompts/<agent-name>/`, not under `agents/<name>/`.
 This keeps prose with prose (anti-slop scan, prompt loader, future "list every prompt" tooling) while keeping the agent directory focused on executable code.
 Loaded via `prompt:load` and `prompt:render`.
 
+## Toolbox Structure (toolboxes/ directory)
+
+The `toolboxes/` directory holds named bundles of tool names with their own `is-available` gate.
+Each toolbox is a self-contained directory under `toolboxes/<name>/` with two required files.
+
+```
+toolboxes/<name>/
+  tools.json     {"description": "...", "tools": ["tool_a", "tool_b"]}
+  is-available   bash; runtime gate (and optional dep manifest)
+```
+
+`tools.json` is an object (not a flat array) so we have room to grow - future fields might include `requires_edit_mode`, `mutually_exclusive_with`, etc.
+The `description` field is required and surfaces in `tool:box` output even when the toolbox is unavailable, so callers can render it in error UIs.
+
+Naming: toolbox names match `^[a-z][a-z0-9_-]*$`.
+Both rules are enforced by `test/97-toolbox-contract.bats`.
+
+`is-available` follows the same relaxed contract as tools and agents: must source `lib/base.sh`, may declare `has-commands` for any binaries the box transitively needs, but no requirement to declare anything if the toolbox is pure policy (which most are).
+
+`tool:box NAME` is the headline access function:
+- On success it returns the full `tools.json` content
+- On failure it returns the same shape with `tools` replaced by `[]`, preserving the description so callers can still render it
+- Warns once per process per unavailable toolbox
+
+The empty-tools fallback lets composition stay simple:
+
+```bash
+tool:specs-json $(tool:box read-only | jq -r '.tools[]')
+```
+
+The same tool can appear in multiple toolboxes - this is by design.
+Toolboxes do not have ownership over tools; they are convenience bundles.
+
+The contract test additionally cross-references that every name in `tools.json` resolves to an existing tool via `tool:exists`.
+Forward declarations of not-yet-built tools fail the contract test - add the tool first, then add it to the toolbox.
+
 ## `is-available` as Policy Gate
 
-The `is-available` script in both `tools/` and `agents/` does double duty: dependency manifest AND runtime policy gate.
+The `is-available` script in `tools/`, `agents/`, AND `toolboxes/` does double duty: dependency manifest AND runtime policy gate.
 This pattern deserves explicit treatment because the second half is non-obvious.
 
 ### As dependency manifest
@@ -267,12 +303,14 @@ Examples:
 - An agent that requires the cwd to be inside a known scratch project -> calls `project:detect` and exits non-zero if it fails
 - An agent that runs only against a configured remote git repo -> checks `git rev-parse --is-inside-work-tree` and `git config remote.origin.url`
 - An agent that performs writes -> requires both `SCRATCH_EDIT_MODE=1` AND a clean working tree
+- A `toolboxes/interactive/` that gates on `[[ -t 2 ]]` (stderr is a terminal)
+- A `toolboxes/editing/` that gates on `SCRATCH_EDIT_MODE=1`
 
-The pattern: `is-available` returns 0 if and only if the tool/agent SHOULD be available right now.
+The pattern: `is-available` returns 0 if and only if the tool/agent/toolbox SHOULD be available right now.
 Anything that would prevent successful execution belongs in here, not in the run script's body.
-The runtime layer (`tool:invoke` or `agent:run`) refuses to invoke an unavailable tool/agent and dies with the captured stderr from `is-available`, so the operator knows exactly what precondition failed.
+The runtime layer (`tool:invoke`, `agent:run`, `tool:box`) refuses to invoke an unavailable tool/agent and dies (or returns the empty fallback for toolboxes) with the captured stderr from `is-available`, so the operator knows exactly what precondition failed.
 
-The doctor reports failures with the appropriate attribution prefix (`tool:<name>` or `agent:<name>`), so a precondition failure (e.g. missing `SCRATCH_EDIT_MODE`) shows up alongside missing-binary failures in the same view.
+The doctor reports failures with the appropriate attribution prefix (`tool:<name>`, `agent:<name>`, or `toolbox:<name>`), so a precondition failure (e.g. missing `SCRATCH_EDIT_MODE`) shows up alongside missing-binary failures in the same view.
 
 This means a single check in `is-available` covers three independent concerns: runtime safety, doctor reporting, and operator-facing error messages.
 Don't split policy across separate scripts; put it all in `is-available`.
