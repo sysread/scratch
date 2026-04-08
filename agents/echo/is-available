@@ -3,10 +3,10 @@
 #-------------------------------------------------------------------------------
 # echo agent - availability check + dependency manifest
 #
-# Stub version: declares only the deps the current run script needs (none
-# beyond cat, which is POSIX). Once 03-2 promotes the run script to use
-# agent:simple-completion, this will declare the deps the helper pulls in
-# (jq, gum, bc transitively).
+# The echo agent uses agent:simple-completion which transitively pulls in
+# venice:curl (curl + jq + bc) and the prompt loader. Declare the leaf
+# binaries here so the doctor reports them under agent:echo and so a
+# missing dep produces a clear error before the agent runs.
 #-------------------------------------------------------------------------------
 
 set -euo pipefail
@@ -14,8 +14,4 @@ set -euo pipefail
 # shellcheck source=/dev/null
 source "$SCRATCH_HOME/lib/base.sh"
 
-# No external deps in the stub (cat is POSIX). has-commands with no args
-# is a no-op but the doctor scanner needs at least one declaration line
-# to attribute anything to agent:echo. Declare jq because the agent:run
-# infrastructure itself uses jq, so it's a real dep.
-has-commands jq
+has-commands curl jq bc

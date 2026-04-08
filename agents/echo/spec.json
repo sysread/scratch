@@ -1,4 +1,4 @@
 {
   "name": "echo",
-  "description": "Echo the user's input back unchanged. Stub agent shipped with 03-1; the real run script (using agent:simple-completion) lands in 03-2."
+  "description": "Paraphrase the user's input back in cleaner, more grammatical form. Preserves meaning exactly. The first concrete agent and a smoke test for the agent layer."
 }

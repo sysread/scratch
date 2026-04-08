@@ -64,6 +64,10 @@ _AGENT_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 {
   source "$_AGENT_SCRIPTDIR/base.sh"
   source "$_AGENT_SCRIPTDIR/project.sh"
+  source "$_AGENT_SCRIPTDIR/prompt.sh"
+  source "$_AGENT_SCRIPTDIR/model.sh"
+  source "$_AGENT_SCRIPTDIR/chat.sh"
+  source "$_AGENT_SCRIPTDIR/tool.sh"
 }
 
 has-commands jq
@@ -298,3 +302,89 @@ agent:run() {
 }
 
 export -f agent:run
+
+#-------------------------------------------------------------------------------
+# agent:simple-completion PROFILE PROMPT_NAME [TOOLS_JSON] [EXTRAS_JSON]
+#
+# Common-case helper for single-shot agents.
+#
+# Reduces a trivial agent's run script to roughly:
+#
+#   #!/usr/bin/env bash
+#   set -euo pipefail
+#   source "$SCRATCH_HOME/lib/agent.sh"
+#   agent:simple-completion balanced "echo/system"
+#
+# Resolves PROFILE via model:profile:resolve, loads PROMPT_NAME via
+# prompt:load, reads stdin once for the user input, builds a 2-message
+# array (system prompt + user input), merges the profile's extras with
+# the caller's EXTRAS_JSON (caller wins), and calls either
+# chat:complete-with-tools (if TOOLS_JSON is a non-empty array) or
+# chat:completion (if TOOLS_JSON is omitted, empty, or "[]"). Pipes the
+# final response through chat:extract-content so the agent's stdout is
+# the model's text content, not the full response envelope.
+#
+# PROMPT_NAME is passed verbatim to prompt:load, so the same naming
+# convention applies (e.g. "echo/system" -> data/prompts/echo/system.md).
+#
+# Reads stdin once at the top of the function. The agent's run script
+# must NOT also read stdin via cat before calling this helper.
+#
+# All errors propagate via die from the underlying primitives. The
+# helper itself does no extra error wrapping.
+#-------------------------------------------------------------------------------
+agent:simple-completion() {
+  local profile="$1"
+  local prompt_name="$2"
+  local tools_json="${3:-}"
+  local extras_json="${4:-}"
+
+  # Read the user input once. The whole point of stdin-as-input is that
+  # this happens here, not in every agent's run script.
+  local user_input
+  user_input="$(cat)"
+
+  local system_prompt
+  system_prompt="$(prompt:load "$prompt_name")" || return 1
+
+  local model
+  model="$(model:profile:model "$profile")" || return 1
+
+  local profile_extras
+  profile_extras="$(model:profile:extras "$profile")" || return 1
+
+  # Merge the caller's extras over the profile's extras (caller wins).
+  local merged_extras
+  if [[ -n "$extras_json" ]]; then
+    merged_extras="$(jq -c -n \
+      --argjson p "$profile_extras" \
+      --argjson c "$extras_json" \
+      '$p + $c')"
+  else
+    merged_extras="$profile_extras"
+  fi
+
+  local messages
+  messages="$(jq -c -n \
+    --arg system "$system_prompt" \
+    --arg user "$user_input" \
+    '[{role:"system",content:$system},{role:"user",content:$user}]')"
+
+  # Branch on whether tools were requested. tools_json is non-empty
+  # AND a non-empty JSON array -> use chat:complete-with-tools.
+  # Otherwise -> chat:completion directly (no tools, no recursion).
+  local tool_count=0
+  if [[ -n "$tools_json" ]]; then
+    tool_count="$(jq 'length' <<< "$tools_json" 2> /dev/null || echo 0)"
+  fi
+
+  if ((tool_count > 0)); then
+    chat:complete-with-tools "$model" "$messages" "$tools_json" "$merged_extras" \
+      | chat:extract-content
+  else
+    chat:completion "$model" "$messages" "$merged_extras" \
+      | chat:extract-content
+  fi
+}
+
+export -f agent:simple-completion

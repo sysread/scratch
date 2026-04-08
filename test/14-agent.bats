@@ -332,3 +332,124 @@ zebra"
   is "$status" 0
   is "$output" "3"
 }
+
+# ===========================================================================
+# agent:simple-completion - common-case helper tests
+#
+# Each test stubs chat:completion / chat:complete-with-tools and the model
+# profile lookups directly in the test process. bats `run` inherits the
+# stubs through the function exports without re-sourcing lib/agent.sh
+# (which would overwrite them). The integration test in
+# test/integration/02-agent.bats covers the real-API path.
+# ===========================================================================
+
+setup_simple_completion_stubs() {
+  export SCRATCH_PROMPTS_DIR="${BATS_TEST_TMPDIR}/prompts"
+  mkdir -p "$SCRATCH_PROMPTS_DIR"
+
+  CHAT_CALLS_LOG="${BATS_TEST_TMPDIR}/chat-calls.log"
+  : > "$CHAT_CALLS_LOG"
+  export CHAT_CALLS_LOG
+
+  model:profile:model() {
+    printf '%s' "fake-model-id"
+  }
+  export -f model:profile:model
+
+  model:profile:extras() {
+    printf '%s' '{"temperature":0.5}'
+  }
+  export -f model:profile:extras
+
+  chat:completion() {
+    {
+      printf 'model=%s\n' "$1"
+      printf 'messages=%s\n' "$2"
+      printf 'extras=%s\n' "${3:-}"
+    } >> "$CHAT_CALLS_LOG"
+
+    local user_msg
+    user_msg="$(jq -r '.[1].content' <<< "$2")"
+    jq -c -n --arg c "$user_msg" '{choices:[{message:{content:$c}}]}'
+  }
+  export -f chat:completion
+
+  chat:complete-with-tools() {
+    {
+      printf 'tools-call: model=%s\n' "$1"
+      printf 'messages=%s\n' "$2"
+      printf 'tools=%s\n' "$3"
+      printf 'extras=%s\n' "${4:-}"
+    } >> "$CHAT_CALLS_LOG"
+
+    local user_msg
+    user_msg="$(jq -r '.[1].content' <<< "$2")"
+    jq -c -n --arg c "$user_msg" '{choices:[{message:{content:$c}}]}'
+  }
+  export -f chat:complete-with-tools
+}
+
+@test "agent:simple-completion: no-tools path passes stdin as the user message" {
+  setup_simple_completion_stubs
+  printf 'system prompt body\n' > "${SCRATCH_PROMPTS_DIR}/test.md"
+  printf 'hello stdin' > "${BATS_TEST_TMPDIR}/in"
+
+  run agent:simple-completion balanced test < "${BATS_TEST_TMPDIR}/in"
+  is "$status" 0
+  is "$output" "hello stdin"
+}
+
+@test "agent:simple-completion: loads the system prompt via prompt:load" {
+  setup_simple_completion_stubs
+  printf 'MARKER_SYSTEM_PROMPT\n' > "${SCRATCH_PROMPTS_DIR}/marked.md"
+
+  run agent:simple-completion balanced marked < /dev/null
+  is "$status" 0
+  grep -q 'MARKER_SYSTEM_PROMPT' "$CHAT_CALLS_LOG"
+}
+
+@test "agent:simple-completion: passes profile model + extras to chat:completion" {
+  setup_simple_completion_stubs
+  printf 'sys\n' > "${SCRATCH_PROMPTS_DIR}/p.md"
+
+  run agent:simple-completion balanced p < /dev/null
+  is "$status" 0
+  grep -q 'model=fake-model-id' "$CHAT_CALLS_LOG"
+  grep -q '"temperature":0.5' "$CHAT_CALLS_LOG"
+}
+
+@test "agent:simple-completion: caller extras override profile extras" {
+  setup_simple_completion_stubs
+  printf 'sys\n' > "${SCRATCH_PROMPTS_DIR}/p.md"
+
+  run agent:simple-completion balanced p '' '{"temperature":0.99}' < /dev/null
+  is "$status" 0
+  grep -q '"temperature":0.99' "$CHAT_CALLS_LOG"
+}
+
+@test "agent:simple-completion: routes through chat:complete-with-tools when tools are non-empty" {
+  setup_simple_completion_stubs
+  printf 'sys\n' > "${SCRATCH_PROMPTS_DIR}/p.md"
+
+  run agent:simple-completion balanced p '["notify"]' < /dev/null
+  is "$status" 0
+  grep -q 'tools-call' "$CHAT_CALLS_LOG"
+  grep -q '"notify"' "$CHAT_CALLS_LOG"
+}
+
+@test "agent:simple-completion: empty tools array routes through chat:completion (no tools)" {
+  setup_simple_completion_stubs
+  printf 'sys\n' > "${SCRATCH_PROMPTS_DIR}/p.md"
+
+  run agent:simple-completion balanced p '[]' < /dev/null
+  is "$status" 0
+  run ! grep -q 'tools-call' "$CHAT_CALLS_LOG"
+}
+
+@test "agent:simple-completion: dies when prompt is missing" {
+  setup_simple_completion_stubs
+
+  run agent:simple-completion balanced no-such-prompt < /dev/null
+  is "$status" 1
+  [[ "$output" == *"no-such-prompt.md"* ]]
+}

@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 
 #-------------------------------------------------------------------------------
-# echo agent (stub)
+# echo agent
 #
-# Reads stdin and prints it back unchanged. Exists in this state so the
-# agent contract test has a real fixture to validate against. The real
-# implementation lands in 03-2 and uses agent:simple-completion to call
-# a model.
+# Reads stdin and asks the model to echo it back, paraphrased and cleaned
+# up grammatically. Useful as the first concrete agent and as a smoke
+# test for the agent layer end to end.
+#
+# This is the canonical example of a simple, single-shot agent: load a
+# system prompt, pick a profile, hand off. Five lines.
 #-------------------------------------------------------------------------------
 
 set -euo pipefail
 
-cat
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/agent.sh"
+
+agent:simple-completion fast "echo/system"
