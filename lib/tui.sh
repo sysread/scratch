@@ -27,24 +27,39 @@ has-commands gum
 #-------------------------------------------------------------------------------
 # tui:log LEVEL [ARGS...]
 #
-# Log a structured message to stderr via gum. When stdin is a pipe, reads
-# line-by-line and logs each line with the given args as structured fields.
+# Log a structured message to stderr via gum log. The dispatch is purely
+# argument-driven, not stdin-driven, so a script can call tui:warn from
+# anywhere (TTY, pipe, redirect) and the message lands on stderr. The
+# original "is stdin a TTY" check was a foot-gun: any non-interactive
+# script call (the common case) silently dropped the message.
 #
-# Examples:
-#   tui:log info "Starting process"
-#   tui:log error "Failed" detail "connection refused"
-#   some_command 2>&1 | tui:log info "output"
+# Two modes:
+#
+#   - Args supplied: log them directly. The first arg is the message;
+#     subsequent args are key/value pairs that gum log renders as
+#     structured fields.
+#
+#       tui:log info "Starting process"
+#       tui:log error "Failed" detail "connection refused"
+#
+#   - No args: read stdin line by line and log each line at the given
+#     level. For piping arbitrary command output through structured logging.
+#
+#       some_command | tui:log info
+#
+# Output goes to stderr unconditionally (gum log writes to stderr).
+# stdout stays clean for program data per the conventions doc.
 #-------------------------------------------------------------------------------
 tui:log() {
   local level="$1"
-  local line
   shift
 
-  if [[ -t 0 ]]; then
+  if (($# > 0)); then
     gum log --structured --level "$level" "$@"
   else
-    while read -r line; do
-      gum log --structured --level "$level" "$line" "$@"
+    local line
+    while IFS= read -r line; do
+      gum log --structured --level "$level" "$line"
     done
   fi
 

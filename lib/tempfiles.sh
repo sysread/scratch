@@ -77,6 +77,12 @@ export -f tmp:track
 # Create a temp file using mktemp, register it for cleanup, and assign the
 # path to VAR via nameref.
 #
+# TEMPLATE must be an absolute path (e.g. /tmp/scratch-foo-XXXXXX). A
+# relative template makes mktemp create the file in the current working
+# directory, which can pollute a tracked source tree if the caller is
+# running from inside one. The guard rejects relative templates outright
+# rather than silently doing the wrong thing.
+#
 # WARNING: Command substitution $(...) runs in a subshell. The temp file
 # registry lives in the current process's memory. Capturing the result with
 # $(...) would only register the file in the subshell, so the parent loses
@@ -84,18 +90,27 @@ export -f tmp:track
 #
 # WRONG:
 #   tmpfile=$(tmp:make /tmp/scratch-XXXXXX)
+#   tmp:make tmpfile scratch-XXXXXX           # relative - dies
 # RIGHT:
 #   tmp:make tmpfile /tmp/scratch-XXXXXX
 #-------------------------------------------------------------------------------
 tmp:make() {
   local var_name="${1:-}"
-  [[ -n "$var_name" ]] || die "tmp:make requires a variable name"
-  # shellcheck disable=SC2034,SC2178
-  local -n out="$var_name"
+  if [[ -z "$var_name" ]]; then
+    die "tmp:make requires a variable name"
+    return 1
+  fi
   if [[ $# -lt 2 ]]; then
     die "tmp:make requires a template"
+    return 1
   fi
   local template="$2"
+  if [[ "$template" != /* ]]; then
+    die "tmp:make: template must be an absolute path: $template"
+    return 1
+  fi
+  # shellcheck disable=SC2034,SC2178
+  local -n out="$var_name"
   shift 2
   local path
   path=$(mktemp "$template" "$@")

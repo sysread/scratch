@@ -40,6 +40,7 @@ _ACCUMULATOR_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   source "$_ACCUMULATOR_SCRIPTDIR/prompt.sh"
   source "$_ACCUMULATOR_SCRIPTDIR/chat.sh"
   source "$_ACCUMULATOR_SCRIPTDIR/model.sh"
+  source "$_ACCUMULATOR_SCRIPTDIR/tui.sh"
 }
 
 has-commands bc awk shasum jq
@@ -331,7 +332,7 @@ _accumulate:_merge-extras() {
   [[ -n "$extras" ]] || extras='{}'
 
   if jq -e 'has("response_format")' <<< "$extras" > /dev/null 2>&1; then
-    warn "accumulator: overriding caller-supplied response_format with the accumulator's schema"
+    tui:warn "accumulator: overriding caller-supplied response_format with the accumulator's schema"
   fi
 
   jq -c --argjson schema "$schema" '. + {response_format: $schema}' <<< "$extras"
@@ -480,7 +481,7 @@ _accumulate:_process-chunk-with-backoff() {
     return 1
   fi
 
-  warn "accumulator: chunk $(basename "$chunk_file") overflowed context; shaving to fraction ${next_fraction}"
+  tui:warn "accumulator: chunk $(basename "$chunk_file") overflowed context; shaving to fraction ${next_fraction}" chunk "$(basename "$chunk_file")" fraction "$next_fraction"
 
   # Re-split THIS chunk at the smaller budget.
   local sub_max_chars
