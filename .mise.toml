@@ -32,11 +32,8 @@ description = "Run integration tests against the real Venice API (costs money!)"
 run = "helpers/run-integration-tests"
 
 [tasks.lint]
-description = "Run shellcheck on all shell files"
-run = """
-files="$(git ls-files bin/ helpers/ lib/ test/*.bats 'test/*/*.bats' test/helpers.sh | grep -v '\\.md$' || true)"
-[ -z "$files" ] || shellcheck $files
-"""
+description = "Run shellcheck on all shell files (delegates to bats so per-directory disables stay in one place)"
+run = "bats test/90-lint.bats"
 
 [tasks.format]
 description = "Format with shfmt"
