@@ -67,27 +67,31 @@ prepend_stub_path() {
 #-------------------------------------------------------------------------------
 # Function: shellcheck_parallel <sc-arg>... -- <file>...
 #
-# Run the shellcheck linter against many files in parallel using a
-# bounded bash worker pool. Returns 0 if every file passed, 1 if any
-# failed (with the failing files' linter output printed in
-# deterministic order regardless of completion order).
+# Run the shellcheck linter against many files in parallel using the
+# bounded worker pool primitive in lib/workers.sh. Returns 0 if every
+# file passed, 1 if any failed (with failing files' output printed in
+# input order regardless of completion order).
 #
 # The linter has no native parallelism, but it is embarrassingly
-# parallel per file. The serial form walks files one at a time and is
-# the dominant cost of the lint suite. This helper forks one process
-# per file, capping concurrency at SHELLCHECK_PARALLEL_JOBS (default
-# 8) via `wait -n` (bash 4.3+; scratch requires 5+).
+# parallel per file. The `--` separator delimits linter flags from file
+# paths so we don't have to fight word splitting on a quoted flag
+# string.
 #
-# The `--` separator delimits linter flags from file paths so we
-# don't have to fight word splitting on a quoted flag string.
+# Concurrency cap defaults to workers:cpu-count (logical CPUs from
+# getconf, or 8 on fallback). Override via SHELLCHECK_PARALLEL_JOBS.
 #
-# Output discipline: each child writes its combined stdout/stderr to
-# a per-file capture file under BATS_TEST_TMPDIR. The parent reads
-# them back in input order at the end and prints only the failures.
-# This keeps per-file diagnostics intact and ordered, regardless of
-# which children happened to finish first.
+# Output discipline: each child writes its combined stdout/stderr to a
+# per-file capture file under a workdir. The parent reads them back in
+# input order at the end and prints only the failures. Per-file
+# diagnostics stay intact and ordered no matter which children happened
+# to finish first.
 #-------------------------------------------------------------------------------
 shellcheck_parallel() {
+  # Source the worker pool primitive from the repo lib. SCRATCH_HOME is
+  # set by every bats setup() in this codebase before sourcing helpers.
+  # shellcheck source=/dev/null
+  source "${SCRATCH_HOME}/lib/workers.sh"
+
   local -a sc_args=()
   while [[ $# -gt 0 && "$1" != "--" ]]; do
     sc_args+=("$1")
@@ -99,43 +103,42 @@ shellcheck_parallel() {
   fi
   shift # consume the --
 
-  local -a files=("$@")
-  local count=${#files[@]}
-  if ((count == 0)); then
-    return 0
-  fi
+  local -a SHELLCHECK_FILES=("$@")
+  local count=${#SHELLCHECK_FILES[@]}
+  ((count > 0)) || return 0
 
-  local max_jobs="${SHELLCHECK_PARALLEL_JOBS:-8}"
+  local max_jobs="${SHELLCHECK_PARALLEL_JOBS:-$(workers:cpu-count)}"
   local workdir="${BATS_TEST_TMPDIR}/shellcheck-parallel.$$"
   mkdir -p "$workdir"
 
-  local i
-  local active=0
-  for ((i = 0; i < count; i++)); do
-    {
-      shellcheck "${sc_args[@]}" "${files[i]}" \
-        > "${workdir}/${i}.out" 2>&1
-      printf '%s' "$?" > "${workdir}/${i}.status"
-    } &
+  # Worker function. Reads its file from SHELLCHECK_FILES at the given
+  # index. Writes combined stdout/stderr to <workdir>/<i>.out and the
+  # exit code to <workdir>/<i>.status. Both arrays-by-index sit in the
+  # parent shell; subshells inherit them at fork time so the lookup
+  # needs no marshalling.
+  SHELLCHECK_ARGS=("${sc_args[@]}")
+  SHELLCHECK_WORKDIR="$workdir"
+  export SHELLCHECK_FILES SHELLCHECK_ARGS SHELLCHECK_WORKDIR
 
-    active=$((active + 1))
-    if ((active >= max_jobs)); then
-      # wait -n returns when ANY one bg job completes; throttles the
-      # pool to max_jobs concurrent shellchecks. Bash 4.3+ feature;
-      # scratch requires 5+.
-      wait -n
-      active=$((active - 1))
-    fi
-  done
-  wait
+  # shellcheck disable=SC2329 # invoked indirectly by workers:run-parallel
+  _shellcheck_worker() {
+    local i="$1"
+    shellcheck "${SHELLCHECK_ARGS[@]}" "${SHELLCHECK_FILES[i]}" \
+      > "${SHELLCHECK_WORKDIR}/${i}.out" 2>&1
+    printf '%s' "$?" > "${SHELLCHECK_WORKDIR}/${i}.status"
+  }
+  export -f _shellcheck_worker
+
+  workers:run-parallel "$max_jobs" "$count" _shellcheck_worker
 
   local rc=0
+  local i
   local file_rc
   for ((i = 0; i < count; i++)); do
     file_rc="$(cat "${workdir}/${i}.status")"
     if [[ "$file_rc" != "0" ]]; then
       rc=1
-      printf '\n=== %s (exit %s) ===\n' "${files[i]}" "$file_rc"
+      printf '\n=== %s (exit %s) ===\n' "${SHELLCHECK_FILES[i]}" "$file_rc"
       cat "${workdir}/${i}.out"
     fi
   done
