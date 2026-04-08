@@ -427,6 +427,12 @@ export -f model:profile:extras
 # Unknown params (not in the mapping) are skipped - we cannot validate
 # what we do not know about, and Venice's API will reject them at
 # request time anyway.
+#
+# Top-level tooling-metadata fields like `chars_per_token` are not
+# validated either: they never reach the Venice API, they live entirely
+# inside scratch (consumed by lib/accumulator.sh and similar), and the
+# validator only walks .params and .venice_parameters. See data/models.md
+# for the full schema reference.
 #-------------------------------------------------------------------------------
 model:profile:validate() {
   local name="$1"

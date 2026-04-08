@@ -22,6 +22,14 @@
       "params": {
         "reasoning_effort": "none"
       }
+    },
+    "long-context": {
+      "_comment": "1M token context window. The default profile for the accumulator and any other feature that processes oversized inputs. chars_per_token is the per-profile float used by token-budgeting code (lib/accumulator.sh) to estimate request sizes; see data/models.md for the full schema.",
+      "model": "qwen-3-6-plus",
+      "chars_per_token": 4.0,
+      "params": {
+        "temperature": 0.3
+      }
     }
   },
   "variants": {

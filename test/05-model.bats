@@ -469,6 +469,105 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# model:profile:resolve - chars_per_token passthrough
+#
+# chars_per_token is tooling metadata used by the accumulator to estimate
+# request sizes. It lives at the top level of the profile object alongside
+# `model`, gets preserved by the resolve normalization for base profiles,
+# and is inherited (with optional override) by variants via jq's recursive
+# merge. validate ignores it because it is not a Venice capability.
+# ---------------------------------------------------------------------------
+
+@test "model:profile:resolve preserves chars_per_token on a base profile" {
+  seed_profile_data '{
+    "version": 1,
+    "base": {
+      "dense": {
+        "model": "llama-3-large",
+        "chars_per_token": 3.0,
+        "params": {}
+      }
+    },
+    "variants": {}
+  }'
+  local result
+  result="$(model:profile:resolve dense)"
+  run jq -r '.chars_per_token == 3' <<< "$result"
+  is "$output" "true"
+}
+
+@test "model:profile:resolve omits chars_per_token when the profile does not set it" {
+  seed_profile_data "$(sample_profile_data)"
+  local result
+  result="$(model:profile:resolve smart)"
+  run jq -r 'has("chars_per_token")' <<< "$result"
+  is "$output" "false"
+}
+
+@test "model:profile:resolve inherits chars_per_token from the extended base" {
+  seed_profile_data '{
+    "version": 1,
+    "base": {
+      "dense": {
+        "model": "llama-3-large",
+        "chars_per_token": 3.0,
+        "params": {}
+      }
+    },
+    "variants": {
+      "denser-coding": {
+        "extends": "dense",
+        "params": {"temperature": 0.2}
+      }
+    }
+  }'
+  local result
+  result="$(model:profile:resolve denser-coding)"
+  run jq -r '.chars_per_token == 3' <<< "$result"
+  is "$output" "true"
+}
+
+@test "model:profile:resolve lets a variant override the base chars_per_token" {
+  seed_profile_data '{
+    "version": 1,
+    "base": {
+      "dense": {
+        "model": "llama-3-large",
+        "chars_per_token": 3.0,
+        "params": {}
+      }
+    },
+    "variants": {
+      "looser": {
+        "extends": "dense",
+        "chars_per_token": 5.0
+      }
+    }
+  }'
+  local result
+  result="$(model:profile:resolve looser)"
+  run jq -r '.chars_per_token == 5' <<< "$result"
+  is "$output" "true"
+}
+
+@test "model:profile:validate accepts a profile with chars_per_token set" {
+  install_venice_curl_stub "$(canned_response)"
+  seed_profile_data '{
+    "version": 1,
+    "base": {
+      "dense": {
+        "model": "llama-3-large",
+        "chars_per_token": 3.5,
+        "params": {}
+      }
+    },
+    "variants": {}
+  }'
+  run model:profile:validate dense
+  is "$status" 0
+}
+
+# ---------------------------------------------------------------------------
 # model:profile:model / model:profile:extras
 # ---------------------------------------------------------------------------
 
