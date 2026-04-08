@@ -333,6 +333,30 @@ zebra"
   is "$output" "3"
 }
 
+@test "agent:run: real recursion through nested agent:run dies at the cap" {
+  # The recursive agent's run script sources lib/agent.sh and calls
+  # agent:run on itself. With SCRATCH_AGENT_MAX_DEPTH=3 the chain should
+  # die after the third level. We assert via the depth value visible to
+  # the deepest run that was actually allowed to execute.
+  make_fake_agent recursive '
+echo "depth=$SCRATCH_AGENT_DEPTH"
+source "$SCRATCH_HOME/lib/agent.sh"
+agent:run recursive 2>&1 || true
+'
+  export SCRATCH_AGENT_MAX_DEPTH=3
+
+  run agent:run recursive < /dev/null
+  # Each level prints "depth=N" before recursing into the next. We
+  # should see depth=1, depth=2, depth=3, then the level-4 attempt
+  # dies with "recursion limit reached".
+  [[ "$output" == *"depth=1"* ]]
+  [[ "$output" == *"depth=2"* ]]
+  [[ "$output" == *"depth=3"* ]]
+  [[ "$output" == *"recursion limit"* ]]
+  # The level-4 run script should never have executed.
+  [[ "$output" != *"depth=4"* ]]
+}
+
 # ===========================================================================
 # agent:simple-completion - common-case helper tests
 #

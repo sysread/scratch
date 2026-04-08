@@ -64,3 +64,29 @@ setup() {
   is "$status" 1
   [[ "$output" == *"template"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# tmp:cleanup: handles both files and directories
+# ---------------------------------------------------------------------------
+
+@test "tmp:cleanup removes a tracked file" {
+  local f
+  tmp:make f "${BATS_TEST_TMPDIR}/scratch-cleanup-file.XXXXXX"
+  [[ -f "$f" ]]
+  tmp:cleanup
+  [[ ! -e "$f" ]]
+}
+
+@test "tmp:cleanup removes a tracked directory recursively" {
+  # Regression: tmp:cleanup used rm -f, which silently fails on dirs.
+  # Both lib/tool.sh and lib/agent.sh's intuition example create
+  # workdirs via mktemp -d + tmp:track. Without -r in cleanup, those
+  # workdirs lingered until the OS reaped them.
+  local d
+  d="$(mktemp -d -t scratch-cleanup-dir.XXXXXX)"
+  tmp:track "$d"
+  printf 'sentinel' > "${d}/file"
+  [[ -d "$d" && -f "${d}/file" ]]
+  tmp:cleanup
+  [[ ! -e "$d" ]]
+}

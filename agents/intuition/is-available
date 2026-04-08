@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# intuition agent - availability check + dependency manifest
+#
+# The intuition agent uses accumulator + workers + chat + model + prompt.
+# Declare every leaf binary that flows through those layers so the doctor
+# reports them under agent:intuition. The accumulator pulls in shasum and
+# awk for line numbering and bc for token math; chat and model use jq and
+# curl through venice:curl.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"
+
+has-commands curl jq bc awk shasum

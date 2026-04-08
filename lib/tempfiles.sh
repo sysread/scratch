@@ -125,7 +125,11 @@ export -f tmp:make
 #-------------------------------------------------------------------------------
 # tmp:cleanup
 #
-# Best-effort deletion of all tracked temp files.
+# Best-effort deletion of all tracked temp files AND directories.
+# Uses rm -rf so directories created via `mktemp -d` and tracked via
+# tmp:track get cleaned up too. Without -r, the rm fails on directory
+# entries (which both lib/tool.sh and lib/agent.sh's intuition example
+# create). The -f stays so missing entries are silent.
 #-------------------------------------------------------------------------------
 tmp:cleanup() {
   local path
@@ -134,7 +138,7 @@ tmp:cleanup() {
   for path in "${SCRATCH_TMPFILES[@]}"; do
     [[ -e "$path" ]] || continue
     tmp:_log "tmp:cleanup attempting" path "$path"
-    if rm -f -- "$path"; then
+    if rm -rf -- "$path"; then
       tmp:_log "tmp:cleanup deleted" path "$path"
     else
       tmp:_log "tmp:cleanup failed" path "$path" err "$?"
