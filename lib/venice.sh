@@ -196,6 +196,46 @@ _venice:_reset-wait() {
 export -f _venice:_reset-wait
 
 #-------------------------------------------------------------------------------
+# _venice:_is-context-overflow BODY
+#
+# (Private) Return 0 if BODY is a Venice context-overflow error, 1 otherwise.
+#
+# Venice uses the OpenAI-compatible error envelope for context-window
+# violations:
+#
+#   {
+#     "error": {
+#       "message": "This model's maximum context length is ...",
+#       "type": "invalid_request_error",
+#       "param": "messages",
+#       "code": "context_length_exceeded"
+#     }
+#   }
+#
+# We match exactly on .error.code so unrelated 400s with different bodies
+# (malformed JSON, bad model id, etc.) still die normally. The only
+# field we trust is .error.code; we deliberately ignore .error.type and
+# the message text because both are friendlier to refactor than codes.
+#
+# Used by venice:curl's 400 dispatch to translate this specific error
+# into exit code 9, which the accumulator catches to drive its
+# reactive shave-and-retry backoff.
+#-------------------------------------------------------------------------------
+_venice:_is-context-overflow() {
+  local body="$1"
+  # Normalize jq's exit code: jq -e returns 4/5 on parse errors and 1
+  # on a falsy result. The helper's contract is binary (0 = matched,
+  # 1 = anything else), so collapse the failure cases here rather than
+  # leaking jq's internal codes.
+  if jq -e '.error.code == "context_length_exceeded"' <<< "$body" > /dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+export -f _venice:_is-context-overflow
+
+#-------------------------------------------------------------------------------
 # venice:curl METHOD PATH [BODY]
 #
 # Make an authenticated request to the Venice API and print the response
@@ -219,6 +259,13 @@ export -f _venice:_reset-wait
 # Non-retryable errors (401, 402, 415, other 4xx) die immediately with
 # a user-targeted message. Retries exhausted dies with a message that
 # says how many attempts were made.
+#
+# Special exit code 9: a 400 response whose body is Venice's
+# context-overflow error (.error.code == "context_length_exceeded")
+# returns exit code 9 instead of dying. The body is written to stderr
+# so callers can log it. This lets the accumulator catch context
+# overflow and drive a reactive shave-and-retry backoff. All other
+# 400s still die immediately.
 #
 # Tests that want to exercise retry paths without actually sleeping
 # can override sleep as a bash function:
@@ -326,6 +373,15 @@ venice:curl() {
     # message and translate.
     body_content="$(cat "$body_file")"
     rm -f "$body_file" "$headers_file"
+
+    # Context-overflow on 400 is a non-error from venice:curl's caller's
+    # perspective: the accumulator wants to know about it so it can
+    # shave the chunk and retry. Surface as exit code 9 with the body
+    # on stderr; everything else still dies.
+    if [[ "$status_code" == "400" ]] && _venice:_is-context-overflow "$body_content"; then
+      printf '%s\n' "$body_content" >&2
+      return 9
+    fi
 
     case "$status_code" in
       401)

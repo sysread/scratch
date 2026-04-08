@@ -202,6 +202,56 @@ STUB
   [[ "$output" == *"exhausted"* ]]
 }
 
+# ---------------------------------------------------------------------------
+# venice:curl context-overflow exit code 9
+#
+# A 400 whose body matches Venice's documented context-overflow envelope
+# (.error.code == "context_length_exceeded") returns exit code 9 with
+# the body on stderr instead of dying. The accumulator catches this
+# code to drive its reactive shave-and-retry backoff.
+# ---------------------------------------------------------------------------
+
+@test "_venice:_is-context-overflow matches Venice's documented envelope" {
+  local body='{"error":{"message":"This model maximum context length is 32768 tokens. However, your request has 41562 input tokens.","type":"invalid_request_error","param":"messages","code":"context_length_exceeded"}}'
+  run _venice:_is-context-overflow "$body"
+  is "$status" 0
+}
+
+@test "_venice:_is-context-overflow rejects an unrelated 400 body" {
+  run _venice:_is-context-overflow '{"error":{"message":"missing field","code":"invalid_request"}}'
+  is "$status" 1
+}
+
+@test "_venice:_is-context-overflow rejects an empty body" {
+  run _venice:_is-context-overflow ''
+  is "$status" 1
+}
+
+@test "_venice:_is-context-overflow rejects malformed JSON" {
+  run _venice:_is-context-overflow 'not json at all'
+  is "$status" 1
+}
+
+@test "venice:curl returns exit code 9 on a 400 context_length_exceeded body" {
+  install_curl_stub '{"error":{"message":"This model maximum context length is 32768 tokens.","type":"invalid_request_error","param":"messages","code":"context_length_exceeded"}}' "400"
+  run --separate-stderr venice:curl POST /chat/completions '{"model":"x","messages":[]}'
+  is "$status" 9
+  # The body should be written to stderr so callers can log it
+  [[ "$stderr" == *"context_length_exceeded"* ]]
+  # Nothing on stdout - exit code 9 is a non-error signal, not a value
+  is "$output" ""
+}
+
+@test "venice:curl still dies on a 400 without the context-overflow marker" {
+  install_curl_stub '{"error":{"message":"missing field foo","code":"invalid_request"}}' "400"
+  run bash -c 'set -e; export SCRATCH_VENICE_API_KEY=test-key; export PATH="'"${BATS_TEST_TMPDIR}"'/stubbin:$PATH"; source '"${SCRATCH_HOME}"'/lib/venice.sh; venice:curl POST /foo "{}" 2>&1'
+  is "$status" 1
+  [[ "$output" == *"400"* ]]
+  [[ "$output" == *"missing field foo"* ]]
+  # Must NOT mention context overflow - this is the regression guard
+  [[ "$output" != *"context_length_exceeded"* ]]
+}
+
 @test "venice:curl dies with unknown-status message on 418" {
   install_curl_stub '{"error":"teapot"}' "418"
   run bash -c 'set -e; export SCRATCH_VENICE_API_KEY=test-key; export PATH="'"${BATS_TEST_TMPDIR}"'/stubbin:$PATH"; source '"${SCRATCH_HOME}"'/lib/venice.sh; venice:curl GET /models 2>&1'
