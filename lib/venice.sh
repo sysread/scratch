@@ -117,6 +117,13 @@ export -f venice:config-dir
 # The curve "ramps quickly but self-caps" - first retry is a real delay
 # (not a fraction of a second), and even 1000 failures doesn't exceed 8s.
 # Uses bc(1) because bash has no floating point and log10 needs it.
+#
+# A small uniform jitter (0..base/2 seconds) is added to break herd
+# alignment when many parallel completions hit a 429 simultaneously.
+# Without it, all N retries wake at the exact same instant and
+# re-collide. Jitter is added AFTER the floor so the floor still holds.
+# Disable the jitter (for deterministic tests) by setting
+# SCRATCH_VENICE_DISABLE_JITTER=1.
 #-------------------------------------------------------------------------------
 _venice:_backoff-seconds() {
   local attempt="$1"
@@ -136,6 +143,17 @@ EOF
   # Floor at 1 second. log10(1) = 0, so attempt 1 gives base=2 naturally,
   # but defensive in case someone lowers the base below 1.
   ((seconds < 1)) && seconds=1
+
+  # Apply jitter unless explicitly disabled. With base=2 the jitter is
+  # 0..1; the curve becomes:
+  #   attempt 1   -> 2-3s
+  #   attempt 10  -> 4-5s
+  #   attempt 100 -> 6-7s
+  if [[ "${SCRATCH_VENICE_DISABLE_JITTER:-}" != "1" ]]; then
+    local jitter
+    jitter=$((RANDOM % (_VENICE_BACKOFF_BASE / 2 + 1)))
+    seconds=$((seconds + jitter))
+  fi
 
   printf '%d' "$seconds"
 }

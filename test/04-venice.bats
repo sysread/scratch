@@ -266,37 +266,95 @@ STUB
 # Verify the expected curve at the default base. These assertions lock in
 # the specific values from the design table in lib/venice.sh so any
 # accidental change to the formula or base is caught immediately.
+#
+# Jitter is disabled for these tests via SCRATCH_VENICE_DISABLE_JITTER=1
+# so the curve values are deterministic. The jitter behavior is tested
+# in its own block below.
 # ---------------------------------------------------------------------------
 
 @test "_venice:_backoff-seconds: attempt 1 is 2 seconds" {
+  export SCRATCH_VENICE_DISABLE_JITTER=1
   run _venice:_backoff-seconds 1
   is "$status" 0
   is "$output" "2"
 }
 
 @test "_venice:_backoff-seconds: attempt 2 is 3 seconds" {
+  export SCRATCH_VENICE_DISABLE_JITTER=1
   run _venice:_backoff-seconds 2
   is "$output" "3"
 }
 
 @test "_venice:_backoff-seconds: attempt 5 is 4 seconds" {
+  export SCRATCH_VENICE_DISABLE_JITTER=1
   run _venice:_backoff-seconds 5
   is "$output" "4"
 }
 
 @test "_venice:_backoff-seconds: attempt 10 is 4 seconds" {
+  export SCRATCH_VENICE_DISABLE_JITTER=1
   run _venice:_backoff-seconds 10
   is "$output" "4"
 }
 
 @test "_venice:_backoff-seconds: attempt 100 is 6 seconds (self-capping)" {
+  export SCRATCH_VENICE_DISABLE_JITTER=1
   run _venice:_backoff-seconds 100
   is "$output" "6"
 }
 
 @test "_venice:_backoff-seconds: attempt 1000 is 8 seconds (still capped)" {
+  export SCRATCH_VENICE_DISABLE_JITTER=1
   run _venice:_backoff-seconds 1000
   is "$output" "8"
+}
+
+# ---------------------------------------------------------------------------
+# _venice:_backoff-seconds - jitter
+#
+# When jitter is enabled (the default), the function adds a uniform 0..1
+# (with base=2) integer to the curve value. This breaks herd alignment
+# when many parallel calls hit a 429 simultaneously.
+#
+# We can't assert that any single call returned a jittered value (RANDOM
+# might land on 0), so the tests check distribution: across many calls,
+# at least two distinct values should appear, and every value should
+# stay within [base, base+1] for attempt 1.
+# ---------------------------------------------------------------------------
+
+@test "_venice:_backoff-seconds: jitter produces values in the 2-3 range for attempt 1" {
+  unset SCRATCH_VENICE_DISABLE_JITTER || true
+  local i v
+  for i in $(seq 1 50); do
+    v="$(_venice:_backoff-seconds 1)"
+    [[ "$v" == "2" || "$v" == "3" ]] || {
+      diag "out-of-range value: $v"
+      return 1
+    }
+  done
+}
+
+@test "_venice:_backoff-seconds: jitter produces at least two distinct values across many calls" {
+  unset SCRATCH_VENICE_DISABLE_JITTER || true
+  local i v
+  local seen_2=0 seen_3=0
+  for i in $(seq 1 50); do
+    v="$(_venice:_backoff-seconds 1)"
+    case "$v" in
+      2) seen_2=1 ;;
+      3) seen_3=1 ;;
+    esac
+  done
+  ((seen_2 == 1 && seen_3 == 1))
+}
+
+@test "_venice:_backoff-seconds: SCRATCH_VENICE_DISABLE_JITTER=1 returns deterministic values" {
+  export SCRATCH_VENICE_DISABLE_JITTER=1
+  local i v
+  for i in $(seq 1 20); do
+    v="$(_venice:_backoff-seconds 1)"
+    is "$v" "2"
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -622,6 +680,8 @@ STUB
 }
 
 @test "venice:curl falls back to log10 backoff when 429 has no reset header" {
+  # Disable jitter so the assertion below sees the deterministic curve value.
+  export SCRATCH_VENICE_DISABLE_JITTER=1
   install_multi_curl_stub_with_headers \
     "429|HTTP/1.1 429\r\ncontent-type: application/json\r\n\r\n|{\"err\":\"slow\"}" \
     "200||{\"ok\":true}"
@@ -629,11 +689,12 @@ STUB
 
   run --separate-stderr venice:curl GET /models
   is "$status" 0
-  # Attempt 1 fallback is _venice:_backoff-seconds 1 = 2
+  # Attempt 1 fallback is _venice:_backoff-seconds 1 = 2 (no jitter)
   [[ "$stderr" == *"retrying in 2s"* ]]
 }
 
 @test "venice:curl falls back to log10 backoff when 429 reset is stale" {
+  export SCRATCH_VENICE_DISABLE_JITTER=1
   local past
   past=$(($(date +%s) - 30))
   install_multi_curl_stub_with_headers \
