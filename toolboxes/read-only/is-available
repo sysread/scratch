@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# read-only toolbox - availability check
+#
+# Always available. The tools in this box do not mutate system state, so
+# there are no preconditions to check. Sources base.sh anyway because the
+# contract test requires it (so any future die / warn / has-commands
+# calls work) and so this script can grow real checks later without
+# restructuring.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"
+
+# Always available - no checks. Future read-only tools that need a
+# specific binary should add a `has-commands <binary>` line here.

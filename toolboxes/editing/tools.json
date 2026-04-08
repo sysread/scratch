@@ -1,0 +1,4 @@
+{
+  "description": "Tools that mutate system state (file edits, config changes, anything that writes). Available only when SCRATCH_EDIT_MODE is enabled. Currently empty - no editing tools have been built yet.",
+  "tools": []
+}

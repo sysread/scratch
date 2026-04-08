@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# editing toolbox - availability check
+#
+# Tools that mutate system state. Gated on SCRATCH_EDIT_MODE=1.
+#
+# TODO: edit mode is not actually implemented yet. The flag exists here
+# as a placeholder so that future write-capable tools can be added to
+# this toolbox without changing the gate. When edit mode lands as a real
+# concept (probably a `scratch edit` subcommand or session marker), this
+# script gets the corresponding implementation - but the env var check
+# below will likely stay as the canonical contract.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"
+
+if [[ "${SCRATCH_EDIT_MODE:-}" != "1" ]]; then
+  warn "editing toolbox: SCRATCH_EDIT_MODE is not set; write tools are unavailable"
+  exit 1
+fi

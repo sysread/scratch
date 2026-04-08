@@ -1,0 +1,6 @@
+{
+  "description": "Tools that require an interactive terminal to be useful. Available only when stderr is a TTY (so notifications, prompts, and other gum-driven interactions actually reach a human).",
+  "tools": [
+    "notify"
+  ]
+}

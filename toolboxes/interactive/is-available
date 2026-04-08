@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# interactive toolbox - availability check
+#
+# Available only when stderr is connected to a terminal. The tools in
+# this box (notify, future prompts) write to a TTY through gum and have
+# no useful behavior in a pipe or in a non-interactive script.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"
+
+if [[ ! -t 2 ]]; then
+  warn "interactive toolbox: stderr is not a terminal; tools that need a TTY are unavailable"
+  exit 1
+fi
