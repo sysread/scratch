@@ -251,3 +251,321 @@ second"
   last="$(sed -n '2p' "${BATS_TEST_TMPDIR}/out.txt")"
   [[ "$last" =~ ^2:[0-9a-f]{8}\|last$ ]]
 }
+
+# ===========================================================================
+# CHAT-LAYER TESTS
+#
+# These tests stub chat:completion as a bash function that reads canned
+# responses from a queue under BATS_TEST_TMPDIR. The accumulator's contract
+# is "calls chat:completion N times in order, each call gets the next
+# canned response", so the queue lets us script multi-round scenarios
+# without touching the venice HTTP layer.
+#
+# A canned "response" file looks like a real chat:completion response:
+#   {"choices":[{"message":{"content":"<json string>"}}]}
+# where the inner string is the model's structured-output object as
+# encoded JSON. queue_round_response and queue_final_response wrap that
+# shape so tests can specify just the meaningful fields.
+# ===========================================================================
+
+# Initialize the queue and override chat:completion + supporting helpers.
+setup_chat_stub() {
+  CHAT_QUEUE_DIR="${BATS_TEST_TMPDIR}/chat-queue"
+  mkdir -p "$CHAT_QUEUE_DIR"
+  printf '0' > "${CHAT_QUEUE_DIR}/n"
+  CHAT_LOG_FILE="${BATS_TEST_TMPDIR}/chat-calls.log"
+  : > "$CHAT_LOG_FILE"
+
+  # Override chat:completion. Each invocation increments the counter and
+  # returns the matching canned response (or exit code).
+  chat:completion() {
+    local model="$1"
+    local messages="$2"
+    local extras="${3:-}"
+
+    local n
+    n="$(cat "${CHAT_QUEUE_DIR}/n")"
+    n=$((n + 1))
+    printf '%s' "$n" > "${CHAT_QUEUE_DIR}/n"
+
+    # Log the call so tests can introspect what was sent
+    {
+      printf '=== call %s ===\n' "$n"
+      printf 'model: %s\n' "$model"
+      printf 'messages: %s\n' "$messages"
+      printf 'extras: %s\n' "$extras"
+    } >> "$CHAT_LOG_FILE"
+
+    if [[ -f "${CHAT_QUEUE_DIR}/exit-${n}" ]]; then
+      return "$(cat "${CHAT_QUEUE_DIR}/exit-${n}")"
+    fi
+    if [[ -f "${CHAT_QUEUE_DIR}/response-${n}" ]]; then
+      cat "${CHAT_QUEUE_DIR}/response-${n}"
+      return 0
+    fi
+    printf 'chat-stub: no canned response for call %s\n' "$n" >&2
+    return 1
+  }
+  export -f chat:completion
+
+  # Stub model:jq so accumulate:run can resolve a context window without
+  # hitting the registry cache or the network.
+  model:jq() {
+    printf '8000'
+  }
+  export -f model:jq
+
+  # Stub model:profile:resolve for accumulate:run-profile tests.
+  model:profile:resolve() {
+    cat "${CHAT_QUEUE_DIR}/profile.json"
+  }
+  export -f model:profile:resolve
+}
+
+# Append a canned round response to the queue. The argument is the
+# accumulated_notes value the model should "return".
+queue_round_response() {
+  local notes="$1"
+  local current_chunk="${2:-processed a chunk}"
+  local n=1
+  while [[ -e "${CHAT_QUEUE_DIR}/response-${n}" || -e "${CHAT_QUEUE_DIR}/exit-${n}" ]]; do
+    n=$((n + 1))
+  done
+  local content
+  content="$(jq -c -n --arg c "$current_chunk" --arg n "$notes" \
+    '{current_chunk: $c, accumulated_notes: $n}')"
+  jq -c -n --arg content "$content" \
+    '{choices:[{message:{content: $content}}]}' \
+    > "${CHAT_QUEUE_DIR}/response-${n}"
+}
+
+# Append a canned final response. The argument is the .result value.
+queue_final_response() {
+  local result="$1"
+  local n=1
+  while [[ -e "${CHAT_QUEUE_DIR}/response-${n}" || -e "${CHAT_QUEUE_DIR}/exit-${n}" ]]; do
+    n=$((n + 1))
+  done
+  local content
+  content="$(jq -c -n --arg r "$result" '{result: $r}')"
+  jq -c -n --arg content "$content" \
+    '{choices:[{message:{content: $content}}]}' \
+    > "${CHAT_QUEUE_DIR}/response-${n}"
+}
+
+# Append a non-zero exit code to the queue (for backoff tests).
+queue_exit_code() {
+  local code="$1"
+  local n=1
+  while [[ -e "${CHAT_QUEUE_DIR}/response-${n}" || -e "${CHAT_QUEUE_DIR}/exit-${n}" ]]; do
+    n=$((n + 1))
+  done
+  printf '%s' "$code" > "${CHAT_QUEUE_DIR}/exit-${n}"
+}
+
+# ---------------------------------------------------------------------------
+# accumulate:run - happy paths
+# ---------------------------------------------------------------------------
+
+@test "accumulate:run: one-chunk input runs one round + finalize" {
+  setup_chat_stub
+  queue_round_response "extracted: hi"
+  queue_final_response "the final answer"
+
+  run accumulate:run llama-3-large "describe this" "hello world"
+  is "$status" 0
+  is "$output" "the final answer"
+
+  # Two calls total: one round + one finalize
+  is "$(cat "${CHAT_QUEUE_DIR}/n")" "2"
+}
+
+@test "accumulate:run: multi-chunk input accumulates notes across rounds" {
+  setup_chat_stub
+  # max_context tiny so the input definitely splits.
+  # 32 tokens * 4 cpt * 0.7 fraction = ~89 chars per chunk
+  queue_round_response "saw alpha"
+  queue_round_response "saw alpha and beta"
+  queue_round_response "saw alpha, beta, gamma"
+  queue_final_response "all three"
+
+  # Three lines, each ~80 chars, will produce three chunks at the
+  # tiny max_context.
+  local input
+  input="$(printf 'alpha %.0s' {1..15})
+$(printf 'beta %.0s' {1..15})
+$(printf 'gamma %.0s' {1..15})"
+
+  run accumulate:run llama-3-large "extract" "$input" '{"max_context":32}'
+  is "$status" 0
+  is "$output" "all three"
+
+  # Four calls: three rounds + one finalize
+  is "$(cat "${CHAT_QUEUE_DIR}/n")" "4"
+
+  # Verify the second round saw the first round's notes in its system prompt
+  grep -q "saw alpha" "$CHAT_LOG_FILE"
+}
+
+@test "accumulate:run: empty input runs only finalize" {
+  setup_chat_stub
+  queue_final_response "nothing to see"
+
+  run accumulate:run llama-3-large "describe" ""
+  is "$status" 0
+  is "$output" "nothing to see"
+  is "$(cat "${CHAT_QUEUE_DIR}/n")" "1"
+}
+
+@test "accumulate:run: injects the rendered system prompt into the round messages" {
+  setup_chat_stub
+  queue_round_response "ok"
+  queue_final_response "done"
+
+  run accumulate:run llama-3-large "MY_USER_PROMPT" "hi"
+  is "$status" 0
+  grep -q 'MY_USER_PROMPT' "$CHAT_LOG_FILE"
+  # The system prompt should also have the accumulator's meta language
+  grep -q 'accumulated_notes' "$CHAT_LOG_FILE"
+}
+
+@test "accumulate:run: line_numbers mode transforms input and appends LN prompt section" {
+  setup_chat_stub
+  queue_round_response "ok"
+  queue_final_response "done"
+
+  run accumulate:run llama-3-large "extract" "first
+second" '{"line_numbers":true}'
+  is "$status" 0
+
+  # Round message body should contain the <n>:<hash>|<content> format
+  grep -qE '1:[0-9a-f]{8}\\\|first' "$CHAT_LOG_FILE" || grep -qE '1:[0-9a-f]{8}\|first' "$CHAT_LOG_FILE"
+  # The line-numbers prompt section should have been appended to the system prompt
+  grep -q 'content_hash' "$CHAT_LOG_FILE"
+}
+
+@test "accumulate:run: extras are passed through to chat:completion" {
+  setup_chat_stub
+  queue_round_response "ok"
+  queue_final_response "done"
+
+  run accumulate:run llama-3-large "extract" "hi" '{"extras":{"temperature":0.42}}'
+  is "$status" 0
+  grep -q '"temperature":0.42' "$CHAT_LOG_FILE"
+}
+
+@test "accumulate:run: schema is injected into extras as response_format" {
+  setup_chat_stub
+  queue_round_response "ok"
+  queue_final_response "done"
+
+  run accumulate:run llama-3-large "extract" "hi"
+  is "$status" 0
+  grep -q '"response_format"' "$CHAT_LOG_FILE"
+  grep -q '"accumulator_round"' "$CHAT_LOG_FILE"
+  grep -q '"accumulator_final"' "$CHAT_LOG_FILE"
+}
+
+@test "accumulate:run: caller-supplied response_format is overridden with a warn" {
+  setup_chat_stub
+  queue_round_response "ok"
+  queue_final_response "done"
+
+  run --separate-stderr accumulate:run llama-3-large "extract" "hi" \
+    '{"extras":{"response_format":{"type":"text"}}}'
+  is "$status" 0
+  [[ "$stderr" == *"overriding"* ]]
+  # The accumulator's schema should win
+  grep -q '"accumulator_round"' "$CHAT_LOG_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# accumulate:run - reactive backoff
+# ---------------------------------------------------------------------------
+
+@test "accumulate:run: context overflow triggers shave-and-retry on the failing chunk" {
+  setup_chat_stub
+  # First call (the only original chunk) overflows; the chunk gets re-split,
+  # and the resulting sub-chunk(s) succeed.
+  queue_exit_code 9
+  queue_round_response "ok after shave"
+  queue_final_response "done"
+
+  run --separate-stderr accumulate:run llama-3-large "x" "small input"
+  is "$status" 0
+  is "$output" "done"
+  [[ "$stderr" == *"shaving to fraction"* ]]
+}
+
+@test "accumulate:run: walking the floor dies with a clear message" {
+  setup_chat_stub
+  # Every attempt overflows. With start=0.7 step=0.1 floor=0.3:
+  # tries 0.7, 0.6, 0.5, 0.4, then next would be 0.3 which is NOT < 0.3,
+  # so it tries 0.3, then next would be 0.2 < 0.3 -> die.
+  local _i
+  for _i in 1 2 3 4 5 6; do
+    queue_exit_code 9
+  done
+
+  run accumulate:run llama-3-large "x" "small input"
+  is "$status" 1
+  [[ "$output" == *"too dense"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# accumulate:run-profile
+# ---------------------------------------------------------------------------
+
+@test "accumulate:run-profile: resolves profile and forwards to accumulate:run" {
+  setup_chat_stub
+  cat > "${CHAT_QUEUE_DIR}/profile.json" << 'EOF'
+{
+  "model": "llama-3-large",
+  "chars_per_token": 4.0,
+  "params": {"temperature": 0.3},
+  "venice_parameters": {}
+}
+EOF
+  queue_round_response "ok"
+  queue_final_response "done"
+
+  run accumulate:run-profile long-context "extract" "hi"
+  is "$status" 0
+  is "$output" "done"
+  # The profile's params should have been merged into extras
+  grep -q '"temperature":0.3' "$CHAT_LOG_FILE"
+}
+
+@test "accumulate:run-profile: caller extras override profile params" {
+  setup_chat_stub
+  cat > "${CHAT_QUEUE_DIR}/profile.json" << 'EOF'
+{
+  "model": "llama-3-large",
+  "chars_per_token": 4.0,
+  "params": {"temperature": 0.3},
+  "venice_parameters": {}
+}
+EOF
+  queue_round_response "ok"
+  queue_final_response "done"
+
+  run accumulate:run-profile long-context "extract" "hi" '{"extras":{"temperature":0.99}}'
+  is "$status" 0
+  grep -q '"temperature":0.99' "$CHAT_LOG_FILE"
+}
+
+@test "accumulate:run-profile: defaults chars_per_token to 4.0 when profile omits it" {
+  setup_chat_stub
+  cat > "${CHAT_QUEUE_DIR}/profile.json" << 'EOF'
+{
+  "model": "llama-3-large",
+  "params": {},
+  "venice_parameters": {}
+}
+EOF
+  queue_round_response "ok"
+  queue_final_response "done"
+
+  run accumulate:run-profile some-profile "extract" "hi"
+  is "$status" 0
+}
