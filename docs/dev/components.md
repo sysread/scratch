@@ -44,7 +44,7 @@ Depends on `base.sh` and `termio.sh`.
 Requires `gum` at source time.
 
 Functions:
-- `tui:log LEVEL [ARGS...]` - structured log via `gum log`; when stdin is a pipe, reads line-by-line
+- `tui:log LEVEL [ARGS...]` - structured log via `gum log`. Dispatch is purely arg-driven: with args, log them directly (first arg is the message, the rest are key/value structured fields); with no args, read stdin line by line and log each line at LEVEL. Output is unconditionally on stderr per the conventions doc.
 - `tui:debug` / `tui:info` / `tui:warn` / `tui:error` - level-specific shortcuts
 - `tui:die MSG [FIELDS...]` - log error, then die
 - `tui:format` - markdown via `gum format` on TTY, cat otherwise
@@ -60,7 +60,7 @@ Optionally uses `tui:debug` for logging if available.
 
 Functions:
 - `tmp:track PATH` - register a path for cleanup
-- `tmp:make VAR TEMPLATE [MKTEMP_ARGS...]` - create a temp file via `mktemp`, register it, assign the path to nameref VAR (NOT via `$(...)` - that would lose the registration in the subshell)
+- `tmp:make VAR TEMPLATE [MKTEMP_ARGS...]` - create a temp file via `mktemp`, register it, assign the path to nameref VAR (NOT via `$(...)` - that would lose the registration in the subshell). TEMPLATE must be an absolute path; relative templates are rejected at the guard so a misuse cannot pollute the cwd (which would be the source tree if the caller is running from inside one).
 - `tmp:cleanup` - best-effort deletion of all tracked files
 - `tmp:install-traps` - install EXIT/INT/TERM/HUP traps that call `tmp:cleanup`, chaining with any existing handlers
 
@@ -126,6 +126,10 @@ Functions:
 Private helpers:
 - `_venice:_backoff-seconds ATTEMPT` - compute retry delay via a log10 curve (`ceil(2 * (1 + log10(attempt)))`); uses `bc -l` for the floating-point math
 - `_venice:_reset-wait HEADERS_FILE` - parse `x-ratelimit-reset-requests` (a unix timestamp) from a curl header dump and return seconds-until-reset, capped at `_VENICE_MAX_RESET_WAIT` (60s); empty when the header is missing, malformed, or stale
+- `_venice:_is-context-overflow BODY` - return 0 if BODY matches Venice's `context_length_exceeded` envelope (exact match on `.error.code`); used by the 400 dispatch to translate that single shape into exit code 9 instead of dying
+
+Special exit code 9 (context overflow):
+A 400 whose body has `.error.code == "context_length_exceeded"` is not a death-worthy error from the caller's perspective - the accumulator wants to know about it so it can shave the chunk and retry. `venice:curl` returns exit code 9 with the body on stderr in that case. All other 400s still die immediately. The accumulator's `_accumulate:_process-chunk-with-backoff` is the primary consumer.
 
 Retry behavior:
 - Transient errors (429 rate-limited, 500 server error, 503 at capacity, 504 timeout) retry up to `SCRATCH_VENICE_MAX_ATTEMPTS` times (default 3). 429/500/503 are documented retryable codes for Venice; 504 is included defensively.
@@ -165,10 +169,14 @@ Profile functions (`model:profile:*`):
 - `model:profile:validate NAME` - check that the profile is internally consistent: profile exists, the model id exists in the registry cache, and every requested param/venice_parameter is supported by the model's declared capabilities. Reports ALL capability failures at once via `warn` before returning 1, so the user can fix everything in one pass instead of running validate repeatedly.
 
 Profiles live in `data/models.json` (tracked in the repo, not user-configurable). The file has two top-level groups:
-- `base` - standalone profiles (smart, balanced, fast)
+- `base` - standalone profiles (smart, balanced, fast, long-context)
 - `variants` - profiles that `extends` a base and add their own params/venice_parameters
 
 Resolution does a recursive deep-merge so variant overrides combine with their base's params rather than replacing them. Variants extending other variants works transitively (resolve calls itself recursively); cycles are not detected and would stack overflow, so don't write them.
+
+Profiles may also carry an optional top-level `chars_per_token` field (float, default 4.0 when absent). This is tooling metadata used by `lib/accumulator.sh` to estimate request sizes for chunking; it never reaches the Venice API and is not validated by `model:profile:validate` (which only walks `params` and `venice_parameters`). Different Venice models use different tokenizers, so the divisor varies; the embedding model runs around 3.0 chars/token and the default for general text is 4.0. The `long-context` base profile points at `qwen-3-6-plus` (1M token context) and is the accumulator's default.
+
+See `data/models.md` for the full schema reference (top-level structure, profile fields, resolution semantics, validation rules, the `chars_per_token` rationale, and the "adding a new profile" workflow). It lives next to the data file so contributors find it when adding profiles.
 
 The capability mapping for validation lives in two private associative arrays at the top of the profile section: `_MODEL_PARAM_CAPABILITIES` (top-level params -> required capabilities) and `_MODEL_VENICE_PARAM_CAPABILITIES` (venice_parameters -> required capabilities). Adding a new mapping teaches validate about a new parameter without changing the validation logic.
 
@@ -185,6 +193,55 @@ Functions:
 
 The library deliberately has no message builder API - callers construct messages arrays themselves and pass them as JSON.
 Extras (`temperature`, `venice_parameters`, `tools`, `response_format`, etc.) go in the third argument as a JSON object that gets merged shallowly into the request body. Note that `chat:complete-with-tools` always overrides `tools` with what it built from `TOOL_NAMES_JSON`.
+
+### `lib/prompt.sh`
+
+Prompt asset loader.
+Depends on `base.sh`.
+Requires `sed`.
+
+Functions:
+- `prompt:dir` - print the directory under which prompt files are resolved. Honors `SCRATCH_PROMPTS_DIR` for tests; otherwise resolves to `data/prompts/` next to `lib/`.
+- `prompt:load NAME` - print the contents of `<prompts dir>/<NAME>.md`. NAME may contain slashes (e.g. `accumulator/system`). Dies with the resolved path if missing.
+- `prompt:render NAME [VAR=VALUE ...]` - like `prompt:load` but additionally substitutes `{{var}}` placeholders with the supplied values via `sed`. Substitution is literal: no nesting, no escaping, unsupplied placeholders are left as-is so missing variables are visible during testing rather than silently dropped. Values containing `/`, `&`, `|`, and `\` are handled correctly via a private `_prompt:_sed-escape` helper.
+
+Storing prompts as flat files instead of bash heredocs keeps them out of shell escaping rules and lets editors and the anti-slop scan treat them as the documents they are.
+See `data/prompts/README.md` for the per-feature subdir convention and `data/prompts/accumulator/` for the first concrete consumer.
+
+### `lib/accumulator.sh`
+
+Accumulator-completion driver for inputs that exceed a model's context window.
+Depends on `base.sh`, `tempfiles.sh`, `prompt.sh`, `chat.sh`, `model.sh`, `tui.sh`.
+Requires `bc`, `awk`, `shasum`, `jq` at source time.
+
+Public functions:
+- `accumulate:run MODEL PROMPT INPUT [OPTIONS_JSON]` - chunk INPUT according to MODEL's context window, run a chat completion round per chunk that builds up structured `accumulated_notes`, then a final cleanup pass that returns the user-facing answer on stdout.
+- `accumulate:run-profile PROFILE PROMPT INPUT [OPTIONS_JSON]` - convenience wrapper. Resolves PROFILE via `model:profile:resolve`, defaults `chars_per_token` from the profile (or 4.0), merges the profile's params/venice_parameters into `extras`, then forwards to `accumulate:run`. Caller-supplied options take precedence.
+
+Private helpers:
+- `_accumulate:_token-count TEXT_OR_FILE CHARS_PER_TOKEN` - approximate tokens via `chars / chars_per_token`, ceiling, through `bc -l`. Auto-detects whether the first arg is a literal string or a file path.
+- `_accumulate:_max-chars MAX_TOKENS CHARS_PER_TOKEN FRACTION` - integer character budget for a chunk; floor.
+- `_accumulate:_split INPUT_FILE MAX_CHARS OUT_DIR` - line-aware pre-split into numbered files (`0001`, `0002`, ...). Lazily opens chunks (so empty input produces zero files), packs lines until adding another would overflow, gives oversized lines their own chunk untruncated, handles input that does not end in a newline.
+- `_accumulate:_inject-line-numbers INPUT_FILE OUT_FILE` - prefix every line with `<n>:<8 hex hash>|<content>`. Hash is the first 8 chars of `shasum -a 256` over the original line content; stable across identical lines so downstream agents can verify line identity at edit time. Must run BEFORE split so chunk boundaries fall on numbered-line boundaries.
+- `_accumulate:_build-round-system-prompt` / `_accumulate:_build-final-system-prompt` - render `data/prompts/accumulator/system.md` and `finalize.md` via `prompt:render`. The line-numbers section is appended to the round system prompt when line_numbers mode is enabled.
+- `_accumulate:_merge-extras EXTRAS SCHEMA` - inject the structured-output schema into `extras.response_format`, overriding any caller-supplied response_format with a `tui:warn` (the accumulator's contract trumps the caller).
+- `_accumulate:_process-chunk` - run one round, parse the response for `accumulated_notes`, return it on stdout. Passes through `chat:completion`'s exit code 9 (context overflow from `venice:curl`) to the backoff loop.
+- `_accumulate:_finalize` - run the cleanup pass with the finalize schema, parse the response for `.result`, print it as plain text.
+- `_accumulate:_process-chunk-with-backoff` - the per-chunk shave-10% recursion. On exit code 9, shaves the fraction by `backoff_step` and re-splits the failing chunk at the smaller budget; processes the resulting sub-chunks recursively. Walks the floor at `floor_fraction` and dies with a clear "too dense" message naming the failing chunk.
+
+Structured-output schemas:
+The accumulator embeds two JSON schemas as top-level constants (`_ACCUMULATOR_ROUND_SCHEMA` and `_ACCUMULATOR_FINAL_SCHEMA`). Both use OpenAI-compatible `json_schema` format with `strict: true`. The round schema requires `current_chunk` (one-sentence acknowledgement, for the operator's audit trail) and `accumulated_notes` (the running structured-or-prose state). The final schema requires `result` (the user-facing answer). Field names are deliberately verbose because the model has no shared context with scratch and short names would be ambiguous.
+
+Reactive backoff:
+Pre-split is conservative at 70% of `(max_context_tokens * chars_per_token)`. On context overflow (`venice:curl` exit code 9 surfacing through `chat:completion`), the failing chunk gets re-split at progressively smaller fractions (0.6, 0.5, 0.4, 0.3) until it fits or hits `floor_fraction`. The fraction resets to `start_fraction` on the next outer chunk because the budget at any round depends on the buffer size at that round, not on a stable per-model property. See `scratch/02-accumulator.md` (or its sub-plans) for the design rationale.
+
+OPTIONS_JSON keys (all optional):
+`question`, `extras`, `max_context`, `chars_per_token` (default 4.0), `line_numbers` (default false), `start_fraction` (default 0.7), `floor_fraction` (default 0.3), `backoff_step` (default 0.1).
+
+Prompts live in `data/prompts/accumulator/`:
+- `system.md` - per-round meta with `{{user_prompt}}`, `{{question}}`, `{{notes}}` placeholders
+- `finalize.md` - cleanup-pass meta with the same placeholders
+- `line-numbers.md` - additional system prompt section appended when line_numbers mode is enabled
 
 ### `lib/tool.sh`
 
@@ -403,7 +460,11 @@ Test files use 2-digit numerical prefixes (CPAN convention) so they run in depen
 | `test/05-model.bats` | Tests for `lib/model.sh` (registry + profiles; overrides `venice:curl`) |
 | `test/06-chat.bats` | Tests for `lib/chat.sh` including `chat:complete-with-tools` recursion (multi-response capture queue, stubbed tool layer) |
 | `test/07-tool.bats` | Tests for `lib/tool.sh` (sync half + parallel) using fake tool fixtures under `SCRATCH_TOOLS_DIR` |
-| `test/10-scratch-doctor.bats` | Tests for `bin/scratch-doctor` |
+| `test/08-prompt.bats` | Tests for `lib/prompt.sh` (load + render with sed-escape edge cases) using fixture prompt files under `SCRATCH_PROMPTS_DIR` |
+| `test/09-accumulator.bats` | Tests for `lib/accumulator.sh` (text helpers + chat layer + reduce loop + reactive backoff) with a queued `chat:completion` stub |
+| `test/10-scratch-doctor.bats` | Tests for `bin/scratch-doctor` (runs doctor against a fake `SCRATCH_HOME` under `BATS_TEST_TMPDIR` so stub subcommands never pollute the live tree) |
+| `test/11-tui.bats` | Tests for `lib/tui.sh` (`tui:log` arg vs pipe dispatch, stderr-only output) |
+| `test/12-tempfiles.bats` | Tests for `lib/tempfiles.sh` (`tmp:make` input validation, including the absolute-path guard) |
 | `test/90-lint.bats` | Self-reflection: shellcheck |
 | `test/91-formatting.bats` | Self-reflection: shfmt drift |
 | `test/92-permissions.bats` | Self-reflection: +x policy |

@@ -111,6 +111,36 @@ Strict ordering:
 Libraries MUST NOT have the executable bit set.
 The permissions test enforces this.
 
+## Prompt Storage (data/prompts/)
+
+LLM prompt assets live as flat markdown files under `data/prompts/<feature>/<name>.md`, one prompt per file.
+Per-feature subdirectories so growth stays manageable as more libraries and agents land their own prompts.
+`<feature>` is typically the library or agent that owns the prompt: `accumulator/`, `agent-foo/`, etc.
+
+Loaded via `lib/prompt.sh`:
+
+- `prompt:load NAME` for a static asset.
+- `prompt:render NAME [VAR=VALUE ...]` for one with `{{var}}` placeholders.
+
+Substitution is literal: no nesting, no HTML or JSON escaping, unsupplied placeholders are left as-is so missing variables are visible during testing.
+Special characters in values (`/`, `&`, `|`, `\`) are handled correctly.
+
+Markdown extension because LLMs handle markdown natively and editor experience is better than `.txt`.
+Subject to the anti-slop scan (no smart quotes, no em dashes) - same rules as the rest of the tracked text.
+Prompts must explain themselves to the model from a cold start; assume the model has no shared context with the rest of scratch.
+
+See `data/prompts/README.md` for the full storage convention.
+
+## Documentation Near the Code
+
+Some documentation lives next to the code or data it describes rather than under `docs/`:
+
+- `data/models.md` - schema reference for `data/models.json`. Lives next to the data so contributors find it when adding profiles.
+- `data/prompts/README.md` - storage convention and `lib/prompt.sh` API. Lives in the prompt root so authoring a new prompt is one ls away from the rules.
+
+Higher-level integrated documentation lives under `docs/dev/` (for contributors and LLMs working on scratch itself) and `docs/guides/` (for users).
+Use both: docs-near-data when contributors are working hands-on with that specific data; `docs/` for understanding the system as a whole.
+
 ## LLM Tool Structure (tools/ directory)
 
 The `tools/` directory is **reserved for LLM tool calling**. Do not park unrelated scripts here. If you need a general-purpose script, it goes in `helpers/` (if it's a dev/build helper) or as a `bin/scratch-<verb>` subcommand (if it's a user-facing command).

@@ -105,6 +105,7 @@ lib/          sourced libraries (not executable)
   termio.sh       io:is-tty, io:sedl, io:strip-ansi, etc.
   tui.sh          tui:log, tui:format, tui:spin, tui:choose (gum wrappers)
   tempfiles.sh    tmp:make, tmp:cleanup (trap-based temp file registry)
+  prompt.sh       prompt:load, prompt:render (loads data/prompts/<feature>/*.md)
   project.sh      project:save, project:load, project:detect (worktree-aware)
   cmd.sh          cmd:define, cmd:parse, cmd:get (declarative command framework)
   dispatch.sh     dispatch:try, dispatch:usage (parameterized subcommand dispatch)
@@ -113,14 +114,21 @@ lib/          sourced libraries (not executable)
                   model:profile:* (profile system, sourced from data/models.json)
   chat.sh         chat:completion, chat:extract-content, chat:complete-with-tools
   tool.sh         tool:list, tool:invoke, tool:invoke-parallel (tool calling)
+  accumulator.sh  accumulate:run, accumulate:run-profile (chunk + reduce + finalize
+                  for inputs that exceed a model's context window)
 
 libexec/      internal non-bash executables
   embed.exs       Elixir embedding generator (called by helpers/embed)
 
 data/         static config data shipped in the repo (not user settings)
-  models.json     model profile definitions (smart/balanced/fast bases +
-                  coding/web variants), read by lib/model.sh's
+  models.json     model profile definitions (smart/balanced/fast/long-context
+                  bases + coding/web variants), read by lib/model.sh's
                   model:profile:* functions
+  models.md       schema reference for models.json (lives next to the data
+                  so contributors find it when adding profiles)
+  prompts/        LLM prompt assets, organized as <feature>/<name>.md
+    README.md     storage convention, placeholder syntax, lib/prompt.sh API
+    accumulator/  system, finalize, line-numbers prompts for lib/accumulator.sh
 
 tools/        LLM tool calling. Each subdirectory is a self-contained tool:
               <name>/spec.json     OpenAI function spec (the inner function obj)
@@ -148,7 +156,11 @@ test/         bats test suite (unit tests only - non-recursive)
   05-model.bats                tests for lib/model.sh (registry + profiles)
   06-chat.bats                 tests for lib/chat.sh (incl. complete-with-tools)
   07-tool.bats                 tests for lib/tool.sh (sync + parallel)
-  10-scratch-doctor.bats       tests for bin/scratch-doctor
+  08-prompt.bats               tests for lib/prompt.sh (load + render)
+  09-accumulator.bats          tests for lib/accumulator.sh (text + chat layers)
+  10-scratch-doctor.bats       tests for bin/scratch-doctor (fake SCRATCH_HOME)
+  11-tui.bats                  tests for lib/tui.sh (tui:log dispatch)
+  12-tempfiles.bats            tests for lib/tempfiles.sh (tmp:make validation)
   90-lint.bats                 self-reflection: shellcheck
   91-formatting.bats           self-reflection: shfmt drift
   92-permissions.bats          self-reflection: +x policy
@@ -310,9 +322,10 @@ The `SCRATCH_` prefix lets a contributor override the general key for scratch-sp
 Dies with a clear message if neither is set.
 
 `venice:curl METHOD PATH [BODY]` injects the `Authorization: Bearer $key` header, posts the body via stdin (`-d @-`) to avoid argv length limits, writes the response body to a temp file (`-o`) and captures the status code (`-w '%{http_code}'`) separately.
-Venice's documented error codes (401, 402, 429, 503, 504) get translated into user-targeted `die` messages: "insufficient credits, top up at...", "rate limited, wait and retry", etc.
+Venice's documented error codes (401, 402, 429, 500, 503, 504) get translated into user-targeted `die` messages: "insufficient credits, top up at...", "rate limited, wait and retry", etc.
+A 400 with `.error.code == "context_length_exceeded"` is the one exception that does NOT die: it returns exit code 9 with the body on stderr so the accumulator can catch it and drive its reactive shave-and-retry backoff.
 
-Transient errors (429, 503, 504) are automatically retried up to `SCRATCH_VENICE_MAX_ATTEMPTS` times (default 3) with a log10 backoff between attempts.
+Transient errors (429, 500, 503, 504) are automatically retried up to `SCRATCH_VENICE_MAX_ATTEMPTS` times (default 3) with a log10 backoff between attempts.
 The backoff formula is `ceil(2 * (1 + log10(attempt)))`, which ramps quickly from the start - the first retry is a real 2-second wait - but self-caps: even 1000 failed attempts only reaches an 8-second delay.
 Log10 is a better shape here than exponential for two reasons: it starts with a meaningful delay instead of fractional seconds, and it implicitly bounds the worst-case wait rather than requiring an arbitrary clamp.
 Each retry logs a warn to stderr so long pauses have visible cause.
@@ -431,6 +444,62 @@ Each layer has exactly one job:
 - **`chat:complete-with-tools`** is *when* tools fire during a model conversation.
 
 A future agent system can use any combination of these without coupling. An agent that uses tools without an LLM (e.g. cron-driven) would call `tool:invoke` directly. An agent that uses an LLM without tools would call `chat:completion` directly. An agent that uses both calls `chat:complete-with-tools`. The layers compose; you don't pay for what you don't use.
+
+## Accumulator Pattern (accumulator.sh + prompt.sh)
+
+`lib/accumulator.sh` processes inputs that exceed a model's context window by chunking the input, running a chat completion round per chunk that builds up structured `accumulated_notes`, then a final cleanup pass that returns the user-facing answer.
+The pattern is the standard solution for "this file does not fit": split, reduce, finalize.
+
+The design borrows the shape from fnord's `AI.Accumulator` (Elixir) and adapts it to bash with three significant scratch additions: a structured-output contract for the buffer, per-profile fractional `chars_per_token`, and reactive backoff via `venice:curl` exit code 9.
+
+### Three layers
+
+1. **Pure text helpers** (`_accumulate:_token-count`, `_accumulate:_max-chars`, `_accumulate:_split`, `_accumulate:_inject-line-numbers`).
+   Estimate token budgets via `chars / chars_per_token` through `bc -l`, pre-split inputs into numbered chunk files line-aware, and optionally inject `<line_number>:<hash>|<content>` prefixes for downstream edit tooling.
+   No model awareness, no API calls.
+
+2. **Chat-layer wrappers** (`_accumulate:_process-chunk`, `_accumulate:_finalize`, `_accumulate:_process-chunk-with-backoff`).
+   Render the accumulator's system prompts via `prompt:render`, embed structured-output schemas as `response_format`, call `chat:completion`, and parse the structured response.
+   The backoff wrapper catches `venice:curl` exit code 9 (context overflow) bubbling through `chat:completion` and drives a per-chunk shave-and-retry recursion.
+
+3. **Public entry points** (`accumulate:run`, `accumulate:run-profile`).
+   The reduce loop iterates pre-split chunks against the same `notes` buffer, then runs the finalize pass.
+   `accumulate:run-profile` resolves a model profile, defaults `chars_per_token` from the profile (or 4.0), and merges the profile's params into `extras`.
+
+### Structured-output contract
+
+Both round and final responses use OpenAI-compatible `json_schema` with `strict: true`.
+The round schema requires `current_chunk` (a one-sentence acknowledgement, audit-trail only) and `accumulated_notes` (the running state, fed back into the next round's input).
+The final schema requires `result` (the user-facing answer).
+Field names are deliberately verbose because the model has no shared context with scratch and short names would be ambiguous on first read.
+
+Constraining the buffer via `response_format` is the key improvement over a free-form prose buffer: the model does not have to re-parse its own previous output, and the schema eliminates a whole class of "the model forgot the format" errors.
+
+### Reactive backoff
+
+Pre-split is conservative at 70% of `(max_context_tokens * chars_per_token)`, leaving headroom for the system prompt and the running buffer.
+On context overflow, `venice:curl` returns exit code 9 (with `.error.code == "context_length_exceeded"` matched in `_venice:_is-context-overflow`).
+`chat:completion` propagates the exit code through naturally because it is the last command in the function.
+The accumulator's backoff wrapper catches exit code 9 and re-splits the failing chunk at progressively smaller fractions (0.6, 0.5, 0.4, 0.3) until the resulting sub-chunks fit or the floor is hit.
+
+The fraction resets to the start fraction on the next outer chunk because the budget at any round depends on the buffer size at that round, not on a stable per-model property.
+
+### Where prompts live
+
+Prompts are flat markdown files under `data/prompts/<feature>/<name>.md`, loaded by `lib/prompt.sh`.
+The accumulator's prompts live in `data/prompts/accumulator/`:
+- `system.md` - per-round meta prompt with `{{user_prompt}}`, `{{question}}`, `{{notes}}` placeholders
+- `finalize.md` - cleanup-pass meta prompt with the same placeholders
+- `line-numbers.md` - additional system prompt section appended when line_numbers mode is enabled
+
+Storing prompts as files instead of bash heredocs keeps them out of shell escaping rules, lets editors and the anti-slop scan treat them as the documents they are, and gives a clear graduation path for the much larger collection of prompts that future agents will need.
+
+### Where this fits in the bigger picture
+
+Accumulator sits one layer above `chat:completion` and one layer below user-facing subcommands and (eventually) agents.
+A subcommand that operates on a single file calls `accumulate:run-profile` directly with the file as input.
+A future agent that wants to summarize a large document before reasoning over it calls accumulator first, then passes the result to its own `chat:completion` calls.
+The accumulator does not need to know whether it is being driven by a user, a subcommand, or another agent; the contract is the same.
 
 ## Dependency Declaration and Doctor
 
