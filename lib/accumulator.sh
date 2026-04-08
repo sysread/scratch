@@ -43,7 +43,7 @@ _ACCUMULATOR_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   source "$_ACCUMULATOR_SCRIPTDIR/tui.sh"
 }
 
-has-commands bc awk shasum jq
+has-commands bc shasum jq
 
 #-------------------------------------------------------------------------------
 # Structured-output schemas

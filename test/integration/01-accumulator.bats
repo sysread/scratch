@@ -10,17 +10,12 @@ set -euo pipefail
 # Venice model. They cost real money. Run via `mise run test:integration`
 # or helpers/run-integration-tests; never automatic.
 #
-# The first test was the smoke test that caught two bugs in the
-# accumulator series:
-#   1. prompt:render's old sed implementation died on multi-line values
-#      (bash 5.x ${var//pat/repl} also treats & as a backref - the
-#      replacement now escapes \\ then & before substituting).
-#   2. Confirmed venice-uncensored does support response_format strict
-#      mode end-to-end despite the small model size.
-#
-# Without these tests, both bugs would have shipped because the unit
-# tests stub chat:completion and never exercise the actual prompt-
-# substitution + structured-output round trip.
+# Why integration tests for the accumulator: the unit suite stubs
+# chat:completion, which means it never exercises the actual
+# prompt:render -> chat -> structured-output -> notes round trip.
+# Bugs in that round trip (placeholder substitution edge cases,
+# response_format compatibility, multi-line value handling) only
+# surface against a real model. These tests catch them.
 #-------------------------------------------------------------------------------
 
 setup() {
@@ -67,8 +62,9 @@ EOF
   # max_context=80 tokens against the ~330-char input gives a chunk
   # budget of 80 * 4 * 0.7 = 224 chars, so the input splits into 3-5
   # chunks. This exercises the multi-round accumulation path, the
-  # structured-output schema, and the prompt:render multi-line value
-  # path that the original sed implementation broke on.
+  # structured-output schema, and the multi-line value handling in
+  # prompt:render (each round feeds the previous round's notes back
+  # into the system prompt as a {{notes}} substitution).
   local input
   input="$(sample_input)"
 

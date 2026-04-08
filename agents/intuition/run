@@ -15,9 +15,9 @@
 #
 # Phase 1: Perception
 #   Read the transcript on stdin and run a single completion to summarize
-#   the situation. Earlier versions used the accumulator here, but in real
-#   use the input is a chat transcript that fits comfortably in the fast
-#   model's context window. The accumulator was overkill and added latency.
+#   the situation. A typical chat transcript fits in the fast model's
+#   context window, so this phase is a single chat:completion rather than
+#   a chunked accumulator pass.
 #
 # Phase 2: Drive reactions (parallel)
 #   For each drive prompt under data/prompts/intuition/drives/, run a

@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
 
 #-------------------------------------------------------------------------------
-# intuition agent - availability check + dependency manifest
+# intuition agent - availability check
 #
-# The intuition agent uses workers + chat + model + prompt. Declare every
-# leaf binary that flows through those layers so the doctor reports them
-# under agent:intuition. chat and model use jq and curl through venice:curl;
-# venice:curl uses bc for retry backoff math.
+# Always available. The intuition agent uses workers + chat + model +
+# prompt + accumulator (transitively), and every leaf binary those
+# layers need (curl, jq, bc) is declared at the lib level and verified
+# at source time when the run script does
+# `source "$SCRATCH_HOME/lib/..."`.
+#
+# Declaring those binaries here would add an agent:intuition attribution
+# suffix to rows that already report under (lib), claiming ownership the
+# agent does not actually have. The deps belong to the lib stack.
+#
+# Sources base.sh because the contract test requires it (so any
+# precondition checks added here in the future can use die / warn /
+# has-commands without restructuring).
 #-------------------------------------------------------------------------------
 
 set -euo pipefail
 
 # shellcheck source=/dev/null
 source "$SCRATCH_HOME/lib/base.sh"
-
-has-commands curl jq bc

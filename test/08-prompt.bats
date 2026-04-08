@@ -139,11 +139,10 @@ line four"
 }
 
 @test "prompt:render handles values containing literal newlines" {
-  # Regression: the previous sed-based implementation died with
-  # "unescaped newline inside substitute pattern" the first time the
-  # accumulator tried to feed multi-line accumulated_notes back into
-  # the next round's system prompt. Parameter expansion has no such
-  # limit; multi-line values must work.
+  # Multi-line values must round-trip cleanly. The accumulator feeds
+  # multi-line accumulated_notes back into the next round's system
+  # prompt as a {{notes}} substitution; if newline handling broke,
+  # every multi-round accumulator run would corrupt its own buffer.
   printf 'before\n{{notes}}\nafter\n' > "${SCRATCH_PROMPTS_DIR}/m.md"
   run prompt:render m notes='line one
 line two

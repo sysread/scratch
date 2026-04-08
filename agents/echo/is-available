@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
 
 #-------------------------------------------------------------------------------
-# echo agent - availability check + dependency manifest
+# echo agent - availability check
 #
-# The echo agent uses agent:simple-completion which transitively pulls in
-# venice:curl (curl + jq + bc) and the prompt loader. Declare the leaf
-# binaries here so the doctor reports them under agent:echo and so a
-# missing dep produces a clear error before the agent runs.
+# Always available. The echo agent uses agent:simple-completion which
+# transitively pulls in venice:curl + jq + bc through the libraries the
+# run script sources. Those binaries are declared at the lib level
+# (lib/venice.sh, lib/chat.sh) and verified at source time, so they
+# would already abort the run if missing. Re-declaring them here would
+# add an agent:echo attribution suffix to rows that already report
+# under (lib) for the same binary, claiming ownership the agent does
+# not actually have.
+#
+# Sources base.sh because the contract test requires it (so any
+# precondition checks added here in the future can use die / warn /
+# has-commands without restructuring).
 #-------------------------------------------------------------------------------
 
 set -euo pipefail
 
 # shellcheck source=/dev/null
 source "$SCRATCH_HOME/lib/base.sh"
-
-has-commands curl jq bc

@@ -71,12 +71,11 @@ export -f prompt:load
 # dropped.
 #
 # Implementation uses bash's ${var//pattern/replacement} parameter
-# expansion rather than sed. The earlier sed-based version broke on
-# values containing literal newlines (sed's replacement side is
-# single-line by default), which surfaced the first time the
-# accumulator tried to feed multi-line accumulated_notes back into the
-# next round's system prompt. Parameter expansion has no such limit
-# because it operates on the bash variable directly, not on a stream.
+# expansion rather than sed. Parameter expansion handles values
+# containing literal newlines, which sed's replacement side does not
+# (sed treats the replacement as single-line by default), and operates
+# on the bash variable directly so there is no stream lifecycle to
+# worry about.
 #
 # Escape rules in the replacement side:
 # - bash 5.x treats `&` as a backreference to the matched text (same as

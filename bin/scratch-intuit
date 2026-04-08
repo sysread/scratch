@@ -46,7 +46,6 @@ SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
 }
 
 has-min-bash-version 5
-has-commands jq
 
 cmd:define "intuit" "$_DESC"
 cmd:define-cli-usage "EXAMPLES" "$(
