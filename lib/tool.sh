@@ -53,6 +53,7 @@ _TOOL_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   source "$_TOOL_SCRIPTDIR/base.sh"
   source "$_TOOL_SCRIPTDIR/tempfiles.sh"
   source "$_TOOL_SCRIPTDIR/project.sh"
+  source "$_TOOL_SCRIPTDIR/workers.sh"
 }
 
 has-commands jq
@@ -401,8 +402,6 @@ tool:invoke-parallel() {
   local count
   local i
   local id
-  local name
-  local args
   local rc
   local content
   local ok
@@ -423,42 +422,50 @@ tool:invoke-parallel() {
   tmp:track "$workdir"
   tmp:install-traps
 
-  # Fork one bg job per call. Each writes to:
-  #   <workdir>/<i>.id      the tool_call_id
-  #   <workdir>/<i>.out     stdout from main
-  #   <workdir>/<i>.err     stderr from main
-  #   <workdir>/<i>.status  the exit code
+  # Pre-decode call data into parallel arrays so the worker can index
+  # into them with no per-fork jq cost. Subshells inherit parent
+  # variables at fork time, so the arrays are visible to every worker.
+  local -a TOOL_PAR_IDS=()
+  local -a TOOL_PAR_NAMES=()
+  local -a TOOL_PAR_ARGS=()
   for ((i = 0; i < count; i++)); do
-    id="$(jq -r ".[$i].id" <<< "$calls_json")"
-    name="$(jq -r ".[$i].name" <<< "$calls_json")"
-    args="$(jq -c ".[$i].args" <<< "$calls_json")"
-
-    printf '%s' "$id" > "${workdir}/${i}.id"
-
-    # Background job. tool:invoke captures into globals, but we're in a
-    # subshell where the globals don't leak back to the parent. We cat
-    # them into the workdir files, then the parent reads those files.
-    #
-    # set +e in the subshell because tool:invoke is allowed to return
-    # non-zero - we capture the rc into the .status file rather than
-    # propagating it as a subshell failure.
-    {
-      set +e
-      tool:invoke "$name" "$args" 2> /dev/null
-      rc=$?
-      printf '%s' "$rc" > "${workdir}/${i}.status"
-      printf '%s' "$_TOOL_INVOKE_STDOUT" > "${workdir}/${i}.out"
-      printf '%s' "$_TOOL_INVOKE_STDERR" > "${workdir}/${i}.err"
-    } &
+    TOOL_PAR_IDS+=("$(jq -r ".[$i].id" <<< "$calls_json")")
+    TOOL_PAR_NAMES+=("$(jq -r ".[$i].name" <<< "$calls_json")")
+    TOOL_PAR_ARGS+=("$(jq -c ".[$i].args" <<< "$calls_json")")
+    # Stash the id in the workdir up front so the result-assembly loop
+    # below does not depend on the worker having run successfully.
+    printf '%s' "${TOOL_PAR_IDS[i]}" > "${workdir}/${i}.id"
   done
 
-  wait
+  TOOL_PAR_WORKDIR="$workdir"
+  export TOOL_PAR_IDS TOOL_PAR_NAMES TOOL_PAR_ARGS TOOL_PAR_WORKDIR
+
+  # Worker function. Each invocation gets a single index, looks up its
+  # call data from the parallel arrays, runs the tool, and writes
+  # stdout/stderr/status to per-index files in the workdir.
+  #
+  # set +e because tool:invoke is allowed to return non-zero - we
+  # capture the rc into the .status file rather than propagating it as
+  # a subshell failure (which would tear down the worker pool).
+  # shellcheck disable=SC2329 # invoked indirectly by workers:run-parallel
+  _tool_invoke_parallel_worker() {
+    local i="$1"
+    set +e
+    tool:invoke "${TOOL_PAR_NAMES[i]}" "${TOOL_PAR_ARGS[i]}" 2> /dev/null
+    local worker_rc=$?
+    printf '%s' "$worker_rc" > "${TOOL_PAR_WORKDIR}/${i}.status"
+    printf '%s' "$_TOOL_INVOKE_STDOUT" > "${TOOL_PAR_WORKDIR}/${i}.out"
+    printf '%s' "$_TOOL_INVOKE_STDERR" > "${TOOL_PAR_WORKDIR}/${i}.err"
+  }
+  export -f _tool_invoke_parallel_worker
+
+  local max_jobs="${SCRATCH_TOOL_PARALLEL_JOBS:-$(workers:cpu-count)}"
+  workers:run-parallel "$max_jobs" "$count" _tool_invoke_parallel_worker
 
   # Reassemble results in input order
   for ((i = 0; i < count; i++)); do
     id="$(cat "${workdir}/${i}.id")"
     rc="$(cat "${workdir}/${i}.status")"
-    name="$(jq -r ".[$i].name" <<< "$calls_json")"
 
     if [[ "$rc" == "0" ]]; then
       content="$(cat "${workdir}/${i}.out")"
@@ -470,7 +477,7 @@ tool:invoke-parallel() {
       # nothing to stderr. Synthesize a usable error message so the LLM
       # always gets actionable content.
       if [[ -z "$content" ]]; then
-        content="ERROR: tool '$name' exited with status $rc"
+        content="ERROR: tool '${TOOL_PAR_NAMES[i]}' exited with status $rc"
       fi
     fi
 

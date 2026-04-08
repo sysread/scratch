@@ -425,6 +425,36 @@ make_fake_tool() {
   is "$output" "from fast"
 }
 
+@test "tool:invoke-parallel honors SCRATCH_TOOL_PARALLEL_JOBS concurrency cap" {
+  # Each tool sleeps for a fixed duration. With 6 tools and a cap of 2,
+  # the wall-clock floor is roughly 3 * sleep_duration. We use a
+  # margin to keep the assertion stable on slow CI machines.
+  make_fake_tool slowtool 'sleep 0.3; echo done'
+  export SCRATCH_TOOL_SKIP_AVAILABILITY=1
+  export SCRATCH_TOOL_PARALLEL_JOBS=2
+
+  local calls='[
+    {"id":"a","name":"slowtool","args":{}},
+    {"id":"b","name":"slowtool","args":{}},
+    {"id":"c","name":"slowtool","args":{}},
+    {"id":"d","name":"slowtool","args":{}},
+    {"id":"e","name":"slowtool","args":{}},
+    {"id":"f","name":"slowtool","args":{}}
+  ]'
+
+  local start
+  start="$(date +%s%N)"
+  tool:invoke-parallel "$calls" > /dev/null
+  local end
+  end="$(date +%s%N)"
+  local elapsed_ms=$(((end - start) / 1000000))
+
+  # 6 calls / 2 concurrent = 3 batches, each ~300ms = 900ms floor.
+  # Cap below the no-throttle wall clock (~600ms with all 6 in parallel).
+  diag "elapsed_ms=$elapsed_ms"
+  ((elapsed_ms >= 700))
+}
+
 @test "tool:invoke-parallel handles mixed success and failure" {
   make_fake_tool good 'echo "all ok"'
   make_fake_tool bad 'echo "kaboom" >&2; exit 1'
