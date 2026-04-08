@@ -99,6 +99,7 @@ bin/          user-facing subcommand executables
   scratch-project-create   leaf
   scratch-project-edit     leaf
   scratch-project-delete   leaf
+  scratch-intuit           leaf - debug invocation of agents/intuition
 
 lib/          sourced libraries (not executable)
   base.sh         warn, die, has-commands, require-env-vars
@@ -116,6 +117,10 @@ lib/          sourced libraries (not executable)
   tool.sh         tool:list, tool:invoke, tool:invoke-parallel (tool calling)
   accumulator.sh  accumulate:run, accumulate:run-profile (chunk + reduce + finalize
                   for inputs that exceed a model's context window)
+  workers.sh      workers:cpu-count, workers:run-parallel (FIFO-semaphore worker
+                  pool primitive used by shellcheck_parallel and tool:invoke-parallel)
+  agent.sh        agent:list, agent:run, agent:simple-completion (the agent layer;
+                  agents are run scripts under agents/<name>/, not config bundles)
 
 libexec/      internal non-bash executables
   embed.exs       Elixir embedding generator (called by helpers/embed)
@@ -129,12 +134,23 @@ data/         static config data shipped in the repo (not user settings)
   prompts/        LLM prompt assets, organized as <feature>/<name>.md
     README.md     storage convention, placeholder syntax, lib/prompt.sh API
     accumulator/  system, finalize, line-numbers prompts for lib/accumulator.sh
+    echo/         system prompt for agents/echo
+    intuition/    perception, synthesis, drive-base, drives/* for agents/intuition
 
 tools/        LLM tool calling. Each subdirectory is a self-contained tool:
               <name>/spec.json     OpenAI function spec (the inner function obj)
               <name>/main          executable, any language
               <name>/is-available  bash; runtime gate AND dep manifest
   notify/         proxies tui:info/warn/error so the LLM can talk to the user
+
+agents/       Reusable LLM workflows. Each subdirectory is a self-contained agent:
+              <name>/spec.json     metadata: name, description
+              <name>/run           executable, any language; reads stdin, prints stdout
+              <name>/is-available  bash; runtime gate AND dep manifest (same contract
+                                   as tools, including the policy-gate pattern - an
+                                   agent can refuse to be available outside edit mode)
+  echo/           single-shot reference; built on agent:simple-completion
+  intuition/      complex multi-phase reference (perception + parallel drives + synthesis)
 
 helpers/      bash scripts that are not subcommands
   setup                  runtime dep installer (bash 3.2 compatible)
@@ -160,16 +176,21 @@ test/         bats test suite (unit tests only - non-recursive)
   09-accumulator.bats          tests for lib/accumulator.sh (text + chat layers)
   10-scratch-doctor.bats       tests for bin/scratch-doctor (fake SCRATCH_HOME)
   11-tui.bats                  tests for lib/tui.sh (tui:log dispatch)
-  12-tempfiles.bats            tests for lib/tempfiles.sh (tmp:make validation)
+  12-tempfiles.bats            tests for lib/tempfiles.sh (tmp:make + tmp:cleanup)
+  13-workers.bats              tests for lib/workers.sh (worker pool primitive)
+  14-agent.bats                tests for lib/agent.sh (data access + run + simple-completion)
   90-lint.bats                 self-reflection: shellcheck
   91-formatting.bats           self-reflection: shfmt drift
   92-permissions.bats          self-reflection: +x policy
   93-anti-slop.bats            self-reflection: unicode + AI attribution
   94-subcommand-contract.bats  self-reflection: subcommands honor --help
   95-tool-contract.bats        self-reflection: every tool dir follows the contract
+  96-agent-contract.bats       self-reflection: every agent dir follows the contract
 
 test/integration/   bats tests that hit the REAL venice API (opt-in only)
-  00-venice.bats    end-to-end smoke tests for venice + model + chat
+  00-venice.bats         end-to-end smoke tests for venice + model + chat
+  01-accumulator.bats    end-to-end accumulator against real models
+  02-agent.bats          end-to-end echo + intuition agents against real models
 
 docs/
   guides/     user-facing documentation
@@ -496,10 +517,105 @@ Storing prompts as files instead of bash heredocs keeps them out of shell escapi
 
 ### Where this fits in the bigger picture
 
-Accumulator sits one layer above `chat:completion` and one layer below user-facing subcommands and (eventually) agents.
+Accumulator sits one layer above `chat:completion` and one layer below user-facing subcommands and agents.
 A subcommand that operates on a single file calls `accumulate:run-profile` directly with the file as input.
-A future agent that wants to summarize a large document before reasoning over it calls accumulator first, then passes the result to its own `chat:completion` calls.
-The accumulator does not need to know whether it is being driven by a user, a subcommand, or another agent; the contract is the same.
+An agent that wants to summarize a large document before reasoning over it calls accumulator first, then passes the result to its own `chat:completion` calls.
+The accumulator does not need to know whether it is being driven by a user, a subcommand, or an agent; the contract is the same.
+
+## Agent Layer (agents/, lib/agent.sh)
+
+An agent is a reusable LLM workflow.
+Some agents are single-shot ("call one model with one system prompt and a tool list").
+Some are multi-phase orchestrations (chunk a huge input, fan out N parallel sub-completions, synthesize, branch on a structured-output boolean, delegate to another agent).
+The interface for both is the same: stdin in, stdout out, exit 0 on success.
+
+The original design plan envisioned agents as JSON-config-plus-system.md bundles - a single `profile`, a single `system.md`, a single `tools` array.
+That model was rejected after walking through how it would express an intuition-style multi-phase workflow.
+A complex agent needs three different model profiles (one per phase), three different prompt sources (one per phase, plus a directory of sub-prompts for the fan-out), and the ability to compose with `accumulator`, `workers`, and other agents - none of which a static config can express.
+
+### An agent is a directory with an executable run script
+
+Same shape as `tools/`.
+
+```
+agents/<name>/
+  spec.json     metadata: name, description
+  run           executable, any language; reads stdin, prints stdout
+  is-available  bash; runtime gate AND dependency manifest
+
+data/prompts/<name>/    one or more prompt files loaded via prompt:load
+```
+
+The `run` script IS the agent.
+A simple agent is ~5 lines wrapping `agent:simple-completion`.
+A complex agent (like `agents/intuition/`) is ~120 lines that uses `accumulator`/`workers`/`chat`/`prompt`/`model`/`tui` directly and picks model profiles per phase.
+
+### Environment contract for run scripts
+
+- **stdin** = the user input
+- **stdout** = the final response (plain text, whatever shape the agent wants)
+- **stderr** = logs / progress
+- `SCRATCH_AGENT_DIR` - the agent's own directory (for sibling files)
+- `SCRATCH_HOME` - repo root (so the script can `source "$SCRATCH_HOME/lib/..."`)
+- `SCRATCH_PROJECT` and `SCRATCH_PROJECT_ROOT` - only set if `project:detect` succeeds
+- `SCRATCH_AGENT_DEPTH` - current recursion depth, incremented before fork; dies past `SCRATCH_AGENT_MAX_DEPTH` (default 8)
+
+### lib/agent.sh is thin
+
+```
+agent:agents-dir              honors SCRATCH_AGENTS_DIR for tests
+agent:list                    sorted agent names
+agent:exists NAME             silent predicate
+agent:dir NAME                absolute path
+agent:spec NAME               raw spec.json
+agent:available NAME          runs is-available, captures stderr
+agent:run NAME                exec run with the env contract; pipes stdin through
+agent:simple-completion       common-case helper for single-shot agents
+```
+
+There is no `agent:show`, `agent:profile`, `agent:tools`, or `agent:run-with-messages` - those were properties of the JSON-config model and have no meaning when the agent is code.
+
+### is-available as policy gate
+
+The same double-duty contract tools use: real runtime gate AND scannable dep manifest.
+Agents can refuse to be available outside specific conditions: `SCRATCH_EDIT_MODE=1` set, cwd inside a known project, `gh` configured with a remote, etc.
+The `is-available` script returns non-zero when any precondition fails; the doctor reports the failed dep with `agent:<name>` attribution; `agent:run` refuses to invoke an unavailable agent.
+
+This is more than a dependency check.
+It is policy.
+A `code-editor` agent might require edit mode to be active.
+A `pr-summarizer` might require a configured `gh` remote.
+The pattern keeps the runtime gate and the doctor scan in one place so they can never disagree.
+
+### The intuition reference agent
+
+`agents/intuition/` is the complex reference: a 3-phase workflow that exercises every primitive in the lib stack.
+
+1. **Perception** - read transcript on stdin, run a single chat completion to summarize the situation.
+2. **Drive reactions (parallel)** - fan out 4 chat completions via `workers:run-parallel`, one per drive prompt (curiosity, skepticism, pragmatism, stewardship). Workers index into parent-shell arrays for their task data and write to per-index files in a workdir tracked via `tmp:track`.
+3. **Synthesis** - concatenate the reactions and run a single chat completion that synthesizes them into a coherent first-person directive.
+
+All three phases use the same `fast` profile with `venice_parameters.disable_thinking` enabled.
+The value of intuition comes from running multiple lenses in parallel, not from any one phase being a deep thinker.
+End-to-end ~10 seconds against the real API.
+Adapted from fnord's `AI.Agent.Intuition` (Elixir, 370 lines, 10 drives) - this bash version is structurally identical but smaller for cost reasons.
+
+The companion subcommand `bin/scratch-intuit` is the operator-facing entry point: `scratch intuit "what should I work on next?"`.
+
+### Sub-agent composition
+
+An agent's run script can call `agent:run other-name` (or invoke `bin/scratch agent run other-name` once that lands).
+`SCRATCH_AGENT_DEPTH` increments per nested call; the cap fires before the fork so a runaway sub-agent chain never burns more than 8 levels of API budget.
+Breadth (an agent that fans out to 10 sub-agents) is the agent author's problem, not the framework's.
+
+### Where this fits in the bigger picture
+
+The agent layer sits above `chat:complete-with-tools`, `accumulator`, `workers`, and `tool` - it composes with all of them but does not replace any.
+A subcommand can still call `chat:completion` directly when an agent would be overkill.
+A future "dispatch agent" that picks an agent based on intent calls `agent:run` recursively.
+A future agent CLI surface (`scratch agent run <name>`) is a thin shell over `agent:run`.
+
+The layers compose; you only pay for what you use.
 
 ## Dependency Declaration and Doctor
 
@@ -518,20 +634,23 @@ If a script shells out to a tool that isn't guaranteed by POSIX, it MUST declare
 Never rely on git/jq/curl/gum/bc/etc. being "obviously" present - declare and let the scanner find it.
 The only exception is tools used optionally with a graceful fallback (e.g. `stdbuf` in `lib/termio.sh` - the fallback is passthrough, so declaring would defeat the design).
 
-The four scan sets have different attribution labels:
+The five scan sets have different attribution labels:
 - `bin/scratch-<verb>` declarations attribute to the verb name
 - `lib/*.sh` declarations attribute to the synthetic label `lib` (library deps apply transitively to many commands)
 - `helpers/<name>` declarations attribute to the helper's basename (e.g., `helpers/embed` -> `embed`)
 - `tools/<name>/is-available` declarations attribute to `tool:<name>` (e.g., `tool:notify`); the `tool:` prefix disambiguates tool deps from bin/lib/helper deps in the doctor output
+- `agents/<name>/is-available` declarations attribute to `agent:<name>` (e.g., `agent:intuition`); same prefix-disambiguation rationale as tools
 
-All four scan loops use a single `_scan-deps-in` helper - one line per target in `scan-all-deps`. Adding a fifth scan target later is a one-line addition.
+All five scan loops use a single `_scan-deps-in` helper - one line per target in `scan-all-deps`.
+The same binary may show up under multiple labels: `jq` reports as `(lib tool:notify agent:echo agent:intuition)`, surfacing the full set of consumers in one row.
 
 When you add a new tool to scratch:
 1. If it goes in a library, declare it in that library's source-time `has-commands` line.
 2. If it's specific to one subcommand, declare it at the top of that subcommand's script.
 3. If it's specific to one helper, declare it at the top of that helper.
 4. If it's specific to an LLM tool, declare it in that tool's `is-available` script.
-5. If it's a runtime dep that `scratch setup` should install, also add it to `helpers/setup`'s `RUNTIME_DEPS` list.
+5. If it's specific to an agent, declare it in that agent's `is-available` script.
+6. If it's a runtime dep that `scratch setup` should install, also add it to `helpers/setup`'s `RUNTIME_DEPS` list.
 
 ## Self-Reflection Tests
 
@@ -543,6 +662,7 @@ Several bats files exist solely to enforce structural conventions:
 - `93-anti-slop.bats` - fails on smart quotes, em dashes, or AI attribution in unpushed commits
 - `94-subcommand-contract.bats` - verifies every subcommand honors `--help` with exit 0
 - `95-tool-contract.bats` - verifies every tool dir under tools/ has spec.json + main + is-available with the correct shape, and is-available sources base.sh + calls has-commands
+- `96-agent-contract.bats` - mirror of `95` for agents/<name>/ (spec.json + run + is-available, same is-available double-duty contract)
 
 These tests catch drift that code review might miss.
 They run under the same `env -i` harness as functional tests via `helpers/run-tests`.

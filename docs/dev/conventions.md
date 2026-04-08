@@ -205,6 +205,73 @@ The `tools/` directory is generic-sounding but **reserved for LLM tools only**. 
 
 If you want to add a general script, use `helpers/` (dev/build helper) or `bin/scratch-<verb>` (user-facing command).
 
+## Agent Structure (agents/ directory)
+
+The `agents/` directory holds reusable LLM workflows.
+Each agent is a self-contained directory under `agents/<name>/` with the same three-file contract as tools.
+
+```
+agents/<name>/
+  spec.json     metadata: name, description (for listing/help)
+  run           executable, any language; reads stdin, prints stdout
+  is-available  bash; runtime gate AND dependency manifest (same as tools)
+```
+
+Naming: agent names match `^[a-z][a-z0-9_-]*$`.
+The directory basename must equal the spec.json `.name` field.
+Both rules are enforced by `test/96-agent-contract.bats`.
+
+The environment contract for `run` (set by `agent:run`):
+- **stdin** - the user input (the agent reads it once via `cat` or similar)
+- **stdout** - the final response, plain text (whatever shape the agent wants - markdown, JSON, code)
+- **stderr** - logs / progress (use `tui:info` / `tui:warn`)
+- `SCRATCH_AGENT_DIR` - the agent's own directory
+- `SCRATCH_HOME` - scratch repo root
+- `SCRATCH_PROJECT` and `SCRATCH_PROJECT_ROOT` - only set if `project:detect` succeeds
+- `SCRATCH_AGENT_DEPTH` - current recursion depth, incremented before fork; dies past `SCRATCH_AGENT_MAX_DEPTH` (default 8)
+
+The agent IS the run script.
+There is no JSON config naming "the model" or "the system prompt" because complex agents pick both per-phase.
+A simple single-shot agent uses `agent:simple-completion` and is ~5 lines.
+A complex multi-phase agent (like `agents/intuition/`) is ~120 lines that composes `accumulator`/`workers`/`chat` with multiple model profiles.
+
+Prompts live under `data/prompts/<agent-name>/`, not under `agents/<name>/`.
+This keeps prose with prose (anti-slop scan, prompt loader, future "list every prompt" tooling) while keeping the agent directory focused on executable code.
+Loaded via `prompt:load` and `prompt:render`.
+
+## `is-available` as Policy Gate
+
+The `is-available` script in both `tools/` and `agents/` does double duty: dependency manifest AND runtime policy gate.
+This pattern deserves explicit treatment because the second half is non-obvious.
+
+### As dependency manifest
+
+Every `is-available` script MUST source `lib/base.sh` and call `has-commands` for at least one external program.
+The doctor's textual scanner reads these declarations and attributes them to `tool:<name>` or `agent:<name>` in its report.
+Same line does both jobs: real runtime check (the call dies with an install hint if a dep is missing) and doctor scan token (the textual presence is what the scanner picks up).
+The contract test (`95-tool-contract.bats`, `96-agent-contract.bats`) enforces that both properties hold.
+
+### As policy gate
+
+Beyond the dependency check, `is-available` is also where runtime policy lives.
+It is the place to refuse to be available unless conditions are met.
+Examples:
+
+- A tool that wraps `gum` for its TUI -> declares `has-commands gum` (pure dep check)
+- A tool that requires `SCRATCH_EDIT_MODE=1` to be active -> checks the env var and exits non-zero with an explanation if unset
+- An agent that requires the cwd to be inside a known scratch project -> calls `project:detect` and exits non-zero if it fails
+- An agent that runs only against a configured remote git repo -> checks `git rev-parse --is-inside-work-tree` and `git config remote.origin.url`
+- An agent that performs writes -> requires both `SCRATCH_EDIT_MODE=1` AND a clean working tree
+
+The pattern: `is-available` returns 0 if and only if the tool/agent SHOULD be available right now.
+Anything that would prevent successful execution belongs in here, not in the run script's body.
+The runtime layer (`tool:invoke` or `agent:run`) refuses to invoke an unavailable tool/agent and dies with the captured stderr from `is-available`, so the operator knows exactly what precondition failed.
+
+The doctor reports failures with the appropriate attribution prefix (`tool:<name>` or `agent:<name>`), so a precondition failure (e.g. missing `SCRATCH_EDIT_MODE`) shows up alongside missing-binary failures in the same view.
+
+This means a single check in `is-available` covers three independent concerns: runtime safety, doctor reporting, and operator-facing error messages.
+Don't split policy across separate scripts; put it all in `is-available`.
+
 ## Formatting
 
 `shfmt` via `.editorconfig`.

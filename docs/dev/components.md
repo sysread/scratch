@@ -61,6 +61,7 @@ Optionally uses `tui:debug` for logging if available.
 Functions:
 - `tmp:track PATH` - register a path for cleanup
 - `tmp:make VAR TEMPLATE [MKTEMP_ARGS...]` - create a temp file via `mktemp`, register it, assign the path to nameref VAR (NOT via `$(...)` - that would lose the registration in the subshell). TEMPLATE must be an absolute path; relative templates are rejected at the guard so a misuse cannot pollute the cwd (which would be the source tree if the caller is running from inside one).
+- `tmp:track PATH` - register an existing path (a file OR directory created by other means, e.g. `mktemp -d`) for cleanup. `tmp:cleanup` uses `rm -rf` so directories work too.
 - `tmp:cleanup` - best-effort deletion of all tracked files
 - `tmp:install-traps` - install EXIT/INT/TERM/HUP traps that call `tmp:cleanup`, chaining with any existing handlers
 
@@ -137,6 +138,7 @@ Retry behavior:
 - Each retry logs a warn to stderr with `(attempt N/max)` so long pauses have visible cause.
 - Non-retryable errors (401, 402, 415, other 4xx) die immediately without retrying.
 - The log10 curve: attempt 1 -> 2s, attempt 10 -> 4s, attempt 100 -> 6s, attempt 1000 -> 8s. Self-caps in practice because log grows so slowly.
+- A small uniform jitter (0..1 second with the default base) is added on top to break herd alignment when N parallel completions hit a 429 simultaneously. Disable for deterministic tests via `SCRATCH_VENICE_DISABLE_JITTER=1`.
 
 Tunables (env vars):
 - `SCRATCH_VENICE_MAX_ATTEMPTS` - max HTTP attempts before giving up. Set to 1 to disable retry entirely (useful in tests).
@@ -260,7 +262,7 @@ Functions:
 - `tool:exists NAME` - silent predicate
 - `tool:dir NAME` - absolute path; dies if missing
 - `tool:spec NAME` - raw spec.json contents
-- `tool:specs-json [NAMES...]` - JSON array of OpenAI-wire-format wrapped specs `[{type:"function", function:<spec>}]`. Filters out unavailable tools unless `SCRATCH_TOOL_SKIP_AVAILABILITY=1`.
+- `tool:specs-json [NAMES...]` - JSON array of OpenAI-wire-format wrapped specs `[{type:"function", function:<spec>}]`. Filters out unavailable tools unless `SCRATCH_TOOL_SKIP_AVAILABILITY=1`. Filtered-tool warnings are deduped per process via `_TOOL_SPECS_WARNED` so a multi-phase agent that calls the function across rounds does not produce repeated noise.
 - `tool:available NAME` - runs `is-available` with the env contract; captures stderr in `_TOOL_AVAILABILITY_ERR`
 - `tool:invoke NAME ARGS_JSON` - synchronously execute `main` with the env contract. Captures stdout into `_TOOL_INVOKE_STDOUT` and stderr into `_TOOL_INVOKE_STDERR` via tempfile redirects (NOT process substitution, to preserve exit codes). Returns the tool's exit code. Returns 127 if `is-available` fails first.
 - `tool:invoke-parallel CALLS_JSON` - parallel execution via background jobs + wait. `CALLS_JSON` is a JSON array of `{id, name, args}` matching the OpenAI tool_calls shape. Forks one bg job per call, captures each tool's streams to numbered temp files in a `tmp:make`-allocated workdir (in the parent shell, NOT in subshells, because `tmp:make`'s registry lives in parent process memory). Results assemble in input order regardless of completion order. Failures encode as `ok:false`; silent failures get a synthesized `ERROR: tool '<name>' exited with status <code>` fallback.
@@ -270,6 +272,38 @@ Environment contract for tool main scripts:
 - `SCRATCH_TOOL_DIR` - the tool's own directory (for sibling files)
 - `SCRATCH_HOME` - scratch repo root (so bash tools can `source "$SCRATCH_HOME/lib/..."`)
 - `SCRATCH_PROJECT` and `SCRATCH_PROJECT_ROOT` - only set if `project:detect` succeeds; tools should test `[[ -n ${SCRATCH_PROJECT:-} ]]`
+
+### `lib/agent.sh`
+
+Agent layer.
+Depends on `base.sh`, `project.sh`, `prompt.sh`, `model.sh`, `chat.sh`, `tool.sh`.
+Requires `jq`.
+
+An agent is a self-contained directory under `agents/<name>/` with three required files:
+- `spec.json` - metadata: `.name` and `.description`. Not executable.
+- `run` - the executable entrypoint, any language. Reads stdin for the user input, prints the final response to stdout, logs to stderr.
+- `is-available` - bash script that doubles as runtime gate AND dependency manifest. Sources `lib/base.sh` and calls `has-commands` for any external programs the agent needs. The doctor scanner picks up these declarations and attributes them to `agent:<name>`. Also where policy gates live (an agent can refuse to be available unless `SCRATCH_EDIT_MODE=1`, unless cwd is inside a known project, etc.).
+
+Unlike a tool (which the LLM invokes during a chat), an agent is a script that orchestrates its own LLM workflow. A simple agent is ~5 lines wrapping `agent:simple-completion`. A complex agent (like `agents/intuition/`) is ~80 lines that uses `accumulator`/`workers`/`chat` and multiple model profiles. The run script IS the agent; there is no JSON config naming "the model" or "the system prompt" because complex agents pick both per-phase.
+
+Functions:
+- `agent:agents-dir` - print the agents directory (honors `SCRATCH_AGENTS_DIR` for tests)
+- `agent:list` - sorted agent names, one per line
+- `agent:exists NAME` - silent predicate
+- `agent:dir NAME` - absolute path; dies if missing
+- `agent:spec NAME` - raw spec.json contents
+- `agent:available NAME` - runs `is-available` with the env contract; captures stderr in `_AGENT_AVAILABILITY_ERR`. Honors `SCRATCH_AGENT_SKIP_AVAILABILITY=1`.
+- `agent:run NAME` - execute `agents/NAME/run` with the env contract. Pipes stdin through, propagates stdout and exit code. Refuses to run if `agent:available` fails. Increments `SCRATCH_AGENT_DEPTH` and dies if the new depth exceeds `SCRATCH_AGENT_MAX_DEPTH` (default 8) before forking, so runaway sub-agent recursion burns out fast.
+- `agent:simple-completion PROFILE PROMPT_NAME [TOOLS_JSON] [EXTRAS_JSON]` - common-case helper for single-shot agents. Reads stdin once for the user input, loads the system prompt via `prompt:load`, resolves the profile, builds the messages, optionally builds a tools array via `tool:specs-json`, merges extras (caller wins), and routes through `chat:complete-with-tools` or `chat:completion` depending on whether tools were supplied. Pipes the response through `chat:extract-content` so the agent's stdout is plain text.
+
+Environment contract for agent run scripts:
+- stdin = the user input
+- stdout = the final response (plain text)
+- stderr = logs / progress
+- `SCRATCH_AGENT_DIR` - the agent's own directory
+- `SCRATCH_HOME` - scratch repo root
+- `SCRATCH_PROJECT` and `SCRATCH_PROJECT_ROOT` - only set if `project:detect` succeeds
+- `SCRATCH_AGENT_DEPTH` - current recursion depth (incremented before fork)
 
 ### `lib/cmd.sh`
 
@@ -306,7 +340,7 @@ Uses raw ANSI `printf` with TTY detection for output.
 
 Checks:
 - bash version (5+)
-- All commands declared via `has-commands` in `bin/`, `lib/`, `helpers/`, and `tools/<name>/is-available`
+- All commands declared via `has-commands` across all five scan targets (see below)
 - All env vars declared via `require-env-vars` in the same scan set
 - Dev tools from `.mise.toml` + GNU parallel (with `--dev`)
 
@@ -315,8 +349,9 @@ Scan attribution:
 - `lib/*.sh` files attribute to the synthetic label `lib` (since library deps apply transitively to many consumers)
 - `helpers/<name>` files attribute to `<name>` (e.g., `embed` for `helpers/embed`, which declares `has-commands elixir`)
 - `tools/<name>/is-available` files attribute to `tool:<name>` (e.g., `tool:notify` for `tools/notify/is-available`). The `tool:` prefix disambiguates tool deps from bin/lib/helper deps in the doctor output.
+- `agents/<name>/is-available` files attribute to `agent:<name>` (e.g., `agent:intuition` for `agents/intuition/is-available`). Same prefix-disambiguation rationale as tools.
 
-The four scan targets share a single `_scan-deps-in` helper - one line per target in `scan-all-deps`. Adding a fifth scan target later is a one-line addition.
+All five scan targets share a single `_scan-deps-in` helper - one line per target in `scan-all-deps`. The same binary may show up under multiple labels: `jq` reports as `(lib tool:notify agent:echo agent:intuition)`, surfacing the full set of consumers in one row.
 
 Flags:
 - `--fix` - prompt to install missing deps via `helpers/setup`
@@ -324,6 +359,14 @@ Flags:
 
 The scanner reads files with `grep` and strips the keyword prefix to extract command/env names.
 Keywords are held in variables (`_KW_HAS_CMD`, `_KW_REQ_ENV`) so the literal strings never appear in code lines that would otherwise match the scanner's own grep.
+
+### `bin/scratch-intuit` (leaf)
+
+Run the intuition reference agent against a prompt.
+Takes the prompt as positional args (joined with spaces) or reads stdin if no args are given.
+Pipes through `agent:run intuition`.
+Useful as a sanity gauge during development and as a wrapper for "what does my subconscious think about this?".
+Set `SCRATCH_DEBUG_INTUITION=1` to see each phase's intermediate output on stderr (perception, drive:<name>, synthesis).
 
 ### `bin/scratch-project` (parent)
 
@@ -445,6 +488,48 @@ The first concrete tool. Wraps `tui:info` / `tui:warn` / `tui:error` so the LLM 
 
 This is the simplest possible scratch tool. It exists to (a) exercise the full tool calling pipeline end to end and (b) give LLMs a way to talk to the user during multi-step work without requiring response streaming.
 
+## Agents
+
+Reusable LLM workflows live under `agents/<name>/`. Each agent is a self-contained directory with three required files (see the `lib/agent.sh` entry above for the contract). Two reference agents ship in the repo: a simple one (`echo`) and a complex one (`intuition`).
+
+### `agents/echo/`
+
+The first concrete agent and the canonical example of a single-shot agent built on `agent:simple-completion`.
+Reads stdin, asks the model to paraphrase it back in cleaner more grammatical form, prints the result.
+Useful as a smoke test for the agent layer end to end.
+
+- `spec.json` - name + description
+- `run` - 5 lines: source `lib/agent.sh`, call `agent:simple-completion fast "echo/system"`
+- `is-available` - declares `curl jq bc` (the leaf binaries the helper transitively depends on through `venice:curl`)
+- `data/prompts/echo/system.md` - the paraphrase prompt
+
+### `agents/intuition/`
+
+The complex reference agent. Demonstrates that a single agent's `run` script can compose accumulator-style preprocessing, parallel sub-completions via `workers:run-parallel`, multiple model profiles, multiple prompt files, and structured-output branching - all in plain bash.
+
+Adapted from fnord's `AI.Agent.Intuition` (Elixir, 370 lines, 10 drives).
+Bash version is structurally identical but smaller for cost reasons: 4 drives instead of 10, all phases use the `fast` profile with `venice_parameters.disable_thinking` for low latency.
+
+Three phases:
+
+1. **Perception** - read transcript on stdin, run a single chat completion to summarize the situation.
+2. **Drive reactions (parallel)** - fan out 4 chat completions via `workers:run-parallel`, one per drive (curiosity, skepticism, pragmatism, stewardship). Each drive reacts through a different lens. Workers index into parent-shell arrays (`DRIVES`, `PERCEPTION`, `DRIVE_BASE`, etc.) and write to per-index files in a workdir tracked via `tmp:track`.
+3. **Synthesis** - concatenate the reactions and run a single chat completion that synthesizes them into a coherent first-person directive.
+
+End-to-end ~10 seconds against the real API.
+Set `SCRATCH_DEBUG_INTUITION=1` to see each phase's full output on stderr labeled (`perception`, `drive:<name>`, `synthesis`) via `tui:info`.
+
+Files:
+- `agents/intuition/run` - the orchestrator (~120 lines)
+- `agents/intuition/spec.json` - name + description
+- `agents/intuition/is-available` - declares `curl jq bc`
+- `data/prompts/intuition/perception.md` - the per-perception prompt
+- `data/prompts/intuition/synthesis.md` - the cleanup-pass prompt
+- `data/prompts/intuition/drive-base.md` - shared header for all drive prompts
+- `data/prompts/intuition/drives/<name>.md` - one file per drive
+
+The companion subcommand `bin/scratch-intuit` is the operator-facing entry point.
+
 ## Test Files
 
 Test files use 2-digit numerical prefixes (CPAN convention) so they run in dependency order: lib tests first (00-06), bin tests next (10+), self-reflection tests last (90+). Gaps between groups leave room to wedge in new tests without renumbering.
@@ -464,11 +549,16 @@ Test files use 2-digit numerical prefixes (CPAN convention) so they run in depen
 | `test/09-accumulator.bats` | Tests for `lib/accumulator.sh` (text helpers + chat layer + reduce loop + reactive backoff) with a queued `chat:completion` stub |
 | `test/10-scratch-doctor.bats` | Tests for `bin/scratch-doctor` (runs doctor against a fake `SCRATCH_HOME` under `BATS_TEST_TMPDIR` so stub subcommands never pollute the live tree) |
 | `test/11-tui.bats` | Tests for `lib/tui.sh` (`tui:log` arg vs pipe dispatch, stderr-only output) |
-| `test/12-tempfiles.bats` | Tests for `lib/tempfiles.sh` (`tmp:make` input validation, including the absolute-path guard) |
+| `test/12-tempfiles.bats` | Tests for `lib/tempfiles.sh` (`tmp:make` input validation, `tmp:cleanup` directory removal) |
+| `test/13-workers.bats` | Tests for `lib/workers.sh` (`workers:cpu-count` fallbacks, `workers:run-parallel` concurrency cap, parent-array lookup) |
+| `test/14-agent.bats` | Tests for `lib/agent.sh` (data access, `agent:available`, env contract for `agent:run`, recursion guard, `agent:simple-completion` with stubbed chat layer) |
 | `test/90-lint.bats` | Self-reflection: shellcheck |
 | `test/91-formatting.bats` | Self-reflection: shfmt drift |
 | `test/92-permissions.bats` | Self-reflection: +x policy |
 | `test/93-anti-slop.bats` | Self-reflection: unicode + AI attribution in unpushed commits |
 | `test/94-subcommand-contract.bats` | Self-reflection: subcommands honor --help |
 | `test/95-tool-contract.bats` | Self-reflection: every tool dir under `tools/` follows the structural contract (spec.json shape, name match, +x bits, is-available sources base + calls has-commands) |
+| `test/96-agent-contract.bats` | Self-reflection: every agent dir under `agents/` follows the structural contract (mirror of `95-tool-contract.bats`) |
 | `test/integration/00-venice.bats` | Opt-in integration tests against the real Venice API |
+| `test/integration/01-accumulator.bats` | Opt-in: accumulator end-to-end against real models |
+| `test/integration/02-agent.bats` | Opt-in: echo + intuition agents end-to-end against real models |
