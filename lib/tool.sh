@@ -79,6 +79,11 @@ _TOOL_INVOKE_STDERR=""
 # Keyed by tool name; presence means we already warned this process.
 declare -gA _TOOL_SPECS_WARNED=()
 
+# Same shape, but keyed by toolbox name. tool:box uses this so an
+# unavailable toolbox warns on first access and stays silent on every
+# subsequent call from the same process.
+declare -gA _TOOLBOX_WARNED=()
+
 #-------------------------------------------------------------------------------
 # tool:tools-dir
 #
@@ -504,3 +509,194 @@ tool:invoke-parallel() {
 }
 
 export -f tool:invoke-parallel
+
+#===============================================================================
+# Toolboxes
+#
+# A toolbox is a named bundle of tool names with its own is-available gate.
+# Lets agents reference logical bundles ("read-only filesystem", "editing")
+# instead of enumerating tool names, and lets the policy gate live with the
+# bundle rather than at every call site.
+#
+#   toolboxes/<name>/
+#     tools.json     {"description": "...", "tools": ["tool_a", "tool_b"]}
+#     is-available   bash; runtime gate
+#
+# Most toolboxes are pure policy (gated on TTY, edit mode, project context,
+# etc.) and have no binary deps of their own. The has-commands declarations
+# in is-available are optional - same relaxed contract as tools and agents.
+#
+# Composition with the existing primitives:
+#
+#   tool:specs-json $(tool:box read-only | jq -r '.tools[]')
+#
+# tool:box returns the full tools.json content on success, or the same shape
+# with an empty tools array on failure (with a once-per-process warn). The
+# empty fallback lets callers always do `... | jq -r '.tools[]'` without
+# branching on the error case.
+#===============================================================================
+
+#-------------------------------------------------------------------------------
+# tool:boxes-dir
+#
+# Print the absolute path to the toolboxes directory. Honors
+# SCRATCH_TOOLBOXES_DIR for tests; defaults to <repo>/toolboxes.
+#-------------------------------------------------------------------------------
+tool:boxes-dir() {
+  if [[ -n "${SCRATCH_TOOLBOXES_DIR:-}" ]]; then
+    printf '%s\n' "$SCRATCH_TOOLBOXES_DIR"
+  else
+    printf '%s\n' "$(cd "$_TOOL_SCRIPTDIR/../toolboxes" 2> /dev/null && pwd -P || echo "$_TOOL_SCRIPTDIR/../toolboxes")"
+  fi
+}
+
+export -f tool:boxes-dir
+
+#-------------------------------------------------------------------------------
+# tool:box-list
+#
+# Print the names of all toolboxes (sorted, one per line). A toolbox is a
+# directory under tool:boxes-dir that contains at least a tools.json file.
+# Directories missing tools.json are silently skipped.
+#-------------------------------------------------------------------------------
+tool:box-list() {
+  local boxes_dir
+  local d
+  local name
+
+  boxes_dir="$(tool:boxes-dir)"
+  [[ -d "$boxes_dir" ]] || return 0
+
+  for d in "$boxes_dir"/*/; do
+    [[ -d "$d" ]] || continue
+    [[ -f "${d}tools.json" ]] || continue
+    name="$(basename "$d")"
+    printf '%s\n' "$name"
+  done | sort
+}
+
+export -f tool:box-list
+
+#-------------------------------------------------------------------------------
+# tool:box-exists NAME
+#
+# Return 0 if toolboxes/NAME/ has both required files (tools.json and
+# is-available). Return 1 otherwise. Silent. Does NOT check executable bits.
+#-------------------------------------------------------------------------------
+tool:box-exists() {
+  local name="$1"
+  local boxes_dir
+  boxes_dir="$(tool:boxes-dir)"
+
+  [[ -f "${boxes_dir}/${name}/tools.json" ]] || return 1
+  [[ -f "${boxes_dir}/${name}/is-available" ]] || return 1
+  return 0
+}
+
+export -f tool:box-exists
+
+#-------------------------------------------------------------------------------
+# tool:box-dir NAME
+#
+# Print the absolute path to toolboxes/NAME/. Dies if the directory does not
+# exist or is missing the required files.
+#-------------------------------------------------------------------------------
+tool:box-dir() {
+  local name="$1"
+  if ! tool:box-exists "$name"; then
+    die "toolbox: not found: $name (expected toolboxes/$name/ with tools.json + is-available)"
+    return 1
+  fi
+  printf '%s\n' "$(tool:boxes-dir)/$name"
+}
+
+export -f tool:box-dir
+
+#-------------------------------------------------------------------------------
+# tool:box NAME
+#
+# The headline function. Returns the toolbox's tools.json content on stdout.
+#
+# On success: the original {"description": "...", "tools": [...]} object as
+# read from disk.
+#
+# On failure (is-available exits non-zero): the same object with `tools`
+# replaced by `[]`. The description is preserved so callers can still
+# render it. Warns ONCE per process per unavailable toolbox via
+# tui:debug + the _TOOLBOX_WARNED associative array.
+#
+# Dies if:
+#   - the toolbox doesn't exist (typo case)
+#   - tools.json doesn't parse
+#
+# Honors SCRATCH_TOOL_SKIP_AVAILABILITY=1 by skipping the gate (returns
+# the full tools.json regardless of is-available state). Useful in tests.
+#-------------------------------------------------------------------------------
+tool:box() {
+  local name="$1"
+  local boxes_dir
+  local content
+  local script
+  local err_file
+  local rc
+
+  if ! tool:box-exists "$name"; then
+    die "toolbox: not found: $name"
+    return 1
+  fi
+
+  boxes_dir="$(tool:boxes-dir)"
+  content="$(cat "${boxes_dir}/${name}/tools.json")"
+
+  if ! jq -e . <<< "$content" > /dev/null 2>&1; then
+    die "toolbox: $name/tools.json does not parse as JSON"
+    return 1
+  fi
+
+  if [[ "${SCRATCH_TOOL_SKIP_AVAILABILITY:-}" == "1" ]]; then
+    printf '%s\n' "$content"
+    return 0
+  fi
+
+  # Run the toolbox's is-available gate. Same subshell + env contract as
+  # tool:available so a die() inside the script propagates as an exit code
+  # rather than aborting the caller. We wrap the subshell in `if` so a
+  # non-zero exit does not trip set -e in the calling context (set -e
+  # does not fire on conditions inside `if`).
+  script="${boxes_dir}/${name}/is-available"
+  err_file="$(mktemp -t scratch-toolbox-avail-err.XXXXXX)"
+
+  # SC2030/SC2031: subshell-local export is intentional.
+  # shellcheck disable=SC2030,SC2031
+  if (
+    export SCRATCH_HOME
+    SCRATCH_HOME="$(cd "$_TOOL_SCRIPTDIR/.." && pwd -P)"
+    "$script"
+  ) 2> "$err_file"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  local err_msg
+  err_msg="$(cat "$err_file")"
+  rm -f "$err_file"
+
+  if ((rc == 0)); then
+    printf '%s\n' "$content"
+    return 0
+  fi
+
+  # Unavailable. Warn ONCE per process for this toolbox name, then return
+  # the empty-tools fallback so callers can keep iterating without
+  # branching on the error.
+  if [[ -z "${_TOOLBOX_WARNED[$name]:-}" ]]; then
+    _TOOLBOX_WARNED[$name]=1
+    if type -t tui:debug &> /dev/null; then
+      tui:debug "tool:box: toolbox unavailable" name "$name" reason "$err_msg" || true
+    fi
+  fi
+
+  jq -c --argjson c "$content" '$c + {tools: []}' <<< "$content"
+}
+
+export -f tool:box

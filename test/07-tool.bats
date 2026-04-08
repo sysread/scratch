@@ -31,6 +31,13 @@ setup() {
   # Per-test tools directory. lib/tool.sh's tool:tools-dir honors this.
   export SCRATCH_TOOLS_DIR="${BATS_TEST_TMPDIR}/tools"
   mkdir -p "$SCRATCH_TOOLS_DIR"
+
+  # Per-test toolboxes directory.
+  export SCRATCH_TOOLBOXES_DIR="${BATS_TEST_TMPDIR}/toolboxes"
+  mkdir -p "$SCRATCH_TOOLBOXES_DIR"
+
+  # Reset the toolbox warn dedup so each test starts from a clean slate.
+  _TOOLBOX_WARNED=()
 }
 
 #-------------------------------------------------------------------------------
@@ -69,6 +76,33 @@ make_fake_tool() {
   # code as a test failure even when nothing actually failed. The chmod above
   # always exits 0 on success but defensive return 0 prevents future
   # last-statement-shifts from breaking tests.
+  return 0
+}
+
+# make_fake_toolbox NAME [DESCRIPTION] [TOOLS_JSON_ARRAY] [AVAIL_EXIT]
+#
+# Creates a complete fake toolbox under $SCRATCH_TOOLBOXES_DIR/NAME with
+# tools.json and is-available. TOOLS_JSON_ARRAY is the JSON array body
+# (default "[]"). AVAIL_EXIT is the exit code is-available returns
+# (default 0).
+make_fake_toolbox() {
+  local name="$1"
+  local description="${2:-fake test toolbox}"
+  local tools_json="${3:-[]}"
+  local avail_exit="${4:-0}"
+  local dir="${SCRATCH_TOOLBOXES_DIR}/${name}"
+
+  mkdir -p "$dir"
+
+  jq -n \
+    --arg d "$description" \
+    --argjson t "$tools_json" \
+    '{description: $d, tools: $t}' \
+    > "${dir}/tools.json"
+
+  printf '#!/usr/bin/env bash\nexit %s\n' "$avail_exit" > "${dir}/is-available"
+  chmod +x "${dir}/is-available"
+
   return 0
 }
 
@@ -565,4 +599,186 @@ make_fake_tool() {
 
   run jq -r '.[1].content' <<< "$result"
   is "$output" '{"y":2}'
+}
+
+# ===========================================================================
+# Toolboxes
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# tool:boxes-dir / tool:box-list / tool:box-exists / tool:box-dir
+# ---------------------------------------------------------------------------
+
+@test "tool:boxes-dir honors SCRATCH_TOOLBOXES_DIR override" {
+  run tool:boxes-dir
+  is "$status" 0
+  is "$output" "$SCRATCH_TOOLBOXES_DIR"
+}
+
+@test "tool:box-list returns empty when toolboxes dir is empty" {
+  run tool:box-list
+  is "$status" 0
+  is "$output" ""
+}
+
+@test "tool:box-list returns multiple toolboxes sorted" {
+  make_fake_toolbox zebra
+  make_fake_toolbox alpha
+  make_fake_toolbox mike
+  run tool:box-list
+  is "$output" "alpha
+mike
+zebra"
+}
+
+@test "tool:box-list skips dirs without tools.json" {
+  make_fake_toolbox good
+  mkdir -p "${SCRATCH_TOOLBOXES_DIR}/incomplete"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${SCRATCH_TOOLBOXES_DIR}/incomplete/is-available"
+  chmod +x "${SCRATCH_TOOLBOXES_DIR}/incomplete/is-available"
+
+  run tool:box-list
+  is "$output" "good"
+}
+
+@test "tool:box-exists returns 0 for a complete toolbox" {
+  make_fake_toolbox complete
+  run tool:box-exists complete
+  is "$status" 0
+}
+
+@test "tool:box-exists returns 1 for an unknown toolbox" {
+  run tool:box-exists nonexistent
+  is "$status" 1
+}
+
+@test "tool:box-exists returns 1 for a dir missing is-available" {
+  local dir="${SCRATCH_TOOLBOXES_DIR}/noavail"
+  mkdir -p "$dir"
+  printf '{"description":"d","tools":[]}' > "${dir}/tools.json"
+
+  run tool:box-exists noavail
+  is "$status" 1
+}
+
+@test "tool:box-dir prints absolute path for a known toolbox" {
+  make_fake_toolbox here
+  run tool:box-dir here
+  is "$status" 0
+  is "$output" "${SCRATCH_TOOLBOXES_DIR}/here"
+}
+
+@test "tool:box-dir dies for an unknown toolbox" {
+  run tool:box-dir ghost
+  is "$status" 1
+  [[ "$output" == *"not found"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# tool:box - happy path + content shape
+# ---------------------------------------------------------------------------
+
+@test "tool:box returns the full tools.json content on success" {
+  make_fake_toolbox readonly "Read-only filesystem" '["read_file","grep_files"]' 0
+
+  local result
+  result="$(tool:box readonly)"
+  run jq -r '.description' <<< "$result"
+  is "$output" "Read-only filesystem"
+  run jq -r '.tools | length' <<< "$result"
+  is "$output" "2"
+  run jq -r '.tools[0]' <<< "$result"
+  is "$output" "read_file"
+}
+
+@test "tool:box returns empty tools (with description preserved) when is-available fails" {
+  make_fake_toolbox gated "Edit mode required" '["edit_file"]' 1
+
+  local result
+  result="$(tool:box gated)"
+  # Description must survive the unavailable case
+  run jq -r '.description' <<< "$result"
+  is "$output" "Edit mode required"
+  # Tools must be empty
+  run jq -r '.tools | length' <<< "$result"
+  is "$output" "0"
+}
+
+@test "tool:box dies for an unknown toolbox" {
+  run tool:box ghost
+  is "$status" 1
+  [[ "$output" == *"not found"* ]]
+}
+
+@test "tool:box dies for a malformed tools.json" {
+  local dir="${SCRATCH_TOOLBOXES_DIR}/broken"
+  mkdir -p "$dir"
+  printf 'not json at all' > "${dir}/tools.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${dir}/is-available"
+  chmod +x "${dir}/is-available"
+
+  run tool:box broken
+  is "$status" 1
+  [[ "$output" == *"does not parse"* ]]
+}
+
+@test "tool:box honors SCRATCH_TOOL_SKIP_AVAILABILITY=1" {
+  # is-available exits 1, but the skip flag should bypass it and return
+  # the full content.
+  make_fake_toolbox skipme "skip test" '["a","b"]' 1
+  export SCRATCH_TOOL_SKIP_AVAILABILITY=1
+
+  run tool:box skipme
+  is "$status" 0
+  run jq -r '.tools | length' <<< "$output"
+  is "$output" "2"
+}
+
+# ---------------------------------------------------------------------------
+# tool:box - warn-once dedup
+# ---------------------------------------------------------------------------
+
+@test "tool:box warns about an unavailable toolbox only once per process" {
+  make_fake_toolbox flaky "edit mode" '["edit_file"]' 1
+  _TOOLBOX_WARNED=()
+
+  TUI_DEBUG_CALL_COUNT_FILE="${BATS_TEST_TMPDIR}/tui-debug.count"
+  printf '0' > "$TUI_DEBUG_CALL_COUNT_FILE"
+  # shellcheck disable=SC2329 # invoked indirectly by tool:box
+  tui:debug() {
+    local n
+    n="$(cat "$TUI_DEBUG_CALL_COUNT_FILE")"
+    n=$((n + 1))
+    printf '%s' "$n" > "$TUI_DEBUG_CALL_COUNT_FILE"
+  }
+  export -f tui:debug
+
+  tool:box flaky > /dev/null
+  tool:box flaky > /dev/null
+  tool:box flaky > /dev/null
+
+  is "$(cat "$TUI_DEBUG_CALL_COUNT_FILE")" "1"
+}
+
+@test "tool:box warns separately for two different unavailable toolboxes" {
+  make_fake_toolbox first "edit mode A" '[]' 1
+  make_fake_toolbox second "edit mode B" '[]' 1
+  _TOOLBOX_WARNED=()
+
+  TUI_DEBUG_CALL_COUNT_FILE="${BATS_TEST_TMPDIR}/tui-debug.count"
+  printf '0' > "$TUI_DEBUG_CALL_COUNT_FILE"
+  # shellcheck disable=SC2329
+  tui:debug() {
+    local n
+    n="$(cat "$TUI_DEBUG_CALL_COUNT_FILE")"
+    n=$((n + 1))
+    printf '%s' "$n" > "$TUI_DEBUG_CALL_COUNT_FILE"
+  }
+  export -f tui:debug
+
+  tool:box first > /dev/null
+  tool:box second > /dev/null
+
+  # Two distinct unavailable toolboxes -> two warns
+  is "$(cat "$TUI_DEBUG_CALL_COUNT_FILE")" "2"
 }
