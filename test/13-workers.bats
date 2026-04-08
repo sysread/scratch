@@ -1,6 +1,9 @@
 #!/usr/bin/env bats
 
 # vim: set ft=bash
+# SC2329: every worker_fn here is invoked indirectly via workers:run-parallel
+# (which calls it by name through the export -f machinery), not directly.
+# shellcheck disable=SC2329
 set -euo pipefail
 
 #-------------------------------------------------------------------------------
@@ -87,8 +90,9 @@ EOF
   for i in 0 1 2 3 4; do
     is "$(cat "${outdir}/$i")" "$i"
   done
-  # And no extras
-  is "$(ls "$outdir" | wc -l | tr -d ' ')" "5"
+  # And no extras - count via glob expansion, not ls parsing
+  local entries=("$outdir"/*)
+  is "${#entries[@]}" "5"
 }
 
 @test "workers:run-parallel: respects max_jobs concurrency cap" {
@@ -168,7 +172,8 @@ EOF
   export -f worker_fn
 
   workers:run-parallel 16 3 worker_fn
-  is "$(ls "$outdir" | wc -l | tr -d ' ')" "3"
+  local entries=("$outdir"/*)
+  is "${#entries[@]}" "3"
 }
 
 @test "workers:run-parallel: zero max_jobs is clamped to 1" {
@@ -180,7 +185,8 @@ EOF
   export -f worker_fn
 
   workers:run-parallel 0 3 worker_fn
-  is "$(ls "$outdir" | wc -l | tr -d ' ')" "3"
+  local entries=("$outdir"/*)
+  is "${#entries[@]}" "3"
 }
 
 @test "workers:run-parallel: workers can read parent-shell arrays" {
