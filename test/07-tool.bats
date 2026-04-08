@@ -289,6 +289,55 @@ make_fake_tool() {
   [[ "$output" == *"not found"* ]]
 }
 
+@test "tool:specs-json warns about a filtered tool only once per process" {
+  make_fake_tool good "echo OK" 0
+  make_fake_tool bad "echo OK" 1
+  # Reset the dedup so this test starts from a clean slate even if it
+  # runs after another test that warned about the same tool name.
+  _TOOL_SPECS_WARNED=()
+
+  # Stub tui:debug as a counting bash function so we can assert call count.
+  TUI_DEBUG_CALL_COUNT_FILE="${BATS_TEST_TMPDIR}/tui-debug.count"
+  printf '0' > "$TUI_DEBUG_CALL_COUNT_FILE"
+  # shellcheck disable=SC2329 # invoked indirectly by tool:specs-json
+  tui:debug() {
+    local n
+    n="$(cat "$TUI_DEBUG_CALL_COUNT_FILE")"
+    n=$((n + 1))
+    printf '%s' "$n" > "$TUI_DEBUG_CALL_COUNT_FILE"
+  }
+  export -f tui:debug
+
+  # Two calls in a row, both filter the same tool. Only one warn expected.
+  tool:specs-json > /dev/null
+  tool:specs-json > /dev/null
+
+  is "$(cat "$TUI_DEBUG_CALL_COUNT_FILE")" "1"
+}
+
+@test "tool:specs-json warns separately for two different unavailable tools" {
+  make_fake_tool good "echo OK" 0
+  make_fake_tool first-bad "echo OK" 1
+  make_fake_tool second-bad "echo OK" 1
+  _TOOL_SPECS_WARNED=()
+
+  TUI_DEBUG_CALL_COUNT_FILE="${BATS_TEST_TMPDIR}/tui-debug.count"
+  printf '0' > "$TUI_DEBUG_CALL_COUNT_FILE"
+  # shellcheck disable=SC2329 # invoked indirectly by tool:specs-json
+  tui:debug() {
+    local n
+    n="$(cat "$TUI_DEBUG_CALL_COUNT_FILE")"
+    n=$((n + 1))
+    printf '%s' "$n" > "$TUI_DEBUG_CALL_COUNT_FILE"
+  }
+  export -f tui:debug
+
+  tool:specs-json > /dev/null
+
+  # Two distinct unavailable tools, two warns
+  is "$(cat "$TUI_DEBUG_CALL_COUNT_FILE")" "2"
+}
+
 # ---------------------------------------------------------------------------
 # tool:invoke
 # ---------------------------------------------------------------------------

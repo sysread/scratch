@@ -73,6 +73,12 @@ _TOOL_INVOKE_STDOUT=""
 # shellcheck disable=SC2034
 _TOOL_INVOKE_STDERR=""
 
+# Session-scoped dedup for tool:specs-json's filtered-tool warnings.
+# An agent that calls tool:specs-json across multiple phases would
+# otherwise log the same "filtering unavailable tool" line per phase.
+# Keyed by tool name; presence means we already warned this process.
+declare -gA _TOOL_SPECS_WARNED=()
+
 #-------------------------------------------------------------------------------
 # tool:tools-dir
 #
@@ -261,10 +267,16 @@ tool:specs-json() {
       return 1
     fi
 
-    # Availability is silently filtered
+    # Availability is silently filtered. We log via tui:debug, but only
+    # ONCE per tool per process, so a multi-phase agent that calls
+    # tool:specs-json repeatedly does not get duplicate noise. Reset
+    # _TOOL_SPECS_WARNED in tests to start fresh.
     if ! tool:available "$name"; then
-      if type -t tui:debug &> /dev/null; then
-        tui:debug "tool:specs-json: filtering unavailable tool" name "$name" reason "${_TOOL_AVAILABILITY_ERR}" || true
+      if [[ -z "${_TOOL_SPECS_WARNED[$name]:-}" ]]; then
+        _TOOL_SPECS_WARNED[$name]=1
+        if type -t tui:debug &> /dev/null; then
+          tui:debug "tool:specs-json: filtering unavailable tool" name "$name" reason "${_TOOL_AVAILABILITY_ERR}" || true
+        fi
       fi
       continue
     fi
