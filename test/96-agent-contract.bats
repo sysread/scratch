@@ -13,11 +13,13 @@ set -euo pipefail
 #      and the .name field matches the directory basename.
 #   2. .name follows the [a-z][a-z0-9_-]* convention (shell-safe identifiers).
 #   3. run exists, is a regular file, is +x.
-#   4. is-available exists, is +x, has a bash shebang, AND sources lib/base.sh
-#      AND contains at least one has-commands declaration. The dual contract
-#      makes is-available do double duty: real runtime gate AND scannable
-#      dep manifest for the doctor. is-available is also where policy gates
-#      live (an agent can refuse to be available outside edit mode, etc.).
+#   4. is-available exists, is +x, has a bash shebang, AND sources lib/base.sh.
+#      Sourcing base.sh is the structural requirement so any has-commands /
+#      die / warn calls the script does make actually work. has-commands
+#      itself is encouraged but not required - an agent that is pure policy
+#      (e.g. just gates on SCRATCH_EDIT_MODE) should not be forced to
+#      declare a no-op has-commands line. is-available is also where policy
+#      gates live (an agent can refuse to be available outside edit mode, etc.).
 #
 # Mirror of test/95-tool-contract.bats. Agents and tools share the
 # same is-available contract because the doctor scanner treats both
@@ -185,11 +187,12 @@ _each_agent() {
   fi
 }
 
-@test "every agent's is-available sources lib/base.sh and calls has-commands" {
-  # The double-duty contract: is-available must source base.sh AND call
-  # has-commands for at least one command. This ensures the script is a
-  # real runtime gate (not a dead no-op) AND the doctor's textual scanner
-  # has something to discover.
+@test "every agent's is-available sources lib/base.sh" {
+  # is-available must source base.sh so any has-commands / die / warn
+  # calls the script does make actually work. has-commands itself is
+  # NOT required - a pure-policy agent (e.g. one that gates on
+  # SCRATCH_EDIT_MODE without invoking any external binaries) should
+  # not be forced to declare a no-op line just to satisfy this test.
   local name
   local dir
   local file
@@ -202,11 +205,7 @@ _each_agent() {
     [[ -f "$file" ]] || continue
 
     if ! grep -qE 'source[[:space:]].*lib/base\.sh' "$file"; then
-      errs+=("${name}: is-available must source lib/base.sh (so has-commands works at runtime)")
-    fi
-
-    if ! grep -qE '^[[:space:]]*has-commands[[:space:]]' "$file"; then
-      errs+=("${name}: is-available must contain at least one has-commands declaration")
+      errs+=("${name}: is-available must source lib/base.sh (so has-commands / die / warn work at runtime)")
     fi
   done < <(_each_agent)
 

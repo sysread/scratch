@@ -14,10 +14,12 @@ set -euo pipefail
 #   2. .name follows the [a-z][a-z0-9_-]* convention (matches OpenAI's
 #      function name rules and shell-safe identifiers).
 #   3. main exists, is a regular file, is +x.
-#   4. is-available exists, is +x, has a bash shebang, AND sources lib/base.sh
-#      AND contains at least one has-commands declaration. The dual contract
-#      makes is-available do double duty: real runtime gate AND scannable
-#      dep manifest for the doctor.
+#   4. is-available exists, is +x, has a bash shebang, AND sources lib/base.sh.
+#      Sourcing base.sh is the structural requirement so any has-commands /
+#      die / warn calls the script does make actually work. has-commands
+#      itself is encouraged but not required - a tool with no external deps
+#      should not be forced to declare a no-op has-commands line just to
+#      satisfy a structural test. Author trust > ceremony.
 #
 # A tool that fails any of these checks is reported with the specific
 # violation, all violations collected before failing so authors fix
@@ -191,11 +193,11 @@ _each_tool() {
   fi
 }
 
-@test "every tool's is-available sources lib/base.sh and calls has-commands" {
-  # The double-duty contract: is-available must source base.sh AND call
-  # has-commands for at least one command. This ensures the script is a
-  # real runtime gate (not a dead no-op) AND the doctor's textual scanner
-  # has something to discover.
+@test "every tool's is-available sources lib/base.sh" {
+  # is-available must source base.sh so any has-commands / die / warn
+  # calls the script does make actually work. has-commands itself is
+  # NOT required - a tool with no external deps should not be forced
+  # to declare a no-op line just to satisfy this test.
   local name
   local dir
   local file
@@ -208,11 +210,7 @@ _each_tool() {
     [[ -f "$file" ]] || continue
 
     if ! grep -qE 'source[[:space:]].*lib/base\.sh' "$file"; then
-      errs+=("${name}: is-available must source lib/base.sh (so has-commands works at runtime)")
-    fi
-
-    if ! grep -qE '^[[:space:]]*has-commands[[:space:]]' "$file"; then
-      errs+=("${name}: is-available must contain at least one has-commands declaration")
+      errs+=("${name}: is-available must source lib/base.sh (so has-commands / die / warn work at runtime)")
     fi
   done < <(_each_tool)
 

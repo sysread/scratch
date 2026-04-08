@@ -168,17 +168,17 @@ The environment contract for `main` (set by `tool:invoke`):
 
 This is the scratch-specific addition to fnord's frob format and the rule that makes the tool subsystem self-documenting.
 
-Every tool's `is-available` script MUST:
+Every tool's `is-available` script MUST source `lib/base.sh` (using `$SCRATCH_HOME` to locate it) so that any `has-commands` / `die` / `warn` calls the script makes actually work.
+The contract test enforces only this single requirement.
 
-1. Source `lib/base.sh` (using `$SCRATCH_HOME` to locate it).
-2. Call `has-commands` for every external program the tool needs.
+If the tool has external dependencies, declare them via `has-commands`:
 
-Same line does both jobs:
-
-- **At runtime,** `has-commands` actually verifies the tool's dependencies are present and dies with the standard install hint if any are missing.
+- **At runtime,** `has-commands` verifies the tool's dependencies are present and dies with the standard install hint if any are missing.
 - **At doctor scan time,** the textual scanner finds the `has-commands` line and attributes the declared commands to `tool:<name>` in the doctor's report. No separate registration step.
 
-Without the source line, `has-commands` would be undefined and the script would fail. Without the `has-commands` call, the script would be a no-op gate (passing always) AND the doctor would have nothing to discover. Both are wrong; the contract test enforces both properties.
+If the tool has NO external dependencies (e.g. it greps its JSON args using POSIX grep, or it is pure policy), `has-commands` is not required.
+The earlier blanket "must call has-commands" rule was a proxy for "is the script a real gate?" - that proxy punished the legitimate no-deps case for the sake of catching the lazy-stub case.
+Author trust > ceremony.
 
 Example (`tools/notify/is-available`):
 
@@ -246,10 +246,15 @@ This pattern deserves explicit treatment because the second half is non-obvious.
 
 ### As dependency manifest
 
-Every `is-available` script MUST source `lib/base.sh` and call `has-commands` for at least one external program.
+Every `is-available` script MUST source `lib/base.sh` so any `has-commands` / `die` / `warn` calls the script makes actually work.
+The contract test (`95-tool-contract.bats`, `96-agent-contract.bats`) enforces this single requirement.
+
+If the tool/agent has external dependencies, declare them via `has-commands` for every external program.
 The doctor's textual scanner reads these declarations and attributes them to `tool:<name>` or `agent:<name>` in its report.
-Same line does both jobs: real runtime check (the call dies with an install hint if a dep is missing) and doctor scan token (the textual presence is what the scanner picks up).
-The contract test (`95-tool-contract.bats`, `96-agent-contract.bats`) enforces that both properties hold.
+Same line does both jobs: real runtime check (dies with an install hint if a dep is missing) and doctor scan token.
+
+If the tool/agent has NO external dependencies (a pure-policy gate that just checks an env var, or a script that uses only POSIX builtins), `has-commands` is not required.
+The earlier blanket "must call has-commands" rule was a proxy for "real gate not lazy stub" - that proxy is over-aggressive and forced ceremony into legitimate no-deps cases.
 
 ### As policy gate
 
