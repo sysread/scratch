@@ -24,8 +24,6 @@ _PROMPT_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$_PROMPT_SCRIPTDIR/base.sh"
 
-has-commands sed
-
 #-------------------------------------------------------------------------------
 # prompt:dir
 #
@@ -64,22 +62,6 @@ prompt:load() {
 export -f prompt:load
 
 #-------------------------------------------------------------------------------
-# _prompt:_sed-escape STRING
-#
-# (Private) Escape a string for use as the replacement side of a sed s|||
-# command. We use | as the delimiter so / does not need escaping, but &
-# (sed's whole-match backreference) and | (the delimiter itself) and \
-# (escape char) all do. Backslashes first, then & and |.
-#-------------------------------------------------------------------------------
-_prompt:_sed-escape() {
-  local s="$1"
-  s="${s//\\/\\\\}"
-  s="${s//&/\\&}"
-  s="${s//|/\\|}"
-  printf '%s' "$s"
-}
-
-#-------------------------------------------------------------------------------
 # prompt:render NAME [VAR=VALUE ...]
 #
 # Like prompt:load, but additionally substitutes {{var}} placeholders with
@@ -87,6 +69,21 @@ _prompt:_sed-escape() {
 # of HTML, no fancy templating. Variables not supplied are left as-is so
 # missing placeholders are visible in test output rather than silently
 # dropped.
+#
+# Implementation uses bash's ${var//pattern/replacement} parameter
+# expansion rather than sed. The earlier sed-based version broke on
+# values containing literal newlines (sed's replacement side is
+# single-line by default), which surfaced the first time the
+# accumulator tried to feed multi-line accumulated_notes back into the
+# next round's system prompt. Parameter expansion has no such limit
+# because it operates on the bash variable directly, not on a stream.
+#
+# Escape rules in the replacement side:
+# - bash 5.x treats `&` as a backreference to the matched text (same as
+#   sed), so we escape `&` to `\&` in values before substitution.
+# - `\` itself escapes the next char in the replacement, so we double
+#   backslashes too.
+# - Everything else (`{`, `}`, `|`, `/`, newlines) is literal.
 #
 # Example:
 #   prompt:render accumulator/system user_prompt="$prompt" question="$q" notes="$n"
@@ -104,12 +101,17 @@ prompt:render() {
   local arg
   local key
   local value
-  local escaped
+  local placeholder
   for arg in "$@"; do
     key="${arg%%=*}"
     value="${arg#*=}"
-    escaped="$(_prompt:_sed-escape "$value")"
-    content="$(printf '%s' "$content" | sed "s|{{${key}}}|${escaped}|g")"
+    # Escape backslashes first, then ampersands. Order matters: if we
+    # escaped & first, the resulting \& would get its backslash doubled
+    # to \\& in the next pass.
+    value="${value//\\/\\\\}"
+    value="${value//&/\\&}"
+    placeholder="{{${key}}}"
+    content="${content//${placeholder}/${value}}"
   done
 
   printf '%s' "$content"

@@ -138,6 +138,31 @@ line four"
   is "$output" 'esc is a\b\c'
 }
 
+@test "prompt:render handles values containing literal newlines" {
+  # Regression: the previous sed-based implementation died with
+  # "unescaped newline inside substitute pattern" the first time the
+  # accumulator tried to feed multi-line accumulated_notes back into
+  # the next round's system prompt. Parameter expansion has no such
+  # limit; multi-line values must work.
+  printf 'before\n{{notes}}\nafter\n' > "${SCRATCH_PROMPTS_DIR}/m.md"
+  run prompt:render m notes='line one
+line two
+line three'
+  is "$status" 0
+  is "$output" "before
+line one
+line two
+line three
+after"
+}
+
+@test "prompt:render handles values containing curly braces" {
+  printf 'json: {{j}}\n' > "${SCRATCH_PROMPTS_DIR}/j.md"
+  run prompt:render j j='{"key": "value"}'
+  is "$status" 0
+  is "$output" 'json: {"key": "value"}'
+}
+
 @test "prompt:render dies on a missing prompt file" {
   run prompt:render nope key=val
   is "$status" 1
