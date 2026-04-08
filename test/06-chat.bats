@@ -318,7 +318,7 @@ EOF
 tool_call_response() {
   local id="$1"
   local name="$2"
-  local args_json_str="$3"  # this is a STRING containing JSON, per OpenAI
+  local args_json_str="$3" # this is a STRING containing JSON, per OpenAI
   cat << EOF
 {
   "id": "cmpl-test",

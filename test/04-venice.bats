@@ -54,16 +54,21 @@ install_curl_stub() {
   make_stub curl "$(
     cat << STUB
 #!/usr/bin/env bash
-# Find -o FILE in args and write the canned body there
+# Find -o FILE and -D FILE in args
 body_file=""
+headers_file=""
 while [[ \$# -gt 0 ]]; do
   case "\$1" in
     -o) body_file="\$2"; shift 2 ;;
+    -D) headers_file="\$2"; shift 2 ;;
     *) shift ;;
   esac
 done
 if [[ -n "\$body_file" ]]; then
   cat '${BATS_TEST_TMPDIR}/curl-response.body' > "\$body_file"
+fi
+if [[ -n "\$headers_file" && -f '${BATS_TEST_TMPDIR}/curl-response.headers' ]]; then
+  cat '${BATS_TEST_TMPDIR}/curl-response.headers' > "\$headers_file"
 fi
 cat '${BATS_TEST_TMPDIR}/curl-response.status'
 STUB
@@ -278,20 +283,26 @@ n=\$(cat "\$counter_file")
 n=\$((n + 1))
 printf '%s' "\$n" > "\$counter_file"
 
-# Find -o FILE in args
+# Find -o FILE and -D FILE in args
 body_file=""
+headers_file=""
 while [[ \$# -gt 0 ]]; do
   case "\$1" in
     -o) body_file="\$2"; shift 2 ;;
+    -D) headers_file="\$2"; shift 2 ;;
     *) shift ;;
   esac
 done
 
-# Write the body for this attempt, print the status
+# Write the body and (optionally) headers for this attempt, print the status
 body_src='${BATS_TEST_TMPDIR}/curl-response.body.'"\${n}"
 status_src='${BATS_TEST_TMPDIR}/curl-response.status.'"\${n}"
+headers_src='${BATS_TEST_TMPDIR}/curl-response.headers.'"\${n}"
 if [[ -n "\$body_file" && -f "\$body_src" ]]; then
   cat "\$body_src" > "\$body_file"
+fi
+if [[ -n "\$headers_file" && -f "\$headers_src" ]]; then
+  cat "\$headers_src" > "\$headers_file"
 fi
 if [[ -f "\$status_src" ]]; then
   cat "\$status_src"
@@ -378,6 +389,37 @@ STUB
   [[ "$output" != *"exhausted"* ]]
 }
 
+@test "venice:curl retries on 500 then succeeds (Venice docs say 500 is retryable)" {
+  install_multi_curl_stub "500:{\"err\":\"oops\"}" "200:{\"ok\":true}"
+  export SCRATCH_VENICE_MAX_ATTEMPTS=3
+
+  run --separate-stderr venice:curl GET /models
+  is "$status" 0
+  is "$output" '{"ok":true}'
+  [[ "$stderr" == *"500"* ]]
+  [[ "$stderr" == *"retrying"* ]]
+}
+
+@test "venice:curl dies with server-error message after exhausting 500 retries" {
+  install_multi_curl_stub "500:{}" "500:{}" "500:{}"
+  export SCRATCH_VENICE_MAX_ATTEMPTS=3
+
+  run bash -c '
+    set -e
+    export SCRATCH_VENICE_API_KEY=test-key
+    export SCRATCH_VENICE_MAX_ATTEMPTS=3
+    export PATH="'"${BATS_TEST_TMPDIR}"'/stubbin:$PATH"
+    sleep() { :; }
+    export -f sleep
+    source '"${SCRATCH_HOME}"'/lib/venice.sh
+    venice:curl GET /models 2>&1
+  '
+  is "$status" 1
+  [[ "$output" == *"server error"* ]]
+  [[ "$output" == *"500"* ]]
+  [[ "$output" == *"exhausted 3 attempts"* ]]
+}
+
 @test "venice:curl does NOT retry on 402 (non-retryable)" {
   install_multi_curl_stub "402:{\"err\":\"broke\"}" "200:{\"ok\":true}"
   export SCRATCH_VENICE_MAX_ATTEMPTS=3
@@ -395,4 +437,161 @@ STUB
   is "$status" 1
   [[ "$output" == *"insufficient credits"* ]]
   [[ "$output" != *"exhausted"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# _venice:_reset-wait - parses x-ratelimit-reset-requests
+# ---------------------------------------------------------------------------
+
+@test "_venice:_reset-wait returns empty when headers file is missing" {
+  run _venice:_reset-wait "${BATS_TEST_TMPDIR}/no-such-file"
+  is "$status" 0
+  is "$output" ""
+}
+
+@test "_venice:_reset-wait returns empty when header is absent" {
+  printf 'HTTP/1.1 429\r\ncontent-type: application/json\r\n\r\n' > "${BATS_TEST_TMPDIR}/h"
+  run _venice:_reset-wait "${BATS_TEST_TMPDIR}/h"
+  is "$output" ""
+}
+
+@test "_venice:_reset-wait returns seconds-until-reset for a future timestamp" {
+  local future
+  future=$(($(date +%s) + 7))
+  printf 'HTTP/1.1 429\r\nx-ratelimit-reset-requests: %s\r\n\r\n' "$future" > "${BATS_TEST_TMPDIR}/h"
+  run _venice:_reset-wait "${BATS_TEST_TMPDIR}/h"
+  is "$status" 0
+  # Allow off-by-one for clock tick during the call
+  [[ "$output" == "6" || "$output" == "7" ]]
+}
+
+@test "_venice:_reset-wait returns empty when reset is in the past (stale)" {
+  local past
+  past=$(($(date +%s) - 30))
+  printf 'HTTP/1.1 429\r\nx-ratelimit-reset-requests: %s\r\n\r\n' "$past" > "${BATS_TEST_TMPDIR}/h"
+  run _venice:_reset-wait "${BATS_TEST_TMPDIR}/h"
+  is "$output" ""
+}
+
+@test "_venice:_reset-wait caps at _VENICE_MAX_RESET_WAIT" {
+  local far_future
+  far_future=$(($(date +%s) + 9999))
+  printf 'HTTP/1.1 429\r\nx-ratelimit-reset-requests: %s\r\n\r\n' "$far_future" > "${BATS_TEST_TMPDIR}/h"
+  run _venice:_reset-wait "${BATS_TEST_TMPDIR}/h"
+  is "$output" "60"
+}
+
+@test "_venice:_reset-wait is case-insensitive on the header name" {
+  local future
+  future=$(($(date +%s) + 5))
+  printf 'HTTP/1.1 429\r\nX-RateLimit-Reset-Requests: %s\r\n\r\n' "$future" > "${BATS_TEST_TMPDIR}/h"
+  run _venice:_reset-wait "${BATS_TEST_TMPDIR}/h"
+  [[ "$output" == "4" || "$output" == "5" ]]
+}
+
+@test "_venice:_reset-wait rejects a non-numeric value" {
+  printf 'HTTP/1.1 429\r\nx-ratelimit-reset-requests: soon\r\n\r\n' > "${BATS_TEST_TMPDIR}/h"
+  run _venice:_reset-wait "${BATS_TEST_TMPDIR}/h"
+  is "$output" ""
+}
+
+# ---------------------------------------------------------------------------
+# venice:curl honors x-ratelimit-reset-requests on 429
+#
+# We can't directly assert the sleep duration (sleep is stubbed to a
+# noop), but we can prove the wait calculation went through the reset
+# header path by capturing what venice:curl would have slept on. Replace
+# sleep with a function that records its argument, and assert it.
+# ---------------------------------------------------------------------------
+
+# Install a multi-response curl stub that ALSO writes per-attempt headers.
+# Pass triples of "STATUS|HEADERS|BODY".
+install_multi_curl_stub_with_headers() {
+  local counter_file="${BATS_TEST_TMPDIR}/curl-attempt.counter"
+  printf '0' > "$counter_file"
+
+  local i=1
+  local triple
+  for triple in "$@"; do
+    local status="${triple%%|*}"
+    local rest="${triple#*|}"
+    local headers="${rest%%|*}"
+    local body="${rest#*|}"
+    printf '%s' "$status" > "${BATS_TEST_TMPDIR}/curl-response.status.${i}"
+    printf '%s' "$body" > "${BATS_TEST_TMPDIR}/curl-response.body.${i}"
+    # Reconstruct CRLF line endings from literal \r\n in the input
+    printf '%b' "$headers" > "${BATS_TEST_TMPDIR}/curl-response.headers.${i}"
+    i=$((i + 1))
+  done
+
+  make_stub curl "$(
+    cat << STUB
+#!/usr/bin/env bash
+counter_file='${BATS_TEST_TMPDIR}/curl-attempt.counter'
+n=\$(cat "\$counter_file")
+n=\$((n + 1))
+printf '%s' "\$n" > "\$counter_file"
+
+body_file=""
+headers_file=""
+while [[ \$# -gt 0 ]]; do
+  case "\$1" in
+    -o) body_file="\$2"; shift 2 ;;
+    -D) headers_file="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+body_src='${BATS_TEST_TMPDIR}/curl-response.body.'"\${n}"
+status_src='${BATS_TEST_TMPDIR}/curl-response.status.'"\${n}"
+headers_src='${BATS_TEST_TMPDIR}/curl-response.headers.'"\${n}"
+[[ -n "\$body_file" && -f "\$body_src" ]] && cat "\$body_src" > "\$body_file"
+[[ -n "\$headers_file" && -f "\$headers_src" ]] && cat "\$headers_src" > "\$headers_file"
+cat "\$status_src"
+STUB
+  )" > /dev/null
+
+  prepend_stub_path
+}
+
+@test "venice:curl uses x-ratelimit-reset-requests when retrying on 429" {
+  local future
+  future=$(($(date +%s) + 5))
+
+  install_multi_curl_stub_with_headers \
+    "429|HTTP/1.1 429\r\nx-ratelimit-reset-requests: ${future}\r\n\r\n|{\"err\":\"slow\"}" \
+    "200||{\"ok\":true}"
+  export SCRATCH_VENICE_MAX_ATTEMPTS=3
+
+  run --separate-stderr venice:curl GET /models
+  is "$status" 0
+  is "$output" '{"ok":true}'
+  # The retry warning's wait value should be 4 or 5 (the reset window),
+  # NOT the log10 backoff value (2 for attempt 1).
+  [[ "$stderr" == *"retrying in 4s"* || "$stderr" == *"retrying in 5s"* ]]
+}
+
+@test "venice:curl falls back to log10 backoff when 429 has no reset header" {
+  install_multi_curl_stub_with_headers \
+    "429|HTTP/1.1 429\r\ncontent-type: application/json\r\n\r\n|{\"err\":\"slow\"}" \
+    "200||{\"ok\":true}"
+  export SCRATCH_VENICE_MAX_ATTEMPTS=3
+
+  run --separate-stderr venice:curl GET /models
+  is "$status" 0
+  # Attempt 1 fallback is _venice:_backoff-seconds 1 = 2
+  [[ "$stderr" == *"retrying in 2s"* ]]
+}
+
+@test "venice:curl falls back to log10 backoff when 429 reset is stale" {
+  local past
+  past=$(($(date +%s) - 30))
+  install_multi_curl_stub_with_headers \
+    "429|HTTP/1.1 429\r\nx-ratelimit-reset-requests: ${past}\r\n\r\n|{\"err\":\"slow\"}" \
+    "200||{\"ok\":true}"
+  export SCRATCH_VENICE_MAX_ATTEMPTS=3
+
+  run --separate-stderr venice:curl GET /models
+  is "$status" 0
+  [[ "$stderr" == *"retrying in 2s"* ]]
 }

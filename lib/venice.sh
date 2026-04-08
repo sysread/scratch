@@ -41,6 +41,12 @@ _VENICE_BASE_URL="https://api.venice.ai/api/v1"
 # give longer waits per attempt. See _venice:_backoff-seconds below.
 _VENICE_BACKOFF_BASE=2
 
+# Cap on reset-derived waits. When a 429 carries an x-ratelimit-reset-requests
+# header, we honor it - but only up to this many seconds, so a misconfigured
+# or malicious server can't pin us indefinitely. The fallback log10 curve
+# kicks in for waits beyond the cap.
+_VENICE_MAX_RESET_WAIT=60
+
 #-------------------------------------------------------------------------------
 # venice:api-key
 #
@@ -137,6 +143,59 @@ EOF
 export -f _venice:_backoff-seconds
 
 #-------------------------------------------------------------------------------
+# _venice:_reset-wait HEADERS_FILE
+#
+# (Private) Read x-ratelimit-reset-requests from a curl header dump and
+# return the number of seconds to wait until the rate-limit window resets.
+#
+# Venice documents this header as a unix timestamp (seconds). On 429
+# specifically, it is the canonical signal of "when you may try again";
+# our log10 backoff is a fallback for when the header is absent or stale.
+#
+# Returns:
+#   - whole seconds (>= 1) when the header is present and the reset is in
+#     the future, capped at _VENICE_MAX_RESET_WAIT to defend against a
+#     server pinning us
+#   - empty string when the header is missing, malformed, or already in
+#     the past
+#
+# Header matching is case-insensitive (HTTP header names are
+# case-insensitive per RFC 7230) and tolerates leading whitespace and
+# CRLF line endings.
+#-------------------------------------------------------------------------------
+_venice:_reset-wait() {
+  local headers_file="$1"
+  local raw
+  local reset_ts
+  local now
+  local wait_s
+
+  [[ -f "$headers_file" ]] || return 0
+
+  # grep -i for case-insensitive header name; cut to grab the value;
+  # tr -d to strip CR (curl emits CRLF line endings) and whitespace.
+  raw="$(grep -i '^x-ratelimit-reset-requests:' "$headers_file" 2> /dev/null | tail -n 1 | cut -d: -f2- | tr -d ' \r\n')"
+  [[ -n "$raw" ]] || return 0
+
+  # Must be all digits to be a unix timestamp. Reject anything else.
+  [[ "$raw" =~ ^[0-9]+$ ]] || return 0
+  reset_ts="$raw"
+
+  now="$(date +%s)"
+  wait_s=$((reset_ts - now))
+
+  # Header is stale (reset already passed) - let the caller fall back.
+  ((wait_s > 0)) || return 0
+
+  # Cap to defend against a misconfigured or hostile server.
+  ((wait_s > _VENICE_MAX_RESET_WAIT)) && wait_s="$_VENICE_MAX_RESET_WAIT"
+
+  printf '%d' "$wait_s"
+}
+
+export -f _venice:_reset-wait
+
+#-------------------------------------------------------------------------------
 # venice:curl METHOD PATH [BODY]
 #
 # Make an authenticated request to the Venice API and print the response
@@ -149,10 +208,13 @@ export -f _venice:_backoff-seconds
 #
 # On 2xx, prints the response body and returns 0.
 #
-# Transient errors (429 rate-limited, 503 at capacity, 504 timeout) are
-# retried up to SCRATCH_VENICE_MAX_ATTEMPTS times (default 3) with a
-# log10 backoff sleep between attempts. Each retry logs a warning to
-# stderr so the caller knows what's happening during the pause.
+# Transient errors (429 rate-limited, 500 server error, 503 at capacity,
+# 504 timeout) are retried up to SCRATCH_VENICE_MAX_ATTEMPTS times
+# (default 3). For 429, the wait honors Venice's
+# x-ratelimit-reset-requests header (capped at _VENICE_MAX_RESET_WAIT
+# seconds) when present; otherwise, and for the other transient codes,
+# we use a log10 backoff curve. Each retry logs a warning to stderr so
+# the caller knows what's happening during the pause.
 #
 # Non-retryable errors (401, 402, 415, other 4xx) die immediately with
 # a user-targeted message. Retries exhausted dies with a message that
@@ -174,16 +236,21 @@ venice:curl() {
   local key
   local url
   local body_file
+  local headers_file
   local body_content
   local status_code
   local wait_s
+  local reset_wait
   local -a curl_args
 
   key="$(venice:api-key)"
   url="$(venice:base-url)${path}"
   body_file="$(mktemp -t venice-curl.XXXXXX)"
+  headers_file="$(mktemp -t venice-curl-h.XXXXXX)"
 
-  # -sS: silent progress, show errors. -o: body to file. -w: status to stdout.
+  # -sS: silent progress, show errors. -o: body to file. -D: headers
+  # to file (so we can read the rate-limit headers Venice returns).
+  # -w: status to stdout.
   curl_args=(
     -sS
     -X "$method"
@@ -191,6 +258,7 @@ venice:curl() {
     -H "Content-Type: application/json"
     -H "Accept: application/json"
     -o "$body_file"
+    -D "$headers_file"
     -w '%{http_code}'
   )
 
@@ -202,20 +270,21 @@ venice:curl() {
   # still have attempts left. Anything else dies immediately.
   #-----------------------------------------------------------------------------
   while :; do
-    # Fresh file each iteration - previous body contents would confuse
+    # Fresh files each iteration - previous body or headers would confuse
     # a retry that returns a different status.
     : > "$body_file"
+    : > "$headers_file"
 
     if [[ -n "$body" ]]; then
       if ! status_code="$(printf '%s' "$body" | curl "${curl_args[@]}" -d @- "$url" 2>&1)"; then
         local err="$status_code"
-        rm -f "$body_file"
+        rm -f "$body_file" "$headers_file"
         die "venice: curl failed for $method $path: $err"
       fi
     else
       if ! status_code="$(curl "${curl_args[@]}" "$url" 2>&1)"; then
         local err="$status_code"
-        rm -f "$body_file"
+        rm -f "$body_file" "$headers_file"
         die "venice: curl failed for $method $path: $err"
       fi
     fi
@@ -223,16 +292,28 @@ venice:curl() {
     # Success - return the body and break out
     if [[ "$status_code" =~ ^2 ]]; then
       body_content="$(cat "$body_file")"
-      rm -f "$body_file"
+      rm -f "$body_file" "$headers_file"
       printf '%s' "$body_content"
       return 0
     fi
 
-    # Transient errors are retryable if we still have attempts left
+    # Transient errors are retryable if we still have attempts left.
+    # Venice documents 429/500/503 as retryable. We also retry 504 (gateway
+    # timeout) defensively - it isn't in their list, but a timed-out
+    # request is by nature worth one more shot.
     case "$status_code" in
-      429 | 503 | 504)
+      429 | 500 | 503 | 504)
         if ((attempt < max_attempts)); then
-          wait_s="$(_venice:_backoff-seconds "$attempt")"
+          # On 429, prefer the server-provided reset timestamp from
+          # x-ratelimit-reset-requests. It tells us exactly when the window
+          # opens; sleeping less than that guarantees another 429. Fall
+          # back to the log10 curve when the header is missing or stale.
+          wait_s=""
+          if [[ "$status_code" == "429" ]]; then
+            reset_wait="$(_venice:_reset-wait "$headers_file")"
+            [[ -n "$reset_wait" ]] && wait_s="$reset_wait"
+          fi
+          [[ -n "$wait_s" ]] || wait_s="$(_venice:_backoff-seconds "$attempt")"
           warn "venice: ${method} ${path} returned ${status_code}; retrying in ${wait_s}s (attempt ${attempt}/${max_attempts})"
           sleep "$wait_s"
           attempt=$((attempt + 1))
@@ -244,7 +325,7 @@ venice:curl() {
     # Non-retryable, or retries exhausted. Read the body for the error
     # message and translate.
     body_content="$(cat "$body_file")"
-    rm -f "$body_file"
+    rm -f "$body_file" "$headers_file"
 
     case "$status_code" in
       401)
@@ -258,6 +339,9 @@ venice:curl() {
         ;;
       429)
         die "venice: rate limited (429); exhausted ${max_attempts} attempts. Wait and retry later."
+        ;;
+      500)
+        die "venice: server error (500); exhausted ${max_attempts} attempts. Body: ${body_content}"
         ;;
       503)
         die "venice: model at capacity (503); exhausted ${max_attempts} attempts. Try a different model."
