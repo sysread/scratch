@@ -150,3 +150,37 @@ setup() {
     fi
   done
 }
+
+@test "toolboxes/<name>/is-available is executable" {
+  local -a files=()
+
+  while IFS= read -r f; do
+    files+=("$f")
+  done < <(git -C "$SCRATCH_HOME" ls-files 'toolboxes/*/is-available')
+
+  [[ ${#files[@]} -eq 0 ]] && return 0
+
+  for f in "${files[@]}"; do
+    if [[ ! -x "$SCRATCH_HOME/$f" ]]; then
+      echo "expected executable: $f"
+      return 1
+    fi
+  done
+}
+
+@test "toolboxes/<name>/tools.json files are not executable" {
+  local -a files=()
+
+  while IFS= read -r f; do
+    files+=("$f")
+  done < <(git -C "$SCRATCH_HOME" ls-files 'toolboxes/*/tools.json')
+
+  [[ ${#files[@]} -eq 0 ]] && return 0
+
+  for f in "${files[@]}"; do
+    if [[ -x "$SCRATCH_HOME/$f" ]]; then
+      echo "expected non-executable: $f"
+      return 1
+    fi
+  done
+}

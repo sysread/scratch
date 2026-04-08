@@ -209,6 +209,12 @@ _attr-tool() { printf 'tool:%s\n' "$(basename "$(dirname "$1")")"; }
 # is-available script is both a runtime gate and a dep manifest.
 _attr-agent() { printf 'agent:%s\n' "$(basename "$(dirname "$1")")"; }
 
+# Toolbox is-available scripts: same again with a "toolbox:" prefix.
+# Most toolboxes are pure policy and won't declare any binaries, so this
+# scan target usually finds nothing - but the loop is one line and we
+# get cross-attribution for free if a toolbox ever does declare a dep.
+_attr-toolbox() { printf 'toolbox:%s\n' "$(basename "$(dirname "$1")")"; }
+
 #-------------------------------------------------------------------------------
 # _scan-deps-in PATTERN ATTR_FN NEED_X
 #
@@ -243,15 +249,16 @@ _scan-deps-in() {
 }
 
 #-------------------------------------------------------------------------------
-# Walk all scratch dependency declarations across the five scan targets:
+# Walk all scratch dependency declarations across the six scan targets:
 #
-#   bin/scratch-*           attributed by verb (subcommand-name)
-#   lib/*.sh                folded into "lib"
-#   helpers/*               attributed by helper basename (e.g. "embed")
-#   tools/*/is-available    attributed by tool name with "tool:" prefix
-#   agents/*/is-available   attributed by agent name with "agent:" prefix
+#   bin/scratch-*              attributed by verb (subcommand-name)
+#   lib/*.sh                   folded into "lib"
+#   helpers/*                  attributed by helper basename (e.g. "embed")
+#   tools/*/is-available       attributed by tool name with "tool:" prefix
+#   agents/*/is-available      attributed by agent name with "agent:" prefix
+#   toolboxes/*/is-available   attributed by toolbox name with "toolbox:" prefix
 #
-# All five use the same _scan-deps-in helper - one line per target.
+# All six use the same _scan-deps-in helper - one line per target.
 #-------------------------------------------------------------------------------
 scan-all-deps() {
   _scan-deps-in "$SCRIPTDIR/scratch-*" subcommand-name x
@@ -259,6 +266,7 @@ scan-all-deps() {
   _scan-deps-in "$SCRIPTDIR/../helpers/*" basename x
   _scan-deps-in "$SCRIPTDIR/../tools/*/is-available" _attr-tool x
   _scan-deps-in "$SCRIPTDIR/../agents/*/is-available" _attr-agent x
+  _scan-deps-in "$SCRIPTDIR/../toolboxes/*/is-available" _attr-toolbox x
 }
 
 #-------------------------------------------------------------------------------
