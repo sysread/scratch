@@ -6,7 +6,7 @@
 # Tentative plans, design notes, and intermediate artifacts.
 # Anything in here is work-in-progress and not part of the project's
 # committed history. Move into docs/ if it graduates to permanent.
-.scratch/
+scratch/
 
 # Crash dumps from Erlang/Elixir runs (libexec/embed.exs).
 erl_crash.dump
