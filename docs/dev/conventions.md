@@ -502,3 +502,31 @@ Specifically for `grep` and `sed`:
 
 If you ever genuinely need a GNU-only feature, prefer adding a small wrapper function (the `gnu-grep` pattern) that aliases to `ggrep` on macOS and `grep` on Linux, rather than declaring `has-commands grep` and pretending it's enough.
 For complex pattern work where ripgrep or silver searcher would be more readable, prefer `ag` (silver searcher) over `rg` (ripgrep) - ag is friendlier in scripting contexts (rg's directory exclusion semantics are awkward).
+
+## Subprocess Environment Hygiene
+
+Bash exports functions via `BASH_FUNC_<name>%%` environment variables. When a child process uses a `#!/bin/sh` launcher (like `elixir`, which is a shell script), `/bin/sh` on macOS is bash 3.2 in POSIX mode. It tries to import every `BASH_FUNC_*` variable, and any function using bash 5 syntax (like `[[ -v ]]`) triggers a parse error per function. This is non-fatal but adds measurable startup overhead (~1.2s for ~50 exported functions) and floods stderr.
+
+**Rule:** when calling a command whose launcher is `#!/bin/sh`, wrap it with `env -i` and an explicit allowlist of variables:
+
+```bash
+env -i \
+  PATH="$PATH" \
+  HOME="$HOME" \
+  TERM="${TERM:-dumb}" \
+  elixir "$script" "$@"
+```
+
+This strips all `BASH_FUNC_*` variables from the child's environment. Only forward the vars the command actually needs. For optional vars, only include them when set (empty strings can override defaults in the child):
+
+```bash
+local -a env_args=(PATH="$PATH" HOME="$HOME" TERM="${TERM:-dumb}")
+if [[ -n "${MY_VAR:-}" ]]; then
+  env_args+=(MY_VAR="$MY_VAR")
+fi
+env -i "${env_args[@]}" some-command "$@"
+```
+
+**How to check:** `head -1 "$(which <command>)"` — if the shebang is `#!/bin/sh`, the command needs the `env -i` treatment. Compiled binaries (curl, jq, gum, sqlite3, awk) ignore `BASH_FUNC_*` entirely.
+
+Currently only `elixir` (via mise/asdf) uses a `#!/bin/sh` launcher. The cleanup lives in `lib/embed.sh::_embed:_run`. Any future non-bash interpreter invocation should follow the same pattern.
