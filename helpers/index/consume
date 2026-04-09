@@ -23,6 +23,9 @@ set -euo pipefail
 
 has-commands jq
 
+# shellcheck disable=SC1091
+source "${SCRATCH_HOME}/lib/tui.sh"
+
 project="$1"
 db="$(index:db-path "$project")"
 
@@ -40,5 +43,6 @@ while IFS= read -r line; do
       SET embedding = $q_embedding, updated_at = datetime('now')
       WHERE type = 'file' AND identifier = $q_id;
     "
+    tui:info "embedded" file "$entry_id"
   fi
 done

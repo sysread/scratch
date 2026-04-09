@@ -33,9 +33,11 @@ project="$1"
 pool_size="${2:-4}"
 
 lockfile="/tmp/scratch-index-summarize-lock.$$"
+counterfile="/tmp/scratch-index-summarize-count.$$"
 touch "$lockfile"
+printf '0' >"$counterfile"
 # shellcheck disable=SC2064
-trap "rm -f '$lockfile'" EXIT
+trap "rm -f '$lockfile' '$counterfile'" EXIT
 
 # Process a single work item: summarize, upsert, emit. Runs in a
 # background subshell. Stdout writes are serialized with flock so
@@ -78,6 +80,9 @@ _summarize_one() {
   out_json="$(jq -c -n --arg id "$ident" --arg text "$embed_text" \
     '{id: $id, text: $text}')"
   flock "$lockfile" printf '%s\n' "$out_json"
+
+  # Progress (stderr, not serialized — interleaved lines are fine for logs)
+  tui:info "summarized" file "$ident"
 }
 
 pids=()
