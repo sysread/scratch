@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# index/produce - emit JSONL for files needing indexing
+#
+# Walks project files, computes SHA-256, diffs against the index, and
+# emits one JSONL line per file that needs work (new or changed).
+# Also removes orphaned entries from the index.
+#
+# Args: PROJECT_NAME ROOT IS_GIT EXCLUDE
+# stdout: JSONL {"id":"<relpath>","sha":"<hex>","file":"<abspath>"}
+# stderr: tui:info summary
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" >/dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+SCRATCH_HOME="$(cd "$SCRIPTDIR/../.." && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRATCH_HOME/lib/base.sh"
+  source "$SCRATCH_HOME/lib/index.sh"
+  source "$SCRATCH_HOME/lib/tui.sh"
+}
+
+has-commands shasum jq
+
+project="$1"
+root="$2"
+is_git="$3"
+exclude="${4:-}"
+
+# Load existing index
+declare -A idx_sha=([_sentinel_]=1)
+unset 'idx_sha[_sentinel_]'
+while IFS=$'\t' read -r ident sha; do
+  [[ -n "$ident" ]] || continue
+  idx_sha["$ident"]="$sha"
+done < <(index:list "$project" file)
+
+# Walk filesystem, diff, and emit
+declare -A fs_seen=([_sentinel_]=1)
+unset 'fs_seen[_sentinel_]'
+emit_count=0
+skip_count=0
+
+walk_files() {
+  if [[ "$is_git" == "true" ]]; then
+    git -C "$root" ls-files --cached --others --exclude-standard
+  else
+    local -a find_args=("$root" -type f)
+    local pattern
+    while IFS= read -r pattern; do
+      [[ -n "$pattern" ]] || continue
+      find_args+=(-not -path "$root/$pattern")
+    done <<<"$exclude"
+
+    find "${find_args[@]}" -print0 |
+      while IFS= read -r -d '' path; do
+        printf '%s\n' "${path#"$root"/}"
+      done
+  fi
+}
+
+while IFS= read -r ident; do
+  [[ -n "$ident" ]] || continue
+  fs_seen["$ident"]=1
+
+  file_path="${root}/${ident}"
+  [[ -f "$file_path" ]] || continue
+
+  file_sha="$(shasum -a 256 "$file_path" | cut -d' ' -f1)"
+
+  if [[ -z "${idx_sha[$ident]:-}" ]]; then
+    jq -c -n --arg id "$ident" --arg sha "$file_sha" --arg file "$file_path" \
+      '{id: $id, sha: $sha, file: $file}'
+    emit_count=$((emit_count + 1))
+  elif [[ "${idx_sha[$ident]}" != "$file_sha" ]]; then
+    jq -c -n --arg id "$ident" --arg sha "$file_sha" --arg file "$file_path" \
+      '{id: $id, sha: $sha, file: $file}'
+    emit_count=$((emit_count + 1))
+  else
+    skip_count=$((skip_count + 1))
+  fi
+done < <(walk_files)
+
+# Remove orphaned entries
+orphan_count=0
+for ident in "${!idx_sha[@]}"; do
+  if [[ -z "${fs_seen[$ident]:-}" ]]; then
+    index:remove "$project" file "$ident"
+    orphan_count=$((orphan_count + 1))
+  fi
+done
+
+tui:info "index" \
+  to_process "$emit_count" \
+  orphans_removed "$orphan_count" \
+  current "$skip_count"

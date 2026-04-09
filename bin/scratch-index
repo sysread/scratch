@@ -3,24 +3,16 @@
 #-------------------------------------------------------------------------------
 # scratch index - build or update the project file index
 #
-# Streaming pipeline architecture:
+# Orchestrates a streaming pipeline of independent helpers:
 #
-#   produce | summarize_pool | embed_pool | consume
+#   helpers/index/produce    → walk files, SHA diff, emit work items
+#   helpers/index/summarize  → parallel summary agents, upsert to SQLite
+#   embed:pool               → JSONL embedding via Elixir pool
+#   helpers/index/consume    → update SQLite with embeddings
 #
-# Each stage reads JSONL from stdin and writes JSONL to stdout. Data flows
-# through pipes without intermediate disk persistence. SQLite is the
-# durable coordination point — the summarize stage upserts summaries as
-# it processes, so Ctrl-C preserves all completed work.
-#
-#   produce:    walk files, compute SHAs, diff against index, emit work items
-#   summarize:  N workers read from shared stdin (natural distribution),
-#               call summary agent, upsert to SQLite, write {id, text} to
-#               stdout (flock-serialized for atomicity)
-#   embed:      Elixir pool (Task.Supervisor.async_stream_nolink), reads
-#               {id, text} JSONL, writes {id, embedding} JSONL
-#   consume:    UPDATE entries SET embedding=... for each result
-#
-# Orphan removal runs as a pre-pass before the pipeline starts.
+# Each stage is a standalone script reading JSONL from stdin and writing
+# JSONL to stdout. This makes each piece independently runnable and
+# testable.
 #
 # Examples:
 #   scratch index                  # index current project (detected from cwd)
@@ -53,20 +45,17 @@ SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
   source "$SCRIPTDIR/../lib/project.sh"
   source "$SCRIPTDIR/../lib/index.sh"
   source "$SCRIPTDIR/../lib/embed.sh"
-  source "$SCRIPTDIR/../lib/agent.sh"
   source "$SCRIPTDIR/../lib/tui.sh"
 }
 
 has-min-bash-version 5
-has-commands shasum jq flock
 
 SCRATCH_HOME="$(cd "$SCRIPTDIR/.." && pwd)"
 export SCRATCH_HOME
 
-# Clean up the entire process group on interrupt so no workers, embed
-# pool, or curl processes outlive the pipeline.
+# Clean up the entire process group on interrupt
 _index_cleanup() {
-  trap '' INT TERM # prevent re-entry
+  trap '' INT TERM
   kill 0 2> /dev/null
   wait 2> /dev/null
 }
@@ -77,201 +66,6 @@ cmd:define "index" "$_DESC"
 cmd:optional-arg "--project" "-p" "Project name (default: detect from cwd)" "string" ""
 cmd:parse "$@"
 
-#-------------------------------------------------------------------------------
-# Pipeline stages
-#-------------------------------------------------------------------------------
-
-# Produce: walk project files, compute SHAs, diff against index, emit
-# JSONL for files needing work. Also removes orphaned entries.
-#
-# Output JSONL: {"id":"<relpath>","sha":"<hex>","file":"<abspath>"}
-_index_produce() {
-  local project="$1"
-  local root="$2"
-  local is_git="$3"
-  local exclude="$4"
-
-  # Load existing index
-  declare -A idx_sha=([_sentinel_]=1)
-  unset 'idx_sha[_sentinel_]'
-  local ident sha
-  while IFS=$'\t' read -r ident sha; do
-    [[ -n "$ident" ]] || continue
-    idx_sha["$ident"]="$sha"
-  done < <(index:list "$project" file)
-
-  # Walk filesystem, diff, and emit
-  declare -A fs_seen=([_sentinel_]=1)
-  unset 'fs_seen[_sentinel_]'
-  local emit_count=0 skip_count=0
-
-  while IFS= read -r ident; do
-    [[ -n "$ident" ]] || continue
-    fs_seen["$ident"]=1
-
-    local file_path="${root}/${ident}"
-    [[ -f "$file_path" ]] || continue
-
-    local file_sha
-    file_sha="$(shasum -a 256 "$file_path" | cut -d' ' -f1)"
-
-    if [[ -z "${idx_sha[$ident]:-}" ]]; then
-      # New file
-      jq -c -n --arg id "$ident" --arg sha "$file_sha" --arg file "$file_path" \
-        '{id: $id, sha: $sha, file: $file}'
-      emit_count=$((emit_count + 1))
-    elif [[ "${idx_sha[$ident]}" != "$file_sha" ]]; then
-      # Changed file
-      jq -c -n --arg id "$ident" --arg sha "$file_sha" --arg file "$file_path" \
-        '{id: $id, sha: $sha, file: $file}'
-      emit_count=$((emit_count + 1))
-    else
-      skip_count=$((skip_count + 1))
-    fi
-  done < <(_index_walk_files "$root" "$is_git" "$exclude")
-
-  # Remove orphaned entries
-  local orphan_count=0
-  for ident in "${!idx_sha[@]}"; do
-    if [[ -z "${fs_seen[$ident]:-}" ]]; then
-      index:remove "$project" file "$ident"
-      orphan_count=$((orphan_count + 1))
-    fi
-  done
-
-  tui:info "index" \
-    to_process "$emit_count" \
-    orphans_removed "$orphan_count" \
-    current "$skip_count"
-}
-
-# Walk project files, respecting gitignore and exclude patterns.
-_index_walk_files() {
-  local root="$1"
-  local is_git="$2"
-  local exclude="$3"
-
-  if [[ "$is_git" == "true" ]]; then
-    git -C "$root" ls-files --cached --others --exclude-standard
-  else
-    local -a find_args=("$root" -type f)
-
-    local pattern
-    while IFS= read -r pattern; do
-      [[ -n "$pattern" ]] || continue
-      find_args+=(-not -path "$root/$pattern")
-    done <<< "$exclude"
-
-    find "${find_args[@]}" -print0 \
-      | while IFS= read -r -d '' path; do
-        printf '%s\n' "${path#"$root"/}"
-      done
-  fi
-}
-
-# Summarize pool: N workers read JSONL from stdin, call the summary agent,
-# upsert to SQLite (with embedding=NULL), and write {id, text} to stdout
-# for the embed stage. Workers serialize stdout writes with flock.
-#
-# Input JSONL:  {"id":"<relpath>","sha":"<hex>","file":"<abspath>"}
-# Output JSONL: {"id":"<relpath>","text":"<summary for embedding>"}
-_index_summarize_pool() {
-  local workers="$1"
-  local project="$2"
-  local lockfile="$3"
-
-  local pids=()
-  local i
-  for ((i = 0; i < workers; i++)); do
-    _index_summarize_worker "$project" "$lockfile" &
-    pids+=($!)
-  done
-
-  wait "${pids[@]}" 2> /dev/null || true
-}
-
-# Single summarize worker. Reads JSONL lines from stdin (shared across all
-# workers — each read(2) grabs the next available line). For each line:
-# 1. Run the summary agent against the file content
-# 2. Upsert the summary into SQLite (embedding=NULL)
-# 3. Write {id, text} to stdout under flock for the embed stage
-#
-# On failure, upsert is skipped and nothing is written to stdout. The file
-# will show up as "missing" in the index and get retried on the next run.
-# shellcheck disable=SC2329
-_index_summarize_worker() {
-  local project="$1"
-  local lockfile="$2"
-
-  local line
-  while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
-
-    local ident sha file_path
-    ident="$(printf '%s' "$line" | jq -r '.id')"
-    sha="$(printf '%s' "$line" | jq -r '.sha')"
-    file_path="$(printf '%s' "$line" | jq -r '.file')"
-
-    # Run the summary agent
-    local summary
-    if ! summary="$(cat "$file_path" | agent:run summary 2> /dev/null)"; then
-      tui:warn "summarize failed" file "$ident"
-      continue
-    fi
-
-    # Upsert to SQLite (durable — survives Ctrl-C)
-    index:record "$project" file "$ident" "$sha" "$summary"
-
-    # Extract embeddable text from the structured summary
-    local embed_text
-    embed_text="$(printf '%s' "$summary" | jq -r '
-      if (try fromjson | .summary) then
-        (fromjson | .summary + " " + (.questions // [] | join(" ")))
-      else
-        .
-      end
-    ')"
-
-    # Write to stdout under flock so multi-worker writes don't interleave
-    local out_json
-    out_json="$(jq -c -n --arg id "$ident" --arg text "$embed_text" \
-      '{id: $id, text: $text}')"
-    flock 1 printf '%s\n' "$out_json"
-  done
-}
-export -f _index_summarize_worker
-
-# Consume: read {id, embedding} JSONL from the embed pool and update
-# the entries table.
-_index_embed_consume() {
-  local project="$1"
-  local db
-  db="$(index:db-path "$project")"
-
-  local line
-  while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
-
-    local entry_id embed_json
-    entry_id="$(printf '%s' "$line" | jq -r '.id')"
-    embed_json="$(printf '%s' "$line" | jq -c '.embedding')"
-
-    if [[ -n "$entry_id" && -n "$embed_json" && "$embed_json" != "null" ]]; then
-      local q_id q_embedding
-      q_id="$(db:quote "$entry_id")"
-      q_embedding="$(db:quote "$embed_json")"
-      db:exec "$db" "
-        UPDATE entries
-        SET embedding = $q_embedding, updated_at = datetime('now')
-        WHERE type = 'file' AND identifier = $q_id;
-      "
-    fi
-  done
-}
-
-#-------------------------------------------------------------------------------
-# Main
-#-------------------------------------------------------------------------------
 main() {
   local project_name
   project:resolve-name project_name "$(cmd:get --project)"
@@ -282,29 +76,20 @@ main() {
   tui:info "indexing" project "$project_name" root "$proj_root"
   index:ensure "$project_name"
 
-  local start_time
-  start_time="$(date +%s)"
-
   local summary_workers="${SCRATCH_INDEX_PARALLEL_JOBS:-4}"
   local embed_workers="${SCRATCH_INDEX_EMBED_WORKERS:-8}"
 
   tui:info "pipeline" summary_workers "$summary_workers" embed_workers "$embed_workers"
 
-  # Lock file for flock-serialized stdout writes from summarize workers
-  local lockfile="/tmp/scratch-index-lock.$$"
-  touch "$lockfile"
+  local start_time
+  start_time="$(date +%s)"
 
-  # Streaming pipeline: produce → summarize → embed → consume
-  # Debug taps: tee each stage to /tmp/scratch-index-*.log
-  _index_produce "$project_name" "$proj_root" "$proj_is_git" "$proj_exclude" \
-    | tee /tmp/scratch-index-1-produce.log \
-    | _index_summarize_pool "$summary_workers" "$project_name" "$lockfile" \
-    | tee /tmp/scratch-index-2-summarize.log \
+  local helpers="$SCRIPTDIR/../helpers/index"
+
+  "$helpers/produce" "$project_name" "$proj_root" "$proj_is_git" "$proj_exclude" \
+    | "$helpers/summarize" "$summary_workers" "$project_name" \
     | embed:pool "$embed_workers" \
-    | tee /tmp/scratch-index-3-embed.log \
-    | _index_embed_consume "$project_name"
-
-  rm -f "$lockfile"
+    | "$helpers/consume" "$project_name"
 
   local end_time elapsed
   end_time="$(date +%s)"

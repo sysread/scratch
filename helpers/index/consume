@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# index/consume - read embed results and update the index
+#
+# Reads JSONL from stdin (embed pool output) and updates the entries
+# table with the embedding vectors.
+#
+# Args: PROJECT_NAME
+# stdin: JSONL {"id":"<relpath>","embedding":[...]}
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# SCRATCH_HOME must be set by the caller
+# shellcheck source-path=SCRIPTDIR/../../lib
+# shellcheck disable=SC1091
+{
+  source "${SCRATCH_HOME}/lib/base.sh"
+  source "${SCRATCH_HOME}/lib/db.sh"
+  source "${SCRATCH_HOME}/lib/index.sh"
+}
+
+has-commands jq
+
+project="$1"
+db="$(index:db-path "$project")"
+
+while IFS= read -r line; do
+  [[ -n "$line" ]] || continue
+
+  entry_id="$(printf '%s' "$line" | jq -r '.id')"
+  embed_json="$(printf '%s' "$line" | jq -c '.embedding')"
+
+  if [[ -n "$entry_id" && -n "$embed_json" && "$embed_json" != "null" ]]; then
+    q_id="$(db:quote "$entry_id")"
+    q_embedding="$(db:quote "$embed_json")"
+    db:exec "$db" "
+      UPDATE entries
+      SET embedding = $q_embedding, updated_at = datetime('now')
+      WHERE type = 'file' AND identifier = $q_id;
+    "
+  fi
+done
