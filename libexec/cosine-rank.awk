@@ -1,54 +1,42 @@
 #!/usr/bin/env awk -f
 
-#-------------------------------------------------------------------------------
-# Cosine similarity ranking
+# Line-oriented cosine similarity ranking.
 #
-# Reads a query embedding and a set of candidate entries, computes cosine
-# similarity between the query and each candidate, and outputs the top K
-# results sorted by descending score.
-#
-# Input format:
-#   - First line: the query embedding as a JSON array of floats
-#   - Remaining lines: tab-delimited <identifier>\t<embedding JSON array>
-#
-# Output format:
-#   Tab-delimited lines: <score>\t<identifier>
-#   Score is rounded to 3 decimal places. Sorted descending by score.
-#   Only the top K results are printed (K from -v top_k=N, default 10).
+# Needle embedding passed via -v needle="[1.0,2.0,...]" so it's parsed
+# once at startup. Each input line is tab-delimited: identifier<TAB>embedding.
+# Emits score<TAB>identifier immediately per line (streaming), then sorts
+# at the end for top_k.
 #
 # Usage:
-#   { echo "$query_json"; db:query "$db" "SELECT ..."; } \
-#     | awk -v top_k=10 -f libexec/cosine-rank.awk
-#-------------------------------------------------------------------------------
+#   db:query ... | awk -v needle="$query_json" -v top_k=10 -f cosine-rank-v2.awk
 
 BEGIN {
   FS = "\t"
   if (top_k == "") top_k = 10
+  ndim = parse_json_array(needle, q)
   result_count = 0
 }
 
-# First line is the query embedding
-NR == 1 {
-  query_dim = parse_json_array($0, query)
-  next
-}
-
-# Remaining lines: identifier<tab>embedding
 {
-  identifier = $1
-  dim = parse_json_array($2, candidate)
+  dim = parse_json_array($2, hay)
+  if (dim != ndim) next
 
-  if (dim != query_dim) next
-
-  score = cosine_similarity(query, candidate, dim)
+  dot = 0; norm_a = 0; norm_b = 0
+  for (i = 1; i <= dim; i++) {
+    dot    += q[i] * hay[i]
+    norm_a += q[i] * q[i]
+    norm_b += hay[i] * hay[i]
+  }
+  denom = sqrt(norm_a) * sqrt(norm_b)
+  score = (denom > 0) ? dot / denom : 0
 
   result_count++
   result_scores[result_count] = score
-  result_ids[result_count] = identifier
+  result_ids[result_count] = $1
 }
 
 END {
-  # Insertion sort by descending score (fine for expected result sizes)
+  # Insertion sort descending
   for (i = 2; i <= result_count; i++) {
     s = result_scores[i]
     id = result_ids[i]
@@ -68,7 +56,6 @@ END {
   }
 }
 
-# Parse a JSON array of floats into arr[1..N], return the count.
 function parse_json_array(s, arr,    clean, tmp, count, i) {
   clean = s
   gsub(/[\[\]\r\n]/, "", clean)
@@ -76,16 +63,4 @@ function parse_json_array(s, arr,    clean, tmp, count, i) {
   for (i = 1; i <= count; i++)
     arr[i] = tmp[i] + 0
   return count
-}
-
-# Cosine similarity between two vectors of length n.
-function cosine_similarity(a, b, n,    dot, norm_a, norm_b, denom, i) {
-  dot = 0; norm_a = 0; norm_b = 0
-  for (i = 1; i <= n; i++) {
-    dot    += a[i] * b[i]
-    norm_a += a[i] * a[i]
-    norm_b += b[i] * b[i]
-  }
-  denom = sqrt(norm_a) * sqrt(norm_b)
-  return (denom > 0) ? dot / denom : 0
 }

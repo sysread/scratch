@@ -82,12 +82,10 @@ search:query() {
   local q_type
   q_type="$(db:quote "$type")"
 
-  # Dump entries and pipe through cosine-rank.awk. The first line is the
-  # query embedding, followed by tab-delimited identifier + embedding rows.
-  {
-    printf '%s\n' "$query_embedding"
-    db:query "$db" "SELECT identifier, embedding FROM entries WHERE type = $q_type AND embedding IS NOT NULL;"
-  } | awk -v top_k="$top_k" -f "$_SEARCH_COSINE_RANK"
+  # Pipe entries through cosine-rank.awk with the needle in argv so it's
+  # parsed once at startup, not read from the stream.
+  db:query "$db" "SELECT identifier, embedding FROM entries WHERE type = $q_type AND embedding IS NOT NULL;" \
+    | awk -v needle="$query_embedding" -v top_k="$top_k" -f "$_SEARCH_COSINE_RANK"
 }
 
 export -f search:query
