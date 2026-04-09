@@ -35,11 +35,16 @@ _SEARCH_COSINE_RANK="$_SEARCH_SCRIPTDIR/../libexec/cosine-rank.awk"
 search:embed() {
   local text="$1"
 
-  local output
-  if ! output="$(embed:text "$text" 2> /dev/null)"; then
-    die "search:embed: embedding failed"
+  local output err
+  err="$(mktemp -t scratch-embed-err.XXXXXX)"
+  if ! output="$(embed:text "$text" 2> "$err")"; then
+    local detail
+    detail="$(cat "$err")"
+    rm -f "$err"
+    die "search:embed: embedding failed: $detail"
     return 1
   fi
+  rm -f "$err"
 
   printf '%s' "$output"
 }
