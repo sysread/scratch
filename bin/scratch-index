@@ -113,8 +113,11 @@ main() {
   # Phase 1: diff + orphan removal
   # ------------------------------------------------------------------
 
-  # Load existing index into associative arrays
-  declare -A idx_sha
+  # Load existing index into associative arrays. Seed with a dummy key
+  # then remove it — bash's set -u treats ${#arr[@]} and ${!arr[@]} as
+  # unbound on a truly empty associative array.
+  declare -A idx_sha=([_sentinel_]=1)
+  unset 'idx_sha[_sentinel_]'
   local line ident sha
   while IFS=$'\t' read -r ident sha; do
     [[ -n "$ident" ]] || continue
@@ -123,7 +126,8 @@ main() {
 
   # Walk filesystem and classify
   local -a files_to_index=()
-  declare -A fs_seen
+  declare -A fs_seen=([_sentinel_]=1)
+  unset 'fs_seen[_sentinel_]'
   while IFS= read -r ident; do
     [[ -n "$ident" ]] || continue
     fs_seen["$ident"]=1
