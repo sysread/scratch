@@ -82,13 +82,13 @@ main() {
   local proj_root proj_is_git proj_exclude
   project:load "$project_name" proj_root proj_is_git proj_exclude
 
-  tui:info "indexing" project "$project_name" root "$proj_root"
+  tui:info "indexing" "project=$project_name" "root=$proj_root"
   index:ensure "$project_name"
 
   local summary_workers="${SCRATCH_INDEX_PARALLEL_JOBS:-8}"
   local embed_workers="${SCRATCH_INDEX_EMBED_WORKERS:-4}"
 
-  tui:info "pipeline" summary_workers "$summary_workers" embed_workers "$embed_workers"
+  tui:info "pipeline" "summary_workers=$summary_workers" "embed_workers=$embed_workers"
 
   local start_time
   start_time="$(date +%s)"
@@ -106,7 +106,7 @@ main() {
 
   index:set-meta "$project_name" "last_indexed_at" "$(date -u +%Y-%m-%dT%H:%M:%S)"
 
-  tui:info "index complete" elapsed "${elapsed}s"
+  tui:info "index complete" "elapsed=${elapsed}s"
 }
 
 main

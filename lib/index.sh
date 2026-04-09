@@ -107,6 +107,76 @@ index:record() {
 export -f index:record
 
 #-------------------------------------------------------------------------------
+# index:update-summary PROJECT_NAME TYPE IDENTIFIER SUMMARY
+#
+# Update only the summary field. Leaves content_sha and embedding
+# untouched. Used by the summarize stage so that:
+#   - The SHA stays stale until the embedding stage confirms success
+#   - Existing embeddings are preserved if re-summarization occurs
+#
+# If no entry exists for (type, identifier), inserts with a placeholder
+# SHA and NULL embedding.
+#-------------------------------------------------------------------------------
+index:update-summary() {
+  local name="$1"
+  local type="$2"
+  local identifier="$3"
+  local summary="$4"
+
+  local db
+  db="$(index:db-path "$name")"
+
+  local q_type q_id q_summary
+  q_type="$(db:quote "$type")"
+  q_id="$(db:quote "$identifier")"
+  q_summary="$(db:quote "$summary")"
+
+  db:exec "$db" "
+    INSERT INTO entries (type, identifier, content_sha, summary)
+    VALUES ($q_type, $q_id, '_pending_', $q_summary)
+    ON CONFLICT(type, identifier) DO UPDATE SET
+      summary = excluded.summary,
+      updated_at = datetime('now');
+  "
+}
+
+export -f index:update-summary
+
+#-------------------------------------------------------------------------------
+# index:finalize PROJECT_NAME TYPE IDENTIFIER CONTENT_SHA EMBEDDING_JSON
+#
+# Update the SHA and embedding together. Called by the consume stage
+# after embedding succeeds. This is the commit point — only after this
+# call does produce consider the file "current" (SHA matches).
+#-------------------------------------------------------------------------------
+index:finalize() {
+  local name="$1"
+  local type="$2"
+  local identifier="$3"
+  local content_sha="$4"
+  local embedding="$5"
+
+  local db
+  db="$(index:db-path "$name")"
+
+  local q_type q_id q_sha q_embedding
+  q_type="$(db:quote "$type")"
+  q_id="$(db:quote "$identifier")"
+  q_sha="$(db:quote "$content_sha")"
+  q_embedding="$(db:quote "$embedding")"
+
+  db:exec "$db" "
+    UPDATE entries
+    SET content_sha = $q_sha,
+        embedding = $q_embedding,
+        updated_at = datetime('now')
+    WHERE type = $q_type AND identifier = $q_id;
+  "
+}
+
+export -f index:finalize
+
+#-------------------------------------------------------------------------------
 # index:lookup PROJECT_NAME TYPE IDENTIFIER
 #
 # Print the entry as a JSON object, or return 1 if not found.

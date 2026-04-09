@@ -102,7 +102,4 @@ for ident in "${!idx_sha[@]}"; do
   fi
 done
 
-tui:info "index" \
-  to_process "$emit_count" \
-  orphans_removed "$orphan_count" \
-  current "$skip_count"
+tui:info "index diff" "to_process=${emit_count}" "orphans_removed=${orphan_count}" "current=${skip_count}"

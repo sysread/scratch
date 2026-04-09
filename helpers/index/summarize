@@ -46,28 +46,32 @@ _summarize_one() {
   local sha="$2"
   local file_path="$3"
 
-  tui:debug-if SCRATCH_DEBUG_INDEX "summarize" status "starting" file "$ident"
+  tui:debug-if SCRATCH_DEBUG_INDEX "summarize starting" "file=$ident"
 
   # Skip empty files
   if [[ ! -s "$file_path" ]]; then
     local empty_summary='{"summary":"Empty, zero-length file.","questions":[]}'
     index:record "$project" file "$ident" "$sha" "$empty_summary"
-    tui:debug-if SCRATCH_DEBUG_INDEX "summarize" status "skipped" file "$ident" reason "empty / zero-length file"
+    tui:debug-if SCRATCH_DEBUG_INDEX "summarize skipped" "file=$ident" "reason=empty file"
     printf 'skip\n' >>"$tallyfile"
     return 0
   fi
 
   # Run the summary agent with stdin redirected from the file so it
   # can't consume lines from the pipeline stdin.
+  #
+  # On failure, the existing index entry (if any) is preserved — we
+  # only upsert on success. The next `scratch index` run will see the
+  # SHA mismatch and retry this file. This makes indexing idempotent:
+  # partial failures never corrupt previously-good data.
   local summary=""
   if ! summary="$(agent:run summary <"$file_path" 2>&1)"; then
-    tui:warn "summarize" status "failed" file "$ident" "error" "$summary"
+    tui:warn "summarize failed" "file=$ident" "error=$summary"
     printf 'fail\n' >>"$tallyfile"
     return 1
   fi
 
-  # Upsert to SQLite (durable — survives Ctrl-C)
-  index:record "$project" file "$ident" "$sha" "$summary"
+  index:update-summary "$project" file "$ident" "$summary"
 
   # Extract embeddable text from the structured summary
   local embed_text
@@ -79,14 +83,16 @@ _summarize_one() {
     end
   ')"
 
-  # Write to stdout under flock so multi-worker writes don't interleave
+  # Write to stdout under flock so multi-worker writes don't interleave.
+  # Include sha so the consume stage can finalize the entry (write the
+  # SHA only after embedding succeeds).
   local out_json
-  out_json="$(jq -c -n --arg id "$ident" --arg text "$embed_text" \
-    '{id: $id, text: $text}')"
+  out_json="$(jq -c -n --arg id "$ident" --arg sha "$sha" --arg text "$embed_text" \
+    '{id: $id, sha: $sha, text: $text}')"
   flock "$lockfile" printf '%s\n' "$out_json"
 
   printf 'ok\n' >>"$tallyfile"
-  tui:info "summarize" status "done" file "$ident"
+  tui:info "summarized" "file=$ident"
 }
 
 pids=()
@@ -123,8 +129,10 @@ for pid in "${pids[@]}"; do
   wait "$pid" || true
 done
 
-# Report tally
-ok_count="$(grep -c '^ok$' "$tallyfile" 2>/dev/null || echo 0)"
-fail_count="$(grep -c '^fail$' "$tallyfile" 2>/dev/null || echo 0)"
-skip_count="$(grep -c '^skip$' "$tallyfile" 2>/dev/null || echo 0)"
-tui:info "summarize" status "complete" ok "$ok_count" failed "$fail_count" skipped "$skip_count"
+# Report tally. grep -c prints "0" AND returns exit code 1 on no
+# matches, so || echo 0 would produce "0\n0". Use || true instead
+# and let grep's "0" output stand.
+ok_count="$(grep -c '^ok$' "$tallyfile" 2>/dev/null || true)"
+fail_count="$(grep -c '^fail$' "$tallyfile" 2>/dev/null || true)"
+skip_count="$(grep -c '^skip$' "$tallyfile" 2>/dev/null || true)"
+tui:info "summarize complete" "ok=${ok_count}" "failed=${fail_count}" "skipped=${skip_count}"

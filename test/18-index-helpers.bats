@@ -152,26 +152,31 @@ setup() {
 # helpers/index/consume
 # ---------------------------------------------------------------------------
 
-@test "consume updates entries with embeddings" {
-  # Pre-seed an entry without an embedding
-  index:record myproject file "greet.pl" "abc123" "a perl greeter"
+@test "consume finalizes entries with SHA and embedding" {
+  # Pre-seed an entry with a pending SHA
+  index:update-summary myproject file "greet.pl" "a perl greeter"
 
-  # Feed it an embedding result
-  printf '{"id":"greet.pl","embedding":[1.0,2.0,3.0]}\n' \
+  # Feed it an embedding result with SHA
+  printf '{"id":"greet.pl","sha":"abc123","embedding":[1.0,2.0,3.0]}\n' \
     | "$CONSUME" myproject
 
-  # Verify the embedding was stored
   local db
   db="$(index:db-path myproject)"
+
+  # Embedding stored
   run db:query "$db" "SELECT embedding FROM entries WHERE identifier = 'greet.pl';"
   is "$output" "[1.0,2.0,3.0]"
+
+  # SHA updated from _pending_ to real value
+  run db:query "$db" "SELECT content_sha FROM entries WHERE identifier = 'greet.pl';"
+  is "$output" "abc123"
 }
 
 @test "consume handles multiple entries" {
-  index:record myproject file "a.pl" "aaa" "file a"
-  index:record myproject file "b.awk" "bbb" "file b"
+  index:update-summary myproject file "a.pl" "file a"
+  index:update-summary myproject file "b.awk" "file b"
 
-  printf '{"id":"a.pl","embedding":[1.0]}\n{"id":"b.awk","embedding":[2.0]}\n' \
+  printf '{"id":"a.pl","sha":"aaa","embedding":[1.0]}\n{"id":"b.awk","sha":"bbb","embedding":[2.0]}\n' \
     | "$CONSUME" myproject
 
   local db
@@ -187,7 +192,7 @@ setup() {
 @test "consume skips entries with null embedding" {
   index:record myproject file "greet.pl" "abc" "summary"
 
-  printf '{"id":"greet.pl","embedding":null}\n' \
+  printf '{"id":"greet.pl","sha":"abc","embedding":null}\n' \
     | "$CONSUME" myproject
 
   local db

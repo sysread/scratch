@@ -247,6 +247,63 @@ b.sh	bbb"
 # index:set-meta / index:get-meta
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# index:update-summary / index:finalize
+# ---------------------------------------------------------------------------
+
+@test "index:update-summary upserts summary without changing SHA or embedding" {
+  index:ensure "$PROJECT"
+  index:record "$PROJECT" file "a.sh" "original_sha" "old summary" "[1.0]"
+
+  index:update-summary "$PROJECT" file "a.sh" "new summary"
+
+  local db
+  db="$(index:db-path "$PROJECT")"
+
+  # Summary updated
+  run db:query "$db" "SELECT summary FROM entries WHERE identifier = 'a.sh';"
+  is "$output" "new summary"
+
+  # SHA preserved
+  run db:query "$db" "SELECT content_sha FROM entries WHERE identifier = 'a.sh';"
+  is "$output" "original_sha"
+
+  # Embedding preserved
+  run db:query "$db" "SELECT embedding FROM entries WHERE identifier = 'a.sh';"
+  is "$output" "[1.0]"
+}
+
+@test "index:update-summary creates entry with placeholder SHA if new" {
+  index:ensure "$PROJECT"
+  index:update-summary "$PROJECT" file "new.sh" "a summary"
+
+  local db
+  db="$(index:db-path "$PROJECT")"
+
+  run db:query "$db" "SELECT content_sha FROM entries WHERE identifier = 'new.sh';"
+  is "$output" "_pending_"
+}
+
+@test "index:finalize writes SHA and embedding together" {
+  index:ensure "$PROJECT"
+  index:update-summary "$PROJECT" file "a.sh" "summary text"
+
+  index:finalize "$PROJECT" file "a.sh" "real_sha_256" "[1.0,2.0,3.0]"
+
+  local db
+  db="$(index:db-path "$PROJECT")"
+
+  run db:query "$db" "SELECT content_sha FROM entries WHERE identifier = 'a.sh';"
+  is "$output" "real_sha_256"
+
+  run db:query "$db" "SELECT embedding FROM entries WHERE identifier = 'a.sh';"
+  is "$output" "[1.0,2.0,3.0]"
+}
+
+# ---------------------------------------------------------------------------
+# index:set-meta / index:get-meta
+# ---------------------------------------------------------------------------
+
 @test "index:set-meta and index:get-meta round-trip" {
   index:ensure "$PROJECT"
   index:set-meta "$PROJECT" "last_indexed_at" "2026-04-09T12:00:00"

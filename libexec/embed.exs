@@ -128,9 +128,14 @@ case {opts[:pool], args} do
     Task.Supervisor.async_stream_nolink(sup, input,
       fn line ->
         case Jason.decode(line) do
-          {:ok, %{"id" => id, "text" => text}} when is_binary(text) and text != "" ->
+          {:ok, %{"id" => _id, "text" => text} = input} when is_binary(text) and text != "" ->
             embedding = Embed.embed(serving, text)
-            Jason.encode!(%{id: id, embedding: embedding})
+            # Pass through all input fields (id, sha, etc.) and add embedding.
+            # Drop "text" to keep the output compact.
+            input
+            |> Map.delete("text")
+            |> Map.put("embedding", embedding)
+            |> Jason.encode!()
 
           {:ok, %{"id" => id}} ->
             Jason.encode!(%{id: id, error: "missing or empty text field"})

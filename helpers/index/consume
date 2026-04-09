@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 
 #-------------------------------------------------------------------------------
-# index/consume - read embed results and update the index
+# index/consume - finalize index entries with embeddings
 #
-# Reads JSONL from stdin (embed pool output) and updates the entries
-# table with the embedding vectors.
+# Reads JSONL from stdin (embed pool output) and finalizes each entry
+# by writing both the embedding AND the content SHA. The SHA is only
+# committed here — not in the summarize stage — so that a failed
+# embedding leaves the SHA stale, causing produce to re-emit the file
+# on the next run. This makes `scratch index` idempotent: partial
+# failures never leave an entry in a "SHA current but embedding missing"
+# state.
 #
 # Args: PROJECT_NAME
-# stdin: JSONL {"id":"<relpath>","embedding":[...]}
+# stdin: JSONL {"id":"<relpath>","sha":"<hex>","embedding":[...]}
 #-------------------------------------------------------------------------------
 
 set -euo pipefail
@@ -17,34 +22,25 @@ set -euo pipefail
 # shellcheck disable=SC1091
 {
   source "${SCRATCH_HOME}/lib/base.sh"
-  source "${SCRATCH_HOME}/lib/db.sh"
   source "${SCRATCH_HOME}/lib/index.sh"
+  source "${SCRATCH_HOME}/lib/tui.sh"
 }
 
 has-commands jq
 
-# shellcheck disable=SC1091
-source "${SCRATCH_HOME}/lib/tui.sh"
-
 project="$1"
-db="$(index:db-path "$project")"
 
 while IFS= read -r line; do
   [[ -n "$line" ]] || continue
 
   entry_id="$(printf '%s' "$line" | jq -r '.id')"
+  entry_sha="$(printf '%s' "$line" | jq -r '.sha // empty')"
   embed_json="$(printf '%s' "$line" | jq -c '.embedding')"
 
-  tui:debug-if SCRATCH_DEBUG_INDEX "embeddings" status "received" file "$entry_id"
+  tui:debug-if SCRATCH_DEBUG_INDEX "embedding received" "file=$entry_id"
 
-  if [[ -n "$entry_id" && -n "$embed_json" && "$embed_json" != "null" ]]; then
-    q_id="$(db:quote "$entry_id")"
-    q_embedding="$(db:quote "$embed_json")"
-    db:exec "$db" "
-      UPDATE entries
-      SET embedding = $q_embedding, updated_at = datetime('now')
-      WHERE type = 'file' AND identifier = $q_id;
-    "
-    tui:info "embeddings" status "updated" file "$entry_id"
+  if [[ -n "$entry_id" && -n "$entry_sha" && -n "$embed_json" && "$embed_json" != "null" ]]; then
+    index:finalize "$project" file "$entry_id" "$entry_sha" "$embed_json"
+    tui:info "embedded" "file=$entry_id"
   fi
 done
