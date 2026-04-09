@@ -54,6 +54,10 @@ SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
 has-min-bash-version 5
 has-commands shasum jq
 
+# Export SCRATCH_HOME so worker subshells and agent:run can find the repo
+SCRATCH_HOME="$(cd "$SCRIPTDIR/.." && pwd)"
+export SCRATCH_HOME
+
 cmd:define "index" "$_DESC"
 cmd:optional-arg "--project" "-p" "Project name (default: detect from cwd)" "string" ""
 cmd:parse "$@"
@@ -199,7 +203,7 @@ main() {
     printf '%s' "$ident" > "$idfile"
     shasum -a 256 "$file_path" | cut -d' ' -f1 > "$shafile"
 
-    if cat "$file_path" | SCRATCH_HOME="${SCRATCH_HOME}" agent:run summary > "$outfile" 2>/dev/null; then
+    if cat "$file_path" | agent:run summary > "$outfile" 2>/dev/null; then
       printf 'ok' > "${SCRATCH_INDEX_WORKDIR}/${i}.status"
     else
       printf 'fail' > "${SCRATCH_INDEX_WORKDIR}/${i}.status"
