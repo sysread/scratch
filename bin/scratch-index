@@ -85,8 +85,8 @@ main() {
   tui:info "indexing" project "$project_name" root "$proj_root"
   index:ensure "$project_name"
 
-  local summary_workers="${SCRATCH_INDEX_PARALLEL_JOBS:-4}"
-  local embed_workers="${SCRATCH_INDEX_EMBED_WORKERS:-8}"
+  local summary_workers="${SCRATCH_INDEX_PARALLEL_JOBS:-8}"
+  local embed_workers="${SCRATCH_INDEX_EMBED_WORKERS:-4}"
 
   tui:info "pipeline" summary_workers "$summary_workers" embed_workers "$embed_workers"
 

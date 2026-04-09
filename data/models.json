@@ -18,16 +18,17 @@
     },
     "fast": {
       "_comment": "Reasoning disabled. Use for high-volume or latency-sensitive operations where some quality loss is acceptable.",
-      "model": "arcee-trinity-large-thinking",
+      "model": "grok-41-fast",
       "params": {
         "reasoning_effort": "none"
       }
     },
     "long-context": {
       "_comment": "1M token context window. The default profile for the accumulator and any other feature that processes oversized inputs. chars_per_token is the per-profile float used by token-budgeting code (lib/accumulator.sh) to estimate request sizes; see data/models.md for the full schema.",
-      "model": "qwen-3-6-plus",
+      "model": "grok-41-fast",
       "chars_per_token": 4.0,
       "params": {
+        "reasoning_effort": "none",
         "temperature": 0.3
       }
     }
