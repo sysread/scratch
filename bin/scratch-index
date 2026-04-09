@@ -119,14 +119,14 @@ _index_produce() {
       # New file
       jq -c -n --arg id "$ident" --arg sha "$file_sha" --arg file "$file_path" \
         '{id: $id, sha: $sha, file: $file}'
-      ((emit_count++))
+      emit_count=$((emit_count + 1))
     elif [[ "${idx_sha[$ident]}" != "$file_sha" ]]; then
       # Changed file
       jq -c -n --arg id "$ident" --arg sha "$file_sha" --arg file "$file_path" \
         '{id: $id, sha: $sha, file: $file}'
-      ((emit_count++))
+      emit_count=$((emit_count + 1))
     else
-      ((skip_count++))
+      skip_count=$((skip_count + 1))
     fi
   done < <(_index_walk_files "$root" "$is_git" "$exclude")
 
@@ -135,7 +135,7 @@ _index_produce() {
   for ident in "${!idx_sha[@]}"; do
     if [[ -z "${fs_seen[$ident]:-}" ]]; then
       index:remove "$project" file "$ident"
-      ((orphan_count++))
+      orphan_count=$((orphan_count + 1))
     fi
   done
 
