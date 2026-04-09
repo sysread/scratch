@@ -34,8 +34,8 @@ has-commands jq git
 #-------------------------------------------------------------------------------
 # Global config root for all scratch data
 #-------------------------------------------------------------------------------
-SCRATCH_CONFIG_DIR="${HOME}/.config/scratch"
-SCRATCH_PROJECTS_DIR="${SCRATCH_CONFIG_DIR}/projects"
+SCRATCH_CONFIG_DIR="${SCRATCH_CONFIG_DIR:-${HOME}/.config/scratch}"
+SCRATCH_PROJECTS_DIR="${SCRATCH_PROJECTS_DIR:-${SCRATCH_CONFIG_DIR}/projects}"
 
 export SCRATCH_CONFIG_DIR SCRATCH_PROJECTS_DIR
 
