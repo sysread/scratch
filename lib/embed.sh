@@ -32,13 +32,41 @@ _EMBED_SCRIPT="$_EMBED_SCRIPTDIR/../libexec/embed.exs"
 _EMBED_CXX="${CXX:-c++} -Wno-error=missing-template-arg-list-after-template-kw"
 
 #-------------------------------------------------------------------------------
+# _embed:_run SCRIPT [ARGS...]
+#
+# Run an elixir script with a clean environment. The `elixir` command is
+# a #!/bin/sh script; on macOS /bin/sh is bash 3.2 in POSIX mode, which
+# chokes on exported bash 5 functions (like cmd:parse with [[ -v ]]).
+# Strip BASH_FUNC_* by running under env -i with only the vars elixir
+# needs. SCRATCH_MODEL is only forwarded when set to avoid overriding
+# embed.exs's default model with an empty string.
+#-------------------------------------------------------------------------------
+_embed:_run() {
+  local -a env_args=(
+    PATH="$PATH"
+    HOME="$HOME"
+    CXX="$_EMBED_CXX"
+    TERM="${TERM:-dumb}"
+  )
+
+  # Only forward SCRATCH_MODEL if the user actually set it
+  if [[ -n "${SCRATCH_MODEL:-}" ]]; then
+    env_args+=(SCRATCH_MODEL="$SCRATCH_MODEL")
+  fi
+
+  env -i "${env_args[@]}" elixir "$@"
+}
+
+export -f '_embed:_run'
+
+#-------------------------------------------------------------------------------
 # embed:file PATH
 #
 # Embed the contents of a file. Prints the embedding as a JSON array of
 # floats on stdout.
 #-------------------------------------------------------------------------------
 embed:file() {
-  CXX="$_EMBED_CXX" elixir "$_EMBED_SCRIPT" "$1"
+  _embed:_run "$_EMBED_SCRIPT" "$1"
 }
 
 export -f embed:file
@@ -50,7 +78,7 @@ export -f embed:file
 # on stdout.
 #-------------------------------------------------------------------------------
 embed:text() {
-  printf '%s' "$1" | CXX="$_EMBED_CXX" elixir "$_EMBED_SCRIPT" -
+  printf '%s' "$1" | _embed:_run "$_EMBED_SCRIPT" -
 }
 
 export -f embed:text
@@ -70,7 +98,7 @@ export -f embed:text
 #-------------------------------------------------------------------------------
 embed:pool() {
   local workers="${1:-4}"
-  CXX="$_EMBED_CXX" elixir "$_EMBED_SCRIPT" -n "$workers"
+  _embed:_run "$_EMBED_SCRIPT" -n "$workers"
 }
 
 export -f embed:pool
