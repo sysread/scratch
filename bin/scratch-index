@@ -53,6 +53,10 @@ has-min-bash-version 5
 SCRATCH_HOME="$(cd "$SCRIPTDIR/.." && pwd)"
 export SCRATCH_HOME
 
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+source "$SCRIPTDIR/../lib/venice.sh"
+
 # Clean up the entire process group on interrupt
 _index_cleanup() {
   trap '' INT TERM
@@ -67,6 +71,11 @@ cmd:optional-arg "--project" "-p" "Project name (default: detect from cwd)" "str
 cmd:parse "$@"
 
 main() {
+  # Fail fast if no API key — the summarize stage calls the Venice API
+  # and a missing key would silently kill every worker, producing an
+  # empty pipeline that exits with SIGPIPE and no explanation.
+  venice:api-key > /dev/null
+
   local project_name
   project:resolve-name project_name "$(cmd:get --project)"
 
