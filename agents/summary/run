@@ -40,7 +40,8 @@ fi
 
 prompt="$(prompt:load summary/accumulate)"
 
-notes="$(accumulate:run-profile long-context "$prompt" "$input")"
+# Cap completion tokens to keep summaries terse and prevent truncation
+notes="$(accumulate:run-profile long-context "$prompt" "$input" '{"extras":{"max_completion_tokens":2048}}')"
 
 # Phase 2: structure the notes into {summary, questions} JSON
 structure_prompt="$(prompt:render summary/structure notes="$notes")"
@@ -76,7 +77,7 @@ schema='{
 merged_extras="$(jq -c -n \
   --argjson e "$extras" \
   --argjson s "$schema" \
-  '$e + {response_format: $s}')"
+  '$e + {response_format: $s, max_completion_tokens: 1024}')"
 
 messages="$(jq -c -n \
   --arg system "$structure_prompt" \

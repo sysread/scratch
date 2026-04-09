@@ -71,8 +71,8 @@ export -f _intuition_debug
 # reasoning depth.
 INTUITION_MODEL="$(model:profile:model fast)"
 INTUITION_EXTRAS="$(
-  model:profile:extras fast \
-    | jq -c '. + {venice_parameters: ((.venice_parameters // {}) + {disable_thinking: true})}'
+  model:profile:extras fast |
+    jq -c '. + {venice_parameters: ((.venice_parameters // {}) + {disable_thinking: true})}'
 )"
 export INTUITION_MODEL INTUITION_EXTRAS
 
@@ -96,8 +96,8 @@ perception_messages="$(
 )"
 
 perception="$(
-  chat:completion "$INTUITION_MODEL" "$perception_messages" "$INTUITION_EXTRAS" \
-    | chat:extract-content
+  chat:completion "$INTUITION_MODEL" "$perception_messages" "$INTUITION_EXTRAS" |
+    chat:extract-content
 )"
 
 _intuition_debug perception "$perception"
@@ -143,9 +143,9 @@ _intuition_drive_worker() {
       '[{role:"system",content:$s},{role:"user",content:$u}]'
   )"
 
-  chat:completion "$INTUITION_MODEL" "$messages" "$INTUITION_EXTRAS" \
-    | chat:extract-content \
-    > "${DRIVE_WORKDIR}/${i}.out"
+  chat:completion "$INTUITION_MODEL" "$messages" "$INTUITION_EXTRAS" |
+    chat:extract-content \
+      >"${DRIVE_WORKDIR}/${i}.out"
 
   _intuition_debug "drive:${drive}" "$(cat "${DRIVE_WORKDIR}/${i}.out")"
 }
@@ -184,8 +184,8 @@ synthesis_messages="$(
 )"
 
 synthesis="$(
-  chat:completion "$INTUITION_MODEL" "$synthesis_messages" "$INTUITION_EXTRAS" \
-    | chat:extract-content
+  chat:completion "$INTUITION_MODEL" "$synthesis_messages" "$INTUITION_EXTRAS" |
+    chat:extract-content
 )"
 
 _intuition_debug synthesis "$synthesis"

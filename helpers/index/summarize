@@ -47,18 +47,21 @@ _summarize_one() {
   local sha="$2"
   local file_path="$3"
 
+  tui:debug "summarize" status "starting" file "$ident"
+
   # Skip empty files
   if [[ ! -s "$file_path" ]]; then
     local empty_summary='{"summary":"Empty, zero-length file.","questions":[]}'
     index:record "$project" file "$ident" "$sha" "$empty_summary"
+    tui:debug "summarize" status "skipped" file "$ident" reason "empty / zero-length file"
     return 0
   fi
 
   # Run the summary agent with stdin redirected from the file so it
   # can't consume lines from the pipeline stdin.
   local summary=""
-  if ! summary="$(agent:run summary <"$file_path" 2>/dev/null)"; then
-    tui:warn "summarize failed" file "$ident"
+  if ! summary="$(agent:run summary <"$file_path" 2>&1)"; then
+    tui:warn "summarize" status "failed" file "$ident" "error" "$summary"
     return 1
   fi
 
@@ -82,7 +85,7 @@ _summarize_one() {
   flock "$lockfile" printf '%s\n' "$out_json"
 
   # Progress (stderr, not serialized — interleaved lines are fine for logs)
-  tui:info "summarized" file "$ident"
+  tui:info "summarize" status "done" file "$ident"
 }
 
 pids=()
