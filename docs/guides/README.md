@@ -2,6 +2,9 @@
 
 User-facing documentation for scratch.
 
-Guides in this directory describe how to use scratch from the user's perspective: getting started, configuring projects, using individual subcommands, and troubleshooting.
+- [Projects](projects.md) — configuring and managing projects
+- [File Indexing and Search](indexing.md) — indexing files, semantic search, file status
+- [Doctor](doctor.md) — checking your environment for missing dependencies
+- [Intuit](intuit.md) — the multi-phase intuition agent
 
 For internals and contributor documentation, see [../dev/](../dev/).
