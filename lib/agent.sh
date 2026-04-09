@@ -298,8 +298,10 @@ agent:run() {
       _scratch_proj_root=""
       _scratch_proj_is_git=""
       _scratch_proj_exclude=""
-      project:load "$_scratch_proj_name" _scratch_proj_root _scratch_proj_is_git _scratch_proj_exclude 2> /dev/null || true
-      export SCRATCH_PROJECT_ROOT="$_scratch_proj_root"
+      if project:load "$_scratch_proj_name" _scratch_proj_root _scratch_proj_is_git _scratch_proj_exclude 2> /dev/null \
+        && [[ -n "$_scratch_proj_root" ]]; then
+        export SCRATCH_PROJECT_ROOT="$_scratch_proj_root"
+      fi
     fi
 
     "$run_script"
