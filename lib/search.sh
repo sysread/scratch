@@ -4,9 +4,10 @@
 # Search primitives
 #
 # Provides embedding generation, cosine similarity ranking, and index
-# staleness checking. The heavy lifting happens in helpers/embed (Elixir)
-# for embedding and libexec/cosine-rank.awk for similarity computation.
-# This library orchestrates the pipeline: query → embed → rank → results.
+# staleness checking. The heavy lifting happens in lib/embed.sh (which
+# drives libexec/embed.exs) for embedding and libexec/cosine-rank.awk
+# for similarity computation. This library orchestrates the pipeline:
+# query → embed → rank → results.
 #-------------------------------------------------------------------------------
 
 [[ "${_INCLUDED_SEARCH:-}" == "1" ]] && return 0
@@ -20,6 +21,7 @@ _SEARCH_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   source "$_SEARCH_SCRIPTDIR/base.sh"
   source "$_SEARCH_SCRIPTDIR/db.sh"
   source "$_SEARCH_SCRIPTDIR/index.sh"
+  source "$_SEARCH_SCRIPTDIR/embed.sh"
 }
 
 _SEARCH_COSINE_RANK="$_SEARCH_SCRIPTDIR/../libexec/cosine-rank.awk"
@@ -27,17 +29,15 @@ _SEARCH_COSINE_RANK="$_SEARCH_SCRIPTDIR/../libexec/cosine-rank.awk"
 #-------------------------------------------------------------------------------
 # search:embed TEXT
 #
-# Generate an embedding vector for TEXT via helpers/embed. Returns the
-# JSON array on stdout (384 floats). Dies if helpers/embed fails.
+# Generate an embedding vector for TEXT via embed:text. Returns the
+# JSON array on stdout (384 floats). Dies if embedding fails.
 #-------------------------------------------------------------------------------
 search:embed() {
   local text="$1"
 
-  local embed_helper="$_SEARCH_SCRIPTDIR/../helpers/embed"
-
   local output
-  if ! output="$(printf '%s' "$text" | "$embed_helper" - 2> /dev/null)"; then
-    die "search:embed: helpers/embed failed"
+  if ! output="$(embed:text "$text" 2> /dev/null)"; then
+    die "search:embed: embedding failed"
     return 1
   fi
 

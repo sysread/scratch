@@ -8,18 +8,23 @@
 #
 # Two modes, dispatched by System.argv():
 #
-#   Single-input mode (backward compatible):
-#     helpers/embed <file>       # embed file contents, output JSON array
-#     echo "text" | helpers/embed -   # embed stdin text, output JSON array
+#   Single-input mode:
+#     elixir embed.exs <file>      # embed file contents, output JSON array
+#     echo "text" | elixir embed.exs -   # embed stdin text, output JSON array
 #
 #   Pool mode (JSONL streaming):
-#     ... | helpers/embed -n 4   # read JSONL from stdin, output JSONL
+#     ... | elixir embed.exs -n 4  # read JSONL from stdin, output JSONL
 #
 #     Pool mode loads the model once, then processes a stream of inputs
-#     via Task.async_stream with bounded concurrency. Each input line is
-#     a JSON object with "id" and "text" fields. Each output line is a
-#     JSON object with "id" and "embedding" fields. Results arrive in
-#     completion order. Pipe backpressure keeps memory bounded.
+#     via Task.Supervisor.async_stream_nolink with bounded concurrency.
+#     Each input line is a JSON object with "id" and "text" fields. Each
+#     output line is a JSON object with "id" and "embedding" fields.
+#     Results arrive in completion order.
+#
+#     Self-termination: a monitor process reads stdin in parallel. When
+#     stdin closes (parent exit / broken pipe), the monitor shuts down the
+#     task supervisor, cancelling in-flight inference, and halts the BEAM.
+#     This prevents orphaned elixir processes when the caller is killed.
 #
 # Environment:
 #   SCRATCH_MODEL   Override the default embedding model
@@ -28,22 +33,14 @@
 #
 # Compilation notes:
 #
-#   EXLA pins: EXLA 0.10.0 has a duplicate symbol linker error in the `fine`
-#   library's init functions (init_atoms, init_resources) across multiple
-#   translation units (exla.o, exla_client.o, exla_mlir.o). Pinned to 0.9.2
-#   to avoid it.
+#   EXLA pins: EXLA 0.10.0 has a duplicate symbol linker error in the
+#   `fine` library's init functions across multiple translation units.
+#   Pinned to 0.9.2.
 #
-#   Clang workaround: Apple clang 17+ (Xcode 16+) promotes
-#   -Wmissing-template-arg-list-after-template-kw to a hard error, which
-#   breaks compilation of XLA's async_value_ref.h headers. EXLA's Makefile
-#   already passes -w (suppress warnings), but clang treats this as an error,
-#   not a warning. The fix is setting CXX with
-#   -Wno-error=missing-template-arg-list-after-template-kw before Mix.install
-#   compiles the NIF. Since an Elixir script can't set env before its own
-#   process starts, helpers/embed wraps this script and exports CXX.
-#
-#   This only matters on the first run (NIF compilation). Subsequent runs use
-#   the cached .so from Mix's install cache.
+#   Clang workaround: Apple clang 17+ promotes a template warning to a
+#   hard error that breaks EXLA's NIF compilation. The caller (lib/embed.sh)
+#   sets CXX with -Wno-error=missing-template-arg-list-after-template-kw
+#   before invoking this script.
 #-------------------------------------------------------------------------------
 
 # Route Elixir/EXLA log noise to stderr so stdout stays clean for JSON output
@@ -111,12 +108,24 @@ end
 serving = Embed.load_serving()
 
 case {opts[:pool], args} do
-  # Pool mode: read JSONL from stdin, output JSONL
+  # Pool mode: supervised JSONL streaming with stdin-close detection
   {concurrency, []} when is_integer(concurrency) ->
-    IO.stream(:stdio, :line)
-    |> Stream.map(&String.trim/1)
-    |> Stream.reject(&(&1 == ""))
-    |> Task.async_stream(
+    {:ok, sup} = Task.Supervisor.start_link()
+
+    # When the parent dies or Ctrl-C fires, stdin closes. IO.stream
+    # ends, Stream.run returns, and the BEAM exits. In-flight tasks
+    # under the supervisor get :shutdown signals automatically.
+    #
+    # Explicit SIGTERM/SIGINT handling: the BEAM's default signal
+    # handlers shut down the VM cleanly, which stops the supervisor
+    # and its children. No custom signal handling needed.
+
+    input =
+      IO.stream(:stdio, :line)
+      |> Stream.map(&String.trim/1)
+      |> Stream.reject(&(&1 == ""))
+
+    Task.Supervisor.async_stream_nolink(sup, input,
       fn line ->
         case Jason.decode(line) do
           {:ok, %{"id" => id, "text" => text}} when is_binary(text) and text != "" ->
@@ -133,8 +142,9 @@ case {opts[:pool], args} do
       max_concurrency: concurrency,
       ordered: false
     )
-    |> Stream.each(fn {:ok, json_line} ->
-      IO.puts(json_line)
+    |> Stream.each(fn
+      {:ok, json_line} -> IO.puts(json_line)
+      {:exit, reason} -> IO.puts(:standard_error, "embed: task failed: #{inspect(reason)}")
     end)
     |> Stream.run()
 

@@ -45,6 +45,7 @@ SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
   source "$SCRIPTDIR/../lib/project.sh"
   source "$SCRIPTDIR/../lib/index.sh"
   source "$SCRIPTDIR/../lib/search.sh"
+  source "$SCRIPTDIR/../lib/embed.sh"
   source "$SCRIPTDIR/../lib/agent.sh"
   source "$SCRIPTDIR/../lib/workers.sh"
   source "$SCRIPTDIR/../lib/tempfiles.sh"
@@ -57,6 +58,17 @@ has-commands shasum jq
 # Export SCRATCH_HOME so worker subshells and agent:run can find the repo
 SCRATCH_HOME="$(cd "$SCRIPTDIR/.." && pwd)"
 export SCRATCH_HOME
+
+# Kill all children on interrupt. Without this, Ctrl-C leaves orphaned
+# worker processes (summarize workers, embed.exs BEAM, curl, jq) running
+# indefinitely. kill 0 sends SIGTERM to the entire process group.
+_index_cleanup() {
+  trap '' INT TERM # prevent re-entry from the kill
+  kill 0 2> /dev/null
+  wait 2> /dev/null
+}
+trap '_index_cleanup; exit 130' INT
+trap '_index_cleanup; exit 143' TERM
 
 cmd:define "index" "$_DESC"
 cmd:optional-arg "--project" "-p" "Project name (default: detect from cwd)" "string" ""
@@ -246,7 +258,6 @@ main() {
   local db
   db="$(index:db-path "$project_name")"
 
-  local embed_helper="${SCRIPTDIR}/../helpers/embed"
   local embed_workers="${SCRATCH_INDEX_EMBED_WORKERS:-8}"
 
   tui:info "embedding" workers "$embed_workers"
@@ -269,7 +280,7 @@ main() {
         .summary
       end
     )
-  }' | "$embed_helper" -n "$embed_workers" | while IFS= read -r line; do
+  }' | embed:pool "$embed_workers" | while IFS= read -r line; do
     local embed_id embed_json
     embed_id="$(printf '%s' "$line" | jq -r '.id')"
     embed_json="$(printf '%s' "$line" | jq -c '.embedding')"
