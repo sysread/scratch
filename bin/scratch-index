@@ -295,9 +295,13 @@ main() {
   touch "$lockfile"
 
   # Streaming pipeline: produce → summarize → embed → consume
+  # Debug taps: tee each stage to /tmp/scratch-index-*.log
   _index_produce "$project_name" "$proj_root" "$proj_is_git" "$proj_exclude" \
+    | tee /tmp/scratch-index-1-produce.log \
     | _index_summarize_pool "$summary_workers" "$project_name" "$lockfile" \
+    | tee /tmp/scratch-index-2-summarize.log \
     | embed:pool "$embed_workers" \
+    | tee /tmp/scratch-index-3-embed.log \
     | _index_embed_consume "$project_name"
 
   rm -f "$lockfile"
