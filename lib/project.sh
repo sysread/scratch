@@ -121,6 +121,14 @@ project:load() {
 
   # shellcheck disable=SC2034
   _pl_root="$(jq -r '.root // empty' <<< "$json")"
+
+  # A project without a root is unusable — reject early so callers
+  # (especially project:detect) don't match against an empty string.
+  if [[ -z "$_pl_root" ]]; then
+    die "project '$name': settings.json has no root path"
+    return 1
+  fi
+
   # shellcheck disable=SC2034
   _pl_is_git="$(jq -r '.is_git // "false"' <<< "$json")"
   # shellcheck disable=SC2034

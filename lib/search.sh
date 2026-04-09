@@ -22,6 +22,7 @@ _SEARCH_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   source "$_SEARCH_SCRIPTDIR/db.sh"
   source "$_SEARCH_SCRIPTDIR/index.sh"
   source "$_SEARCH_SCRIPTDIR/embed.sh"
+  source "$_SEARCH_SCRIPTDIR/tempfiles.sh"
 }
 
 _SEARCH_COSINE_RANK="$_SEARCH_SCRIPTDIR/../libexec/cosine-rank.awk"
@@ -35,16 +36,19 @@ _SEARCH_COSINE_RANK="$_SEARCH_SCRIPTDIR/../libexec/cosine-rank.awk"
 search:embed() {
   local text="$1"
 
-  local output err
-  err="$(mktemp -t scratch-embed-err.XXXXXX)"
+  # Capture stderr to a tracked temp file so it gets cleaned up even
+  # if this function is interrupted between creation and completion.
+  local err
+  tmp:make err /tmp/scratch-embed-err.XXXXXX
+  tmp:install-traps
+
+  local output
   if ! output="$(embed:text "$text" 2> "$err")"; then
     local detail
     detail="$(cat "$err")"
-    rm -f "$err"
     die "search:embed: embedding failed: $detail"
     return 1
   fi
-  rm -f "$err"
 
   printf '%s' "$output"
 }
