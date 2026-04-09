@@ -47,13 +47,13 @@ _summarize_one() {
   local sha="$2"
   local file_path="$3"
 
-  tui:debug "summarize" status "starting" file "$ident"
+  tui:debug-if SCRATCH_DEBUG_INDEX "summarize" status "starting" file "$ident"
 
   # Skip empty files
   if [[ ! -s "$file_path" ]]; then
     local empty_summary='{"summary":"Empty, zero-length file.","questions":[]}'
     index:record "$project" file "$ident" "$sha" "$empty_summary"
-    tui:debug "summarize" status "skipped" file "$ident" reason "empty / zero-length file"
+    tui:debug-if SCRATCH_DEBUG_INDEX "summarize" status "skipped" file "$ident" reason "empty / zero-length file"
     return 0
   fi
 

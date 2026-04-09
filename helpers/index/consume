@@ -35,6 +35,8 @@ while IFS= read -r line; do
   entry_id="$(printf '%s' "$line" | jq -r '.id')"
   embed_json="$(printf '%s' "$line" | jq -c '.embedding')"
 
+  tui:debug-if SCRATCH_DEBUG_INDEX "embeddings" status "received" file "$entry_id"
+
   if [[ -n "$entry_id" && -n "$embed_json" && "$embed_json" != "null" ]]; then
     q_id="$(db:quote "$entry_id")"
     q_embedding="$(db:quote "$embed_json")"
@@ -43,6 +45,6 @@ while IFS= read -r line; do
       SET embedding = $q_embedding, updated_at = datetime('now')
       WHERE type = 'file' AND identifier = $q_id;
     "
-    tui:info "embedded" file "$entry_id"
+    tui:info "embeddings" status "updated" file "$entry_id"
   fi
 done

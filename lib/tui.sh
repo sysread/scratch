@@ -50,9 +50,41 @@ has-commands gum
 # Output goes to stderr unconditionally (gum log writes to stderr).
 # stdout stays clean for program data per the conventions doc.
 #-------------------------------------------------------------------------------
+# Log level filtering. SCRATCH_LOG_LEVEL controls the minimum severity
+# that produces output. Levels below the threshold return 0 silently.
+# Default: info (debug is suppressed unless explicitly enabled).
+#
+# Level numbers are resolved by a helper function rather than an
+# associative array because bash can't export associative arrays to
+# subshells (and tui:log is exported).
+_tui:_level-num() {
+  case "$1" in
+    debug) echo 0 ;;
+    info) echo 1 ;;
+    warn) echo 2 ;;
+    error) echo 3 ;;
+    *) echo 1 ;;
+  esac
+}
+
+export -f '_tui:_level-num'
+
+_TUI_MIN_LEVEL="$(_tui:_level-num "${SCRATCH_LOG_LEVEL:-info}")"
+export _TUI_MIN_LEVEL
+
 tui:log() {
   local level="$1"
   shift
+
+  local level_n
+  level_n="$(_tui:_level-num "$level")"
+  if ((level_n < _TUI_MIN_LEVEL)); then
+    # Drain stdin if piped, so the writer doesn't get SIGPIPE
+    if (($# == 0)); then
+      cat > /dev/null
+    fi
+    return 0
+  fi
 
   if (($# > 0)); then
     gum log --structured --level "$level" "$@"
@@ -71,6 +103,16 @@ tui:info() { tui:log info "$@"; }
 tui:warn() { tui:log warn "$@"; }
 tui:error() { tui:log error "$@"; }
 
+# Conditional variants: log only when the named env var is set (any value).
+# Bypasses the global SCRATCH_LOG_LEVEL — the env var is the sole gate.
+# Useful for per-feature debug output that should fire regardless of the
+# global log level when explicitly enabled.
+#   tui:debug-if SCRATCH_DEBUG_INDEX "summarized" file "$ident"
+tui:debug-if() { [[ -n "${!1:-}" ]] && shift && gum log --structured --level debug "$@" || true; }
+tui:info-if() { [[ -n "${!1:-}" ]] && shift && gum log --structured --level info "$@" || true; }
+tui:warn-if() { [[ -n "${!1:-}" ]] && shift && gum log --structured --level warn "$@" || true; }
+tui:error-if() { [[ -n "${!1:-}" ]] && shift && gum log --structured --level error "$@" || true; }
+
 tui:die() {
   tui:error "$1" "${@:2}"
   die "$1"
@@ -82,6 +124,10 @@ export -f \
   tui:info \
   tui:warn \
   tui:error \
+  tui:debug-if \
+  tui:info-if \
+  tui:warn-if \
+  tui:error-if \
   tui:die
 
 #-------------------------------------------------------------------------------
