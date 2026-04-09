@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch search - semantic search over the project index
+#
+# Embeds the query, computes cosine similarity against all indexed file
+# summaries, and prints the top results ranked by relevance score.
+#
+# Warns if the index is stale (last indexed > 3 days ago).
+#
+# Examples:
+#   scratch search -q "how does retry logic work"
+#   scratch search -p myproject -q "database schema" -t 5
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="Semantic search over the project file index"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/project.sh"
+  source "$SCRIPTDIR/../lib/search.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+}
+
+has-min-bash-version 5
+
+cmd:define "search" "$_DESC"
+cmd:optional-arg "--project" "-p" "Project name (default: detect from cwd)" "string" ""
+cmd:required-arg "--query" "-q" "Search query" "string"
+cmd:optional-arg "--top" "-t" "Number of results to return" "string" "10"
+cmd:parse "$@"
+
+main() {
+  local project_name
+  project:resolve-name project_name "$(cmd:get --project)"
+
+  local query top
+  query="$(cmd:get --query)"
+  top="$(cmd:get --top)"
+
+  index:ensure "$project_name"
+
+  # Stale index warning
+  if search:is-stale "$project_name"; then
+    local last
+    if last="$(index:get-meta "$project_name" "last_indexed_at")"; then
+      tui:warn "index is stale (last indexed: $last)"
+    else
+      tui:warn "index has never been built — run 'scratch index' first"
+    fi
+  fi
+
+  local results
+  results="$(search:query "$project_name" file "$query" "$top")"
+
+  if [[ -z "$results" ]]; then
+    tui:info "search" results "0"
+    return 0
+  fi
+
+  printf '%s\n' "$results"
+}
+
+main

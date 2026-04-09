@@ -3,17 +3,23 @@
 #-------------------------------------------------------------------------------
 # Embedding generator
 #
-# Reads text from a file (or stdin when "-" is given) and outputs its embedding
-# vector as a JSON array of floats to stdout. Uses Bumblebee with the
-# all-MiniLM-L12-v2 sentence transformer model, which produces 384-dimensional
-# vectors suitable for semantic similarity.
+# Generates embedding vectors using Bumblebee with the all-MiniLM-L12-v2
+# sentence transformer (384-dimensional vectors, mean pooling).
 #
-# The model is downloaded from HuggingFace on first run and cached locally
-# under ~/.config/scratch/models/.
+# Two modes, dispatched by System.argv():
 #
-# Usage:
-#   helpers/embed <file>       # embed the contents of a file
-#   echo "some text" | helpers/embed -   # embed from stdin
+#   Single-input mode (backward compatible):
+#     helpers/embed <file>       # embed file contents, output JSON array
+#     echo "text" | helpers/embed -   # embed stdin text, output JSON array
+#
+#   Pool mode (JSONL streaming):
+#     ... | helpers/embed -n 4   # read JSONL from stdin, output JSONL
+#
+#     Pool mode loads the model once, then processes a stream of inputs
+#     via Task.async_stream with bounded concurrency. Each input line is
+#     a JSON object with "id" and "text" fields. Each output line is a
+#     JSON object with "id" and "embedding" fields. Results arrive in
+#     completion order. Pipe backpressure keeps memory bounded.
 #
 # Environment:
 #   SCRATCH_MODEL   Override the default embedding model
@@ -66,58 +72,105 @@ defmodule Embed do
 
   def model, do: System.get_env("SCRATCH_MODEL") || @default_model
 
-  def run(text) do
+  def load_serving do
     model_name = model()
 
     {:ok, model} = Bumblebee.load_model({:hf, model_name})
     {:ok, tokenizer} = Bumblebee.load_tokenizer({:hf, model_name})
 
-    serving =
-      Bumblebee.Text.TextEmbedding.text_embedding(
-        model,
-        tokenizer,
-        compile: [batch_size: 1, sequence_length: 128],
-        defn_options: [compiler: EXLA],
-        output_pool: :mean_pooling,
-        output_attribute: :hidden_state
-      )
+    Bumblebee.Text.TextEmbedding.text_embedding(
+      model,
+      tokenizer,
+      compile: [batch_size: 1, sequence_length: 128],
+      defn_options: [compiler: EXLA],
+      output_pool: :mean_pooling,
+      output_attribute: :hidden_state
+    )
+  end
 
+  def embed(serving, text) do
     %{embedding: tensor} = Nx.Serving.run(serving, text)
-
-    tensor
-    |> Nx.to_flat_list()
-    |> Jason.encode!()
+    Nx.to_flat_list(tensor)
   end
 end
 
-# Read input from file arg or stdin
-text =
+# Parse arguments to determine mode
+{opts, args} =
   case System.argv() do
-    ["-"] ->
-      IO.read(:stdio, :eof)
+    ["-n", n | rest] ->
+      {[pool: String.to_integer(n)], rest}
 
-    [path] ->
-      case File.read(path) do
-        {:ok, content} -> content
-        {:error, reason} ->
-          IO.puts(:standard_error, "error: #{path}: #{:file.format_error(reason)}")
-          System.halt(1)
-      end
+    ["-n"] ->
+      {[pool: 4], []}
 
-    [] ->
-      IO.puts(:standard_error, "Usage: embed <file>  or  embed -")
-      System.halt(1)
-
-    _ ->
-      IO.puts(:standard_error, "Usage: embed <file>  or  embed -")
-      System.halt(1)
+    other ->
+      {[], other}
   end
 
-text = String.trim(text)
+# Load model (shared across both modes)
+serving = Embed.load_serving()
 
-if text == "" do
-  IO.puts(:standard_error, "error: empty input")
-  System.halt(1)
+case {opts[:pool], args} do
+  # Pool mode: read JSONL from stdin, output JSONL
+  {concurrency, []} when is_integer(concurrency) ->
+    IO.stream(:stdio, :line)
+    |> Stream.map(&String.trim/1)
+    |> Stream.reject(&(&1 == ""))
+    |> Task.async_stream(
+      fn line ->
+        case Jason.decode(line) do
+          {:ok, %{"id" => id, "text" => text}} when is_binary(text) and text != "" ->
+            embedding = Embed.embed(serving, text)
+            Jason.encode!(%{id: id, embedding: embedding})
+
+          {:ok, %{"id" => id}} ->
+            Jason.encode!(%{id: id, error: "missing or empty text field"})
+
+          {:error, _} ->
+            Jason.encode!(%{error: "invalid JSON: #{String.slice(line, 0, 80)}"})
+        end
+      end,
+      max_concurrency: concurrency,
+      ordered: false
+    )
+    |> Stream.each(fn {:ok, json_line} ->
+      IO.puts(json_line)
+    end)
+    |> Stream.run()
+
+  # Single-input mode: embed one text, output bare JSON array
+  {nil, ["-"]} ->
+    text = IO.read(:stdio, :eof) |> String.trim()
+
+    if text == "" do
+      IO.puts(:standard_error, "error: empty input")
+      System.halt(1)
+    end
+
+    Embed.embed(serving, text) |> Jason.encode!() |> IO.puts()
+
+  {nil, [path]} ->
+    case File.read(path) do
+      {:ok, content} ->
+        text = String.trim(content)
+
+        if text == "" do
+          IO.puts(:standard_error, "error: empty input")
+          System.halt(1)
+        end
+
+        Embed.embed(serving, text) |> Jason.encode!() |> IO.puts()
+
+      {:error, reason} ->
+        IO.puts(:standard_error, "error: #{path}: #{:file.format_error(reason)}")
+        System.halt(1)
+    end
+
+  {nil, []} ->
+    IO.puts(:standard_error, "Usage: embed <file>  |  embed -  |  ... | embed -n <workers>")
+    System.halt(1)
+
+  _ ->
+    IO.puts(:standard_error, "Usage: embed <file>  |  embed -  |  ... | embed -n <workers>")
+    System.halt(1)
 end
-
-IO.puts(Embed.run(text))

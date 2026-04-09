@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch index - build or update the project file index
+#
+# Three-phase pipeline with SQLite as the coordination point:
+#
+#   Phase 1 (diff): Walk project files, compare SHAs against the index,
+#     classify as needing indexing, re-indexing, or skip. Remove orphans.
+#
+#   Phase 2 (summarize): Run the summary agent against each file needing
+#     work, storing summaries in SQLite with embedding = NULL.
+#
+#   Phase 3 (embed): Query SQLite for entries with NULL embeddings, pipe
+#     through the embedding pool, update entries with embeddings.
+#
+# Examples:
+#   scratch index                  # index current project (detected from cwd)
+#   scratch index -p myproject     # index a specific project
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="Build or update the project file index"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/project.sh"
+  source "$SCRIPTDIR/../lib/index.sh"
+  source "$SCRIPTDIR/../lib/search.sh"
+  source "$SCRIPTDIR/../lib/agent.sh"
+  source "$SCRIPTDIR/../lib/workers.sh"
+  source "$SCRIPTDIR/../lib/tempfiles.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+}
+
+has-min-bash-version 5
+has-commands shasum jq
+
+cmd:define "index" "$_DESC"
+cmd:optional-arg "--project" "-p" "Project name (default: detect from cwd)" "string" ""
+cmd:parse "$@"
+
+#-------------------------------------------------------------------------------
+# Helpers
+#-------------------------------------------------------------------------------
+
+# Walk project files, respecting gitignore and exclude patterns. Prints
+# relative paths (from project root), one per line.
+_index_walk_files() {
+  local root="$1"
+  local is_git="$2"
+  local exclude="$3"
+
+  if [[ "$is_git" == "true" ]]; then
+    # git ls-files respects .gitignore automatically
+    git -C "$root" ls-files --cached --others --exclude-standard
+  else
+    # Fall back to find, filtering by exclude patterns
+    local -a find_args=("$root" -type f)
+
+    local pattern
+    while IFS= read -r pattern; do
+      [[ -n "$pattern" ]] || continue
+      find_args+=(-not -path "$root/$pattern")
+    done <<< "$exclude"
+
+    find "${find_args[@]}" -print0 \
+      | while IFS= read -r -d '' path; do
+          # Print relative to root
+          printf '%s\n' "${path#"$root"/}"
+        done
+  fi
+}
+
+# Compute SHA-256 of a file. Prints the hex digest.
+_index_sha() {
+  shasum -a 256 "$1" | cut -d' ' -f1
+}
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+main() {
+  local project_name
+  project:resolve-name project_name "$(cmd:get --project)"
+
+  local proj_root proj_is_git proj_exclude
+  project:load "$project_name" proj_root proj_is_git proj_exclude
+
+  tui:info "indexing" project "$project_name" root "$proj_root"
+
+  index:ensure "$project_name"
+
+  # ------------------------------------------------------------------
+  # Phase 1: diff + orphan removal
+  # ------------------------------------------------------------------
+
+  # Load existing index into associative arrays
+  declare -A idx_sha
+  local line ident sha
+  while IFS=$'\t' read -r ident sha; do
+    [[ -n "$ident" ]] || continue
+    idx_sha["$ident"]="$sha"
+  done < <(index:list "$project_name" file)
+
+  # Walk filesystem and classify
+  local -a files_to_index=()
+  declare -A fs_seen
+  while IFS= read -r ident; do
+    [[ -n "$ident" ]] || continue
+    fs_seen["$ident"]=1
+
+    local file_path="${proj_root}/${ident}"
+    [[ -f "$file_path" ]] || continue
+
+    local file_sha
+    file_sha="$(_index_sha "$file_path")"
+
+    if [[ -z "${idx_sha[$ident]:-}" ]]; then
+      # New file
+      files_to_index+=("$ident")
+    elif [[ "${idx_sha[$ident]}" != "$file_sha" ]]; then
+      # Changed file
+      files_to_index+=("$ident")
+    fi
+    # else: current, skip
+  done < <(_index_walk_files "$proj_root" "$proj_is_git" "$proj_exclude")
+
+  # Remove orphaned entries
+  local orphan_count=0
+  for ident in "${!idx_sha[@]}"; do
+    if [[ -z "${fs_seen[$ident]:-}" ]]; then
+      index:remove "$project_name" file "$ident"
+      ((orphan_count++))
+    fi
+  done
+
+  local total_files="${#files_to_index[@]}"
+  local current_count=$(( ${#idx_sha[@]} - orphan_count - total_files ))
+  [[ "$current_count" -lt 0 ]] && current_count=0
+
+  tui:info "index" \
+    to_process "$total_files" \
+    orphans_removed "$orphan_count" \
+    current "$current_count"
+
+  if ((total_files == 0)); then
+    tui:info "index" status "up to date"
+    index:set-meta "$project_name" "last_indexed_at" "$(date -u +%Y-%m-%dT%H:%M:%S)"
+    return 0
+  fi
+
+  # ------------------------------------------------------------------
+  # Phase 2: summarize (API-bound, parallel)
+  # ------------------------------------------------------------------
+
+  local workdir
+  workdir="$(mktemp -d /tmp/scratch-index.XXXXXX)"
+  tmp:track "$workdir"
+  tmp:install-traps
+
+  SCRATCH_INDEX_PROJECT="$project_name"
+  SCRATCH_INDEX_ROOT="$proj_root"
+  SCRATCH_INDEX_FILES=("${files_to_index[@]}")
+  SCRATCH_INDEX_WORKDIR="$workdir"
+  export SCRATCH_INDEX_PROJECT SCRATCH_INDEX_ROOT SCRATCH_INDEX_FILES SCRATCH_INDEX_WORKDIR
+
+  # shellcheck disable=SC2329 # invoked indirectly by workers:run-parallel
+  _index_summarize_worker() {
+    local i="$1"
+    local ident="${SCRATCH_INDEX_FILES[i]}"
+    local file_path="${SCRATCH_INDEX_ROOT}/${ident}"
+    local outfile="${SCRATCH_INDEX_WORKDIR}/${i}.json"
+    local shafile="${SCRATCH_INDEX_WORKDIR}/${i}.sha"
+    local idfile="${SCRATCH_INDEX_WORKDIR}/${i}.id"
+
+    printf '%s' "$ident" > "$idfile"
+    shasum -a 256 "$file_path" | cut -d' ' -f1 > "$shafile"
+
+    if cat "$file_path" | SCRATCH_HOME="${SCRATCH_HOME}" agent:run summary > "$outfile" 2>/dev/null; then
+      printf 'ok' > "${SCRATCH_INDEX_WORKDIR}/${i}.status"
+    else
+      printf 'fail' > "${SCRATCH_INDEX_WORKDIR}/${i}.status"
+    fi
+  }
+  export -f _index_summarize_worker
+
+  local max_jobs="${SCRATCH_INDEX_PARALLEL_JOBS:-4}"
+  tui:info "summarizing" files "$total_files" workers "$max_jobs"
+
+  local start_time
+  start_time="$(date +%s)"
+
+  workers:run-parallel "$max_jobs" "$total_files" _index_summarize_worker
+
+  # Upsert summaries into SQLite (with embedding = NULL)
+  local i ident file_sha summary status_val
+  local success_count=0 fail_count=0
+  for ((i = 0; i < total_files; i++)); do
+    status_val="$(cat "${workdir}/${i}.status" 2>/dev/null || echo fail)"
+    if [[ "$status_val" != "ok" ]]; then
+      ((fail_count++))
+      continue
+    fi
+
+    ident="$(cat "${workdir}/${i}.id")"
+    file_sha="$(cat "${workdir}/${i}.sha")"
+    summary="$(cat "${workdir}/${i}.json")"
+
+    index:record "$project_name" file "$ident" "$file_sha" "$summary"
+    ((success_count++))
+  done
+
+  tui:info "summarized" success "$success_count" failed "$fail_count"
+
+  # ------------------------------------------------------------------
+  # Phase 3: embed (CPU-bound, via embed pool)
+  # ------------------------------------------------------------------
+
+  local db
+  db="$(index:db-path "$project_name")"
+
+  local embed_helper="${SCRIPTDIR}/../helpers/embed"
+  local embed_workers="${SCRATCH_INDEX_EMBED_WORKERS:-8}"
+
+  tui:info "embedding" workers "$embed_workers"
+
+  # Query entries needing embeddings, convert to JSONL, pipe through
+  # embed pool, read results back and update SQLite.
+  #
+  # The sqlite3 -json output is a JSON array; jq converts to JSONL with
+  # id and text fields. The summary field may contain JSON (from the
+  # summary agent) — extract the summary+questions text for embedding.
+  db:query-json "$db" "
+    SELECT id, summary FROM entries
+    WHERE type = 'file' AND embedding IS NULL;
+  " | jq -c '.[] | {
+    id: (.id | tostring),
+    text: (
+      if (.summary | try fromjson | .summary) then
+        (.summary | fromjson | .summary + " " + (.questions // [] | join(" ")))
+      else
+        .summary
+      end
+    )
+  }' | "$embed_helper" -n "$embed_workers" | while IFS= read -r line; do
+    local embed_id embed_json
+    embed_id="$(printf '%s' "$line" | jq -r '.id')"
+    embed_json="$(printf '%s' "$line" | jq -c '.embedding')"
+
+    if [[ -n "$embed_id" && -n "$embed_json" && "$embed_json" != "null" ]]; then
+      local q_embedding
+      q_embedding="$(db:quote "$embed_json")"
+      db:exec "$db" "UPDATE entries SET embedding = $q_embedding, updated_at = datetime('now') WHERE id = $embed_id;"
+    fi
+  done
+
+  # ------------------------------------------------------------------
+  # Done
+  # ------------------------------------------------------------------
+
+  local end_time elapsed
+  end_time="$(date +%s)"
+  elapsed=$((end_time - start_time))
+
+  index:set-meta "$project_name" "last_indexed_at" "$(date -u +%Y-%m-%dT%H:%M:%S)"
+
+  local avg_time=0
+  if ((success_count > 0)); then
+    avg_time=$((elapsed / success_count))
+  fi
+
+  tui:info "index complete" \
+    indexed "$success_count" \
+    failed "$fail_count" \
+    orphans_removed "$orphan_count" \
+    elapsed "${elapsed}s" \
+    avg "${avg_time}s/file"
+}
+
+main

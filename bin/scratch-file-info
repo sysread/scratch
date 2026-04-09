@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch file-info - show index status and summary for a file
+#
+# Reports whether a file is current, stale, orphaned, or missing from the
+# index. If indexed, prints the stored summary.
+#
+# Status meanings:
+#   current   - file is indexed and SHA matches (up to date)
+#   stale     - file exists but SHA differs from index (needs re-indexing)
+#   orphaned  - index entry exists but file no longer exists on disk
+#   missing   - file exists but has no index entry
+#
+# Examples:
+#   scratch file-info -f lib/venice.sh
+#   scratch file-info -p myproject -f src/main.go
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="Show index status and summary for a file"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/project.sh"
+  source "$SCRIPTDIR/../lib/index.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+}
+
+has-min-bash-version 5
+has-commands shasum jq
+
+cmd:define "file-info" "$_DESC"
+cmd:optional-arg "--project" "-p" "Project name (default: detect from cwd)" "string" ""
+cmd:required-arg "--file" "-f" "File path (relative to project root)" "string"
+cmd:parse "$@"
+
+main() {
+  local project_name
+  project:resolve-name project_name "$(cmd:get --project)"
+
+  local file_path
+  file_path="$(cmd:get --file)"
+
+  local proj_root proj_is_git proj_exclude
+  project:load "$project_name" proj_root proj_is_git proj_exclude
+
+  index:ensure "$project_name"
+
+  # Normalize: strip leading ./ if present
+  file_path="${file_path#./}"
+
+  local abs_path="${proj_root}/${file_path}"
+  local file_exists=false
+  [[ -f "$abs_path" ]] && file_exists=true
+
+  local entry
+  local entry_exists=false
+  if entry="$(index:lookup "$project_name" file "$file_path")"; then
+    entry_exists=true
+  fi
+
+  # Determine status
+  local status
+  if [[ "$entry_exists" == "true" && "$file_exists" == "true" ]]; then
+    local stored_sha
+    stored_sha="$(printf '%s' "$entry" | jq -r '.content_sha')"
+    local current_sha
+    current_sha="$(shasum -a 256 "$abs_path" | cut -d' ' -f1)"
+    if [[ "$stored_sha" == "$current_sha" ]]; then
+      status="current"
+    else
+      status="stale"
+    fi
+  elif [[ "$entry_exists" == "true" && "$file_exists" == "false" ]]; then
+    status="orphaned"
+  elif [[ "$entry_exists" == "false" && "$file_exists" == "true" ]]; then
+    status="missing"
+  else
+    die "file '$file_path' does not exist and has no index entry"
+    return 1
+  fi
+
+  printf 'status: %s\n' "$status"
+
+  if [[ "$entry_exists" == "true" ]]; then
+    local summary
+    summary="$(printf '%s' "$entry" | jq -r '.summary')"
+    printf '\nsummary:\n%s\n' "$summary"
+  fi
+}
+
+main

@@ -314,6 +314,54 @@ Environment contract for agent run scripts:
 - `SCRATCH_PROJECT` and `SCRATCH_PROJECT_ROOT` - only set if `project:detect` succeeds
 - `SCRATCH_AGENT_DEPTH` - current recursion depth (incremented before fork)
 
+### `lib/db.sh`
+
+SQLite database primitives.
+Depends on `base.sh`.
+
+Every database access in scratch goes through this library — callers never construct raw `sqlite3` commands. SQL is piped via stdin to avoid `--` comments being parsed as CLI flags. `PRAGMA foreign_keys = ON` is prepended to every execution automatically (it's per-connection, not persistent).
+
+Functions:
+- `db:quote VALUE` - SQL-safe string escaping (doubles single quotes, wraps in single quotes). Handles multiline values.
+- `db:exec DB_PATH SQL` - execute DDL/DML; no output on success, dies on error
+- `db:query DB_PATH SQL` - SELECT with tab-delimited output, one row per line
+- `db:query-json DB_PATH SQL` - SELECT with JSON array of objects output (sqlite3 `-json` mode); returns `[]` for empty results
+- `db:exists DB_PATH SQL` - returns 0 if query returns at least one row
+- `db:init DB_PATH` - create database file + parent dirs, set WAL journal mode
+- `db:migrate DB_PATH MIGRATIONS_DIR` - forward-only `.sql` migrations tracked in a `migrations` table; idempotent
+
+Migrations live at `data/migrations/<feature>/` as numbered `.sql` files (e.g., `001-initial-schema.sql`).
+
+### `lib/index.sh`
+
+Index management CRUD.
+Depends on `base.sh`, `db.sh`, `project.sh`.
+
+Per-project index database at `~/.config/scratch/projects/<name>/index.db`. The `entries` table uses a `(type, identifier)` composite key supporting multiple index types (file, commit, conversation).
+
+Functions:
+- `index:db-path PROJECT_NAME` - print database path
+- `index:ensure PROJECT_NAME` - create DB + apply migrations; idempotent
+- `index:record PROJECT_NAME TYPE IDENTIFIER CONTENT_SHA SUMMARY [EMBEDDING_JSON]` - upsert entry; omit embedding for NULL (used in summarize phase before embed phase)
+- `index:lookup PROJECT_NAME TYPE IDENTIFIER` - print entry as JSON object, or return 1
+- `index:remove PROJECT_NAME TYPE IDENTIFIER` - delete entry
+- `index:remove-type PROJECT_NAME TYPE` - delete all entries of a type
+- `index:list PROJECT_NAME TYPE` - print all (identifier, content_sha) pairs, tab-delimited
+- `index:set-meta PROJECT_NAME KEY VALUE` - upsert metadata
+- `index:get-meta PROJECT_NAME KEY` - print metadata value, or return 1
+
+### `lib/search.sh`
+
+Search primitives.
+Depends on `base.sh`, `db.sh`, `index.sh`.
+
+Orchestrates the query pipeline: query text → embed via `helpers/embed` → rank via `libexec/cosine-rank.awk` → results.
+
+Functions:
+- `search:embed TEXT` - generate embedding via `helpers/embed`, returns JSON array
+- `search:query PROJECT_NAME TYPE QUERY [TOP_K]` - embed query, dump entries, pipe through cosine-rank.awk, return tab-delimited score+identifier lines (default top 10)
+- `search:is-stale PROJECT_NAME [MAX_AGE_DAYS]` - returns 0 if stale (> N days or missing), 1 if fresh
+
 ### `lib/cmd.sh`
 
 Declarative command definition framework.
@@ -411,6 +459,24 @@ Prompts for each field via `gum input` / `gum choose`.
 Interactive project deletion with `gum confirm` prompt.
 Takes an optional positional NAME with the same resolution rules as `show`.
 
+### `bin/scratch-index` (leaf)
+
+Build or update the project file index.
+Three-phase pipeline with SQLite as coordination point: (1) diff filesystem against index + remove orphans, (2) summarize files needing work via the summary agent in parallel, (3) embed summaries via the embed pool.
+
+Uses `project:resolve-name` for `-p` fallback, `workers:run-parallel` for parallel summarization, and `helpers/embed -n N` for pooled embedding.
+
+### `bin/scratch-search` (leaf)
+
+Semantic search over the project file index.
+Embeds the query via `helpers/embed`, ranks against all indexed file embeddings via `libexec/cosine-rank.awk`, prints score + path.
+Warns if the index is stale.
+
+### `bin/scratch-file-info` (leaf)
+
+Show index status and summary for a specific file.
+Reports status (current/stale/orphaned/missing) by comparing stored SHA against the live file. Prints the stored summary if indexed.
+
 ## Helper Scripts
 
 ### `helpers/setup`
@@ -475,14 +541,22 @@ Execs `libexec/embed.exs` with the given arguments.
 Elixir embedding generator.
 Uses Bumblebee + EXLA with `sentence-transformers/all-MiniLM-L12-v2` to produce 384-dimensional vectors.
 
-Input: file path or `-` for stdin.
-Output: JSON array of floats on stdout.
+Two modes dispatched by `System.argv()`:
+
+- **Single-input mode**: `helpers/embed <file>` or `echo text | helpers/embed -`. Outputs bare JSON array. Backward compatible.
+- **Pool mode**: `... | helpers/embed -n 8`. Reads JSONL from stdin (`{"id":"...","text":"..."}`), outputs JSONL (`{"id":"...","embedding":[...]}`). Model loads once, `Task.async_stream` with bounded concurrency. Per-item cost drops from ~2.3s to ~50-100ms.
+
 Logging: Elixir/EXLA noise routed to stderr.
-
 Model cache: `~/.config/scratch/models/` via `BUMBLEBEE_CACHE_DIR`.
-
 EXLA pinned to `0.9.2` (avoid 0.10.0 duplicate symbol linker bug).
 Requires bash wrapper for the clang workaround (see `helpers/embed`).
+
+### `libexec/cosine-rank.awk`
+
+Cosine similarity ranking.
+Reads a query embedding (first line, JSON array) and candidate entries (subsequent lines, tab-delimited identifier + JSON array), computes cosine similarity, outputs top K results sorted by descending score.
+
+Used by `lib/search.sh` to rank search results. Benchmarks at ~27ms for 10 files.
 
 ## Tools
 
@@ -539,6 +613,22 @@ Files:
 - `data/prompts/intuition/drives/<name>.md` - one file per drive
 
 The companion subcommand `bin/scratch-intuit` is the operator-facing entry point.
+
+### `agents/summary/`
+
+File summary generator for the project search index. Two-phase design:
+
+1. **Accumulate** - run file content through `accumulate:run-profile long-context` to produce raw narrative notes about the file's purpose, abstractions, contracts, and integration points.
+2. **Structure** - run a fast completion with `response_format` (json_schema) to reshape the notes into `{summary: string, questions: string[]}`.
+
+The `questions` array contains 5-10 synthetic search queries ("How does the retry logic work?") that make the embedding match what developers actually search for.
+
+Files:
+- `agents/summary/run` - the orchestrator
+- `agents/summary/spec.json` - name + description
+- `agents/summary/is-available` - sources base.sh (deps are transitive through libs)
+- `data/prompts/summary/accumulate.md` - instructions for the accumulator pass
+- `data/prompts/summary/structure.md` - instructions for the structuring pass (with `{{notes}}` placeholder)
 
 ## Toolboxes
 
@@ -607,6 +697,9 @@ Test files use 2-digit numerical prefixes (CPAN convention) so they run in depen
 | `test/12-tempfiles.bats` | Tests for `lib/tempfiles.sh` (`tmp:make` input validation, `tmp:cleanup` directory removal) |
 | `test/13-workers.bats` | Tests for `lib/workers.sh` (`workers:cpu-count` fallbacks, `workers:run-parallel` concurrency cap, parent-array lookup) |
 | `test/14-agent.bats` | Tests for `lib/agent.sh` (data access, `agent:available`, env contract for `agent:run`, recursion guard, `agent:simple-completion` with stubbed chat layer) |
+| `test/15-db.bats` | Tests for `lib/db.sh` (quote, exec, query, query-json, exists, init, migrate) |
+| `test/16-index.bats` | Tests for `lib/index.sh` (db-path, ensure, record, lookup, remove, list, meta) |
+| `test/17-search.bats` | Tests for `lib/search.sh` (embed stub, query ranking, is-stale) |
 | `test/90-lint.bats` | Self-reflection: shellcheck |
 | `test/91-formatting.bats` | Self-reflection: shfmt drift |
 | `test/92-permissions.bats` | Self-reflection: +x policy |

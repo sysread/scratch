@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# summary agent
+#
+# Generates a structured summary of a source file for the project search
+# index. Two phases:
+#
+#   Phase 1 (accumulate): Run the file content through the accumulator
+#     with the long-context profile to produce raw narrative notes. The
+#     accumulator handles files of any size by chunking and building up
+#     structured notes across rounds.
+#
+#   Phase 2 (structure): Run a fast completion to reshape the raw notes
+#     into the index schema: {summary: string, questions: string[]}.
+#     Uses response_format with json_schema for reliable extraction.
+#
+# stdin:  raw file content
+# stdout: JSON object with summary and questions fields
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+{
+  source "$SCRATCH_HOME/lib/agent.sh"
+  source "$SCRATCH_HOME/lib/accumulator.sh"
+  source "$SCRATCH_HOME/lib/prompt.sh"
+  source "$SCRATCH_HOME/lib/chat.sh"
+  source "$SCRATCH_HOME/lib/model.sh"
+}
+
+# Phase 1: accumulate raw notes about the file content
+input="$(cat)"
+
+if [[ -z "$input" ]]; then
+  die "summary: empty input on stdin"
+  exit 1
+fi
+
+prompt="$(prompt:load summary/accumulate)"
+
+notes="$(accumulate:run-profile long-context "$prompt" "$input")"
+
+# Phase 2: structure the notes into {summary, questions} JSON
+structure_prompt="$(prompt:render summary/structure notes="$notes")"
+
+model="$(model:profile:model fast)"
+extras="$(model:profile:extras fast)"
+
+# response_format ensures the model outputs valid JSON matching the schema
+schema='{
+  "type": "json_schema",
+  "json_schema": {
+    "name": "file_summary",
+    "strict": true,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "questions"],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "description": "Narrative summary of the file"
+        },
+        "questions": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "5-10 questions this file answers"
+        }
+      }
+    }
+  }
+}'
+
+merged_extras="$(jq -c -n \
+  --argjson e "$extras" \
+  --argjson s "$schema" \
+  '$e + {response_format: $s}')"
+
+messages="$(jq -c -n \
+  --arg system "$structure_prompt" \
+  '[{role:"system",content:$system},{role:"user",content:"Structure these notes into the required JSON format."}]')"
+
+response="$(chat:completion "$model" "$messages" "$merged_extras")"
+printf '%s' "$response" | jq -r '.choices[0].message.content'

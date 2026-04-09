@@ -100,6 +100,9 @@ bin/          user-facing subcommand executables
   scratch-project-edit     leaf
   scratch-project-delete   leaf
   scratch-intuit           leaf - debug invocation of agents/intuition
+  scratch-index            leaf - build/update project file index
+  scratch-search           leaf - semantic search over project index
+  scratch-file-info        leaf - show index status/summary for a file
 
 lib/          sourced libraries (not executable)
   base.sh         warn, die, has-commands, require-env-vars
@@ -121,9 +124,15 @@ lib/          sourced libraries (not executable)
                   pool primitive used by shellcheck_parallel and tool:invoke-parallel)
   agent.sh        agent:list, agent:run, agent:simple-completion (the agent layer;
                   agents are run scripts under agents/<name>/, not config bundles)
+  db.sh           db:exec, db:query, db:migrate (SQLite primitives; all DB
+                  access goes through this layer)
+  index.sh        index:record, index:lookup, index:list (per-project index CRUD)
+  search.sh       search:embed, search:query, search:is-stale (search pipeline)
 
 libexec/      internal non-bash executables
-  embed.exs       Elixir embedding generator (called by helpers/embed)
+  embed.exs       Elixir embedding generator (called by helpers/embed); two modes:
+                  single-input (backward compat) and JSONL pool via Task.async_stream
+  cosine-rank.awk cosine similarity ranking (used by lib/search.sh)
 
 data/         static config data shipped in the repo (not user settings)
   models.json     model profile definitions (smart/balanced/fast/long-context
@@ -136,6 +145,9 @@ data/         static config data shipped in the repo (not user settings)
     accumulator/  system, finalize, line-numbers prompts for lib/accumulator.sh
     echo/         system prompt for agents/echo
     intuition/    perception, synthesis, drive-base, drives/* for agents/intuition
+    summary/      accumulate + structure prompts for agents/summary
+  migrations/     forward-only SQL migration files
+    index/        schema for the per-project index database
 
 tools/        LLM tool calling. Each subdirectory is a self-contained tool:
               <name>/spec.json     OpenAI function spec (the inner function obj)
@@ -151,6 +163,7 @@ agents/       Reusable LLM workflows. Each subdirectory is a self-contained agen
                                    agent can refuse to be available outside edit mode)
   echo/           single-shot reference; built on agent:simple-completion
   intuition/      complex multi-phase reference (perception + parallel drives + synthesis)
+  summary/        file summarizer for indexing (accumulator + structured output)
 
 toolboxes/    Named bundles of tool names with their own is-available gate.
               <name>/tools.json    {"description": "...", "tools": [...]}
@@ -697,6 +710,24 @@ When you add a new tool to scratch:
 5. If it's specific to an agent, declare it in that agent's `is-available` script.
 6. If it's specific to a toolbox (rare; toolboxes are usually pure policy), declare it in that toolbox's `is-available` script.
 7. If it's a runtime dep that `scratch setup` should install, also add it to `helpers/setup`'s `RUNTIME_DEPS` list.
+
+## File Indexing and Semantic Search
+
+The indexing system maintains per-project summaries and embeddings so that `scratch search -q "how does auth work"` returns the most relevant files instantly.
+
+**Storage**: One SQLite database per project at `~/.config/scratch/projects/<name>/index.db`. Forward-only migrations from `data/migrations/index/`. The `entries` table uses a `(type, identifier)` composite key so the same schema supports files, commits, conversations, and future index types.
+
+**Three-phase indexing pipeline** (`scratch index`):
+
+1. **Diff** — walk filesystem (via `git ls-files` or `find`), compare SHA-256 hashes against the index, classify files as new/changed/current. Remove orphaned entries.
+2. **Summarize** — parallel workers run the summary agent against each file needing work. The summary agent uses `accumulate:run-profile` for large files, then a fast structuring pass to produce `{summary, questions}` JSON. Summaries are upserted into SQLite with `embedding = NULL`.
+3. **Embed** — query SQLite for entries with NULL embeddings, pipe through `helpers/embed -n N` (JSONL pool mode), update entries with embeddings.
+
+SQLite is the coordination point between phases. This decouples summarization (API-bound) from embedding (CPU-bound) and allows re-embedding without re-summarizing.
+
+**Search** (`scratch search`): embeds the query via `helpers/embed`, dumps all indexed embeddings, pipes through `libexec/cosine-rank.awk` for cosine similarity ranking. The awk script handles the full ranking in a single process (~27ms for typical project sizes).
+
+**Embedding pipeline**: `libexec/embed.exs` has two modes — single-input (backward compatible) and JSONL pool mode via `Task.async_stream`. Pool mode loads the model once and processes a stream of inputs with bounded concurrency, dropping per-item cost from ~2.3s to ~50-100ms.
 
 ## Self-Reflection Tests
 

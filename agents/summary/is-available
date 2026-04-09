@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# summary agent - availability check
+#
+# Always available. The summary agent uses accumulate:run-profile and
+# chat:completion transitively, which pull in venice:curl + jq + bc
+# through the lib stack. Those binaries are declared at the lib level and
+# verified at source time.
+#
+# Sources base.sh because the contract test requires it.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"
