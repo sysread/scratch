@@ -293,8 +293,13 @@ agent:run() {
     _scratch_proj_worktree=""
     if project:detect _scratch_proj_name _scratch_proj_worktree 2> /dev/null; then
       export SCRATCH_PROJECT="$_scratch_proj_name"
-      export SCRATCH_PROJECT_ROOT
-      SCRATCH_PROJECT_ROOT="$(pwd -P)"
+      # Resolve the configured root via project:load rather than using
+      # pwd, which would be wrong if invoked from a subdirectory.
+      _scratch_proj_root=""
+      _scratch_proj_is_git=""
+      _scratch_proj_exclude=""
+      project:load "$_scratch_proj_name" _scratch_proj_root _scratch_proj_is_git _scratch_proj_exclude 2> /dev/null || true
+      export SCRATCH_PROJECT_ROOT="${_scratch_proj_root:-$(pwd -P)}"
     fi
 
     "$run_script"

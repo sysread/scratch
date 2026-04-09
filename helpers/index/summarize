@@ -33,11 +33,10 @@ project="$1"
 pool_size="${2:-4}"
 
 lockfile="/tmp/scratch-index-summarize-lock.$$"
-counterfile="/tmp/scratch-index-summarize-count.$$"
-touch "$lockfile"
-printf '0' >"$counterfile"
+tallyfile="/tmp/scratch-index-summarize-tally.$$"
+touch "$lockfile" "$tallyfile"
 # shellcheck disable=SC2064
-trap "rm -f '$lockfile' '$counterfile'" EXIT
+trap "rm -f '$lockfile' '$tallyfile'" EXIT
 
 # Process a single work item: summarize, upsert, emit. Runs in a
 # background subshell. Stdout writes are serialized with flock so
@@ -54,6 +53,7 @@ _summarize_one() {
     local empty_summary='{"summary":"Empty, zero-length file.","questions":[]}'
     index:record "$project" file "$ident" "$sha" "$empty_summary"
     tui:debug-if SCRATCH_DEBUG_INDEX "summarize" status "skipped" file "$ident" reason "empty / zero-length file"
+    printf 'skip\n' >>"$tallyfile"
     return 0
   fi
 
@@ -62,6 +62,7 @@ _summarize_one() {
   local summary=""
   if ! summary="$(agent:run summary <"$file_path" 2>&1)"; then
     tui:warn "summarize" status "failed" file "$ident" "error" "$summary"
+    printf 'fail\n' >>"$tallyfile"
     return 1
   fi
 
@@ -84,7 +85,7 @@ _summarize_one() {
     '{id: $id, text: $text}')"
   flock "$lockfile" printf '%s\n' "$out_json"
 
-  # Progress (stderr, not serialized — interleaved lines are fine for logs)
+  printf 'ok\n' >>"$tallyfile"
   tui:info "summarize" status "done" file "$ident"
 }
 
@@ -117,3 +118,9 @@ done
 for pid in "${pids[@]}"; do
   wait "$pid" || true
 done
+
+# Report tally
+ok_count="$(grep -c '^ok$' "$tallyfile" 2>/dev/null || echo 0)"
+fail_count="$(grep -c '^fail$' "$tallyfile" 2>/dev/null || echo 0)"
+skip_count="$(grep -c '^skip$' "$tallyfile" 2>/dev/null || echo 0)"
+tui:info "summarize" status "complete" ok "$ok_count" failed "$fail_count" skipped "$skip_count"
