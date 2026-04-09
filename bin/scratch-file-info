@@ -60,6 +60,7 @@ main() {
   local file_path
   file_path="$(cmd:get --file)"
 
+  # shellcheck disable=SC2034 # proj_is_git and proj_exclude are populated by project:load via nameref
   local proj_root proj_is_git proj_exclude
   project:load "$project_name" proj_root proj_is_git proj_exclude
 

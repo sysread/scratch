@@ -36,7 +36,7 @@ search:embed() {
   local embed_helper="$_SEARCH_SCRIPTDIR/../helpers/embed"
 
   local output
-  if ! output="$(printf '%s' "$text" | "$embed_helper" - 2>/dev/null)"; then
+  if ! output="$(printf '%s' "$text" | "$embed_helper" - 2> /dev/null)"; then
     die "search:embed: helpers/embed failed"
     return 1
   fi

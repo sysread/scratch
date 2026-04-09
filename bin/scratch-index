@@ -88,9 +88,9 @@ _index_walk_files() {
 
     find "${find_args[@]}" -print0 \
       | while IFS= read -r -d '' path; do
-          # Print relative to root
-          printf '%s\n' "${path#"$root"/}"
-        done
+        # Print relative to root
+        printf '%s\n' "${path#"$root"/}"
+      done
   fi
 }
 
@@ -162,7 +162,7 @@ main() {
   done
 
   local total_files="${#files_to_index[@]}"
-  local current_count=$(( ${#idx_sha[@]} - orphan_count - total_files ))
+  local current_count=$((${#idx_sha[@]} - orphan_count - total_files))
   [[ "$current_count" -lt 0 ]] && current_count=0
 
   tui:info "index" \
@@ -203,7 +203,7 @@ main() {
     printf '%s' "$ident" > "$idfile"
     shasum -a 256 "$file_path" | cut -d' ' -f1 > "$shafile"
 
-    if cat "$file_path" | agent:run summary > "$outfile" 2>/dev/null; then
+    if cat "$file_path" | agent:run summary > "$outfile" 2> /dev/null; then
       printf 'ok' > "${SCRATCH_INDEX_WORKDIR}/${i}.status"
     else
       printf 'fail' > "${SCRATCH_INDEX_WORKDIR}/${i}.status"
@@ -223,7 +223,7 @@ main() {
   local i ident file_sha summary status_val
   local success_count=0 fail_count=0
   for ((i = 0; i < total_files; i++)); do
-    status_val="$(cat "${workdir}/${i}.status" 2>/dev/null || echo fail)"
+    status_val="$(cat "${workdir}/${i}.status" 2> /dev/null || echo fail)"
     if [[ "$status_val" != "ok" ]]; then
       ((fail_count++))
       continue

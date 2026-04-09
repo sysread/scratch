@@ -86,7 +86,13 @@ export -f has-min-bash-version
 #-------------------------------------------------------------------------------
 declare -A _INSTALL_HINTS=(
   [gcloud]="brew install google-cloud-sdk"
+  [flock]="brew install flock"
 )
+
+# On Linux, override hints where the package name differs from macOS
+if [[ "${OSTYPE:-}" == linux* ]]; then
+  _INSTALL_HINTS[flock]="apt-get install util-linux"
+fi
 
 has-commands() {
   local hint
