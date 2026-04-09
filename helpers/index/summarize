@@ -7,10 +7,10 @@
 # against each file, upserts the summary into SQLite (with embedding=NULL),
 # and writes {id, text} JSONL to stdout for the embed stage.
 #
-# Runs N workers that read from shared stdin. Each worker serializes its
-# stdout writes with flock so multi-worker output doesn't interleave.
+# Single-threaded for now. Concurrency will be added once the basic
+# behavior is confirmed correct.
 #
-# Args: WORKERS PROJECT_NAME
+# Args: PROJECT_NAME
 # stdin:  JSONL {"id":"<relpath>","sha":"<hex>","file":"<abspath>"}
 # stdout: JSONL {"id":"<relpath>","text":"<summary text for embedding>"}
 #-------------------------------------------------------------------------------
@@ -26,59 +26,47 @@ set -euo pipefail
   source "${SCRATCH_HOME}/lib/tui.sh"
 }
 
-has-commands jq flock
+has-commands jq
 
-workers="$1"
-project="$2"
+project="$1"
 
-lockfile="/tmp/scratch-index-summarize-lock.$$"
-touch "$lockfile"
-# shellcheck disable=SC2064
-trap "rm -f '$lockfile'" EXIT
+while IFS= read -r line; do
+  [[ -n "$line" ]] || continue
 
-# Single worker: read lines from stdin, summarize, upsert, emit
-_worker() {
-  local line
-  while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
+  ident="$(printf '%s' "$line" | jq -r '.id')"
+  sha="$(printf '%s' "$line" | jq -r '.sha')"
+  file_path="$(printf '%s' "$line" | jq -r '.file')"
 
-    local ident sha file_path
-    ident="$(printf '%s' "$line" | jq -r '.id')"
-    sha="$(printf '%s' "$line" | jq -r '.sha')"
-    file_path="$(printf '%s' "$line" | jq -r '.file')"
-
-    # Run the summary agent
-    local summary
-    if ! summary="$(cat "$file_path" | agent:run summary 2>/dev/null)"; then
-      tui:warn "summarize failed" file "$ident"
-      continue
-    fi
-
-    # Upsert to SQLite (durable — survives Ctrl-C)
+  # Skip empty files — nothing to summarize, no value in embedding
+  if [[ ! -s "$file_path" ]]; then
+    summary='{"summary":"Empty, zero-length file.","questions":[]}'
     index:record "$project" file "$ident" "$sha" "$summary"
+    continue
+  fi
 
-    # Extract embeddable text from the structured summary
-    local embed_text
-    embed_text="$(printf '%s' "$summary" | jq -r '
-      if (try fromjson | .summary) then
-        (fromjson | .summary + " " + (.questions // [] | join(" ")))
-      else
-        .
-      end
-    ')"
+  # Run the summary agent with stdin redirected from the file so it
+  # can't accidentally consume lines from the pipeline stdin.
+  summary=""
+  if ! summary="$(agent:run summary <"$file_path" 2>/dev/null)"; then
+    tui:warn "summarize failed" file "$ident"
+    continue
+  fi
 
-    # Write to stdout under flock so multi-worker writes don't interleave
-    local out_json
-    out_json="$(jq -c -n --arg id "$ident" --arg text "$embed_text" \
-      '{id: $id, text: $text}')"
-    flock "$lockfile" printf '%s\n' "$out_json"
-  done
-}
+  # Upsert to SQLite (durable — survives Ctrl-C)
+  index:record "$project" file "$ident" "$sha" "$summary"
 
-pids=()
-for ((i = 0; i < workers; i++)); do
-  _worker &
-  pids+=($!)
+  # Extract embeddable text from the structured summary. The agent
+  # returns a JSON object with .summary and .questions fields. If the
+  # output isn't structured JSON, use the raw text as-is.
+  embed_text="$(printf '%s' "$summary" | jq -r '
+    if .summary then
+      .summary + " " + (.questions // [] | join(" "))
+    else
+      tostring
+    end
+  ')"
+
+  jq -c -n --arg id "$ident" --arg text "$embed_text" \
+    '{id: $id, text: $text}'
+
 done
-
-wait "${pids[@]}" 2>/dev/null || true
