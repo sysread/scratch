@@ -293,8 +293,10 @@ agent:run() {
     _scratch_proj_worktree=""
     if project:detect _scratch_proj_name _scratch_proj_worktree 2> /dev/null; then
       export SCRATCH_PROJECT="$_scratch_proj_name"
-      # Resolve the configured root via project:load rather than using
-      # pwd, which would be wrong if invoked from a subdirectory.
+      # Resolve the configured root via project:load rather than pwd.
+      # pwd would be wrong if invoked from a subdirectory. If load fails
+      # or returns an empty root, SCRATCH_PROJECT_ROOT stays unset —
+      # downstream code checks [[ -n ${SCRATCH_PROJECT_ROOT:-} ]].
       _scratch_proj_root=""
       _scratch_proj_is_git=""
       _scratch_proj_exclude=""

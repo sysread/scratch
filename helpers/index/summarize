@@ -98,7 +98,10 @@ while IFS= read -r line; do
   sha="$(printf '%s' "$line" | jq -r '.sha')"
   file_path="$(printf '%s' "$line" | jq -r '.file')"
 
-  # If pool is full, block until a slot opens
+  # If pool is full, block until a slot opens. The || true is
+  # intentional: per-worker failures are tracked via the tally file
+  # (each worker appends ok/fail/skip), not via exit codes. Failing
+  # the whole pipeline on one bad file would be worse than continuing.
   if ((${#pids[@]} >= pool_size)); then
     wait -n -p finished_pid "${pids[@]}" || true
     # Prune the finished PID
@@ -114,7 +117,8 @@ while IFS= read -r line; do
   pids+=($!)
 done
 
-# Drain remaining workers
+# Drain remaining workers. Same || true rationale as above — failures
+# are already recorded in the tally file by each worker.
 for pid in "${pids[@]}"; do
   wait "$pid" || true
 done
