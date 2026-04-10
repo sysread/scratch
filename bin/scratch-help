@@ -95,9 +95,10 @@ main() {
   else
     # No -q flag: prompt for a question interactively
     question="$(gum write \
-      --width 80 \
-      --height 6 \
+      --width 140 \
+      --height 25 \
       --char-limit 0 \
+      --cursor.mode static \
       --header "What do you need help with?" \
       --placeholder "e.g., how do I index my project?")"
 
