@@ -329,6 +329,9 @@ tui:with-spinner() {
   # The status text rotates through shuffled sci-fi phrases every 25
   # frames (~2.5s at 100ms/frame), starting with the caller's title.
   if [[ -t 2 ]]; then
+    # Print the title as a styled prefix on its own line
+    gum style --bold --foreground 212 "$title" >&2
+
     local -a frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
     local fi=0
 
@@ -343,17 +346,14 @@ tui:with-spinner() {
       phrases[k]="$tmp"
     done
 
-    local current_text="$title"
     local phrase_idx=0
     local frames_per_phrase=25
 
     while kill -0 "$work_pid" 2> /dev/null; do
-      printf '\r\033[2K%s %s' "${frames[fi % ${#frames[@]}]}" "$current_text" >&2
+      printf '\r\033[2K  %s %s' "${frames[fi % ${#frames[@]}]}" "${phrases[phrase_idx % ${#phrases[@]}]}" >&2
       fi=$((fi + 1))
 
-      # Rotate status text every ~2.5s
       if ((fi % frames_per_phrase == 0)); then
-        current_text="${phrases[phrase_idx % ${#phrases[@]}]}"
         phrase_idx=$((phrase_idx + 1))
       fi
 
