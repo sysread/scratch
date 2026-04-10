@@ -63,7 +63,10 @@ _TMPFILES_TRAPS_INSTALLED=0
 #-------------------------------------------------------------------------------
 tmp:track() {
   local path="${1:-}"
-  [[ -n "$path" ]] || die "tmp:track requires a path"
+  if [[ -z "$path" ]]; then
+    die "tmp:track requires a path"
+    return 1
+  fi
 
   SCRATCH_TMPFILES+=("$path")
   return 0

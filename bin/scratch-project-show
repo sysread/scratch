@@ -60,7 +60,10 @@ main() {
 
   project:resolve-name name "$arg"
 
-  project:exists "$name" || die "project not found: $name"
+  if ! project:exists "$name"; then
+    die "project not found: $name"
+    return 1
+  fi
 
   local root
   local is_git

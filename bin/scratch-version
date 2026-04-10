@@ -52,7 +52,10 @@ cmd:parse "$@"
 #-------------------------------------------------------------------------------
 main() {
   local local_version
-  local_version="$(release:local-version)" || die "could not read local version"
+  if ! local_version="$(release:local-version)"; then
+    die "could not read local version"
+    return 1
+  fi
 
   if ! cmd:has --check; then
     printf '%s\n' "$local_version"
@@ -61,7 +64,10 @@ main() {
 
   # --check: compare against remote
   local remote_version
-  remote_version="$(release:remote-version)" || die "could not fetch remote version"
+  if ! remote_version="$(release:remote-version)"; then
+    die "could not fetch remote version"
+    return 1
+  fi
 
   if release:is-newer "$remote_version" "$local_version"; then
     tui:warn "Update available" current "$local_version" latest "$remote_version"

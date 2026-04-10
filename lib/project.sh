@@ -114,7 +114,10 @@ project:load() {
 
   local config
   config="$(project:config-path "$name")"
-  [[ -f "$config" ]] || die "project not found: $name"
+  if [[ ! -f "$config" ]]; then
+    die "project not found: $name"
+    return 1
+  fi
 
   local json
   json="$(cat "$config")"
@@ -182,7 +185,10 @@ project:delete() {
   local config_dir
   config_dir="$(project:config-dir "$name")"
 
-  project:exists "$name" || die "project not found: $name"
+  if ! project:exists "$name"; then
+    die "project not found: $name"
+    return 1
+  fi
 
   rm -rf "$config_dir"
 }

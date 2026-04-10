@@ -75,12 +75,16 @@ _do_update() {
 
   tui:info "Downloading scratch $version..."
   local tarball
-  tarball="$(release:download "$version" "$tmpdir")" \
-    || die "download failed"
+  if ! tarball="$(release:download "$version" "$tmpdir")"; then
+    die "download failed"
+    return 1
+  fi
 
   tui:info "Unpacking..."
-  release:unpack "$tarball" "$tmpdir/new" \
-    || die "unpack failed"
+  if ! release:unpack "$tarball" "$tmpdir/new"; then
+    die "unpack failed"
+    return 1
+  fi
 
   # Validate the unpacked tree has the expected structure
   local -a expected=("bin/scratch" "lib/base.sh" "VERSION")
@@ -92,8 +96,10 @@ _do_update() {
   done
 
   tui:info "Swapping installation..."
-  release:hat-swap "$tmpdir/new" "$SCRATCH_HOME" \
-    || die "hat-swap failed — your previous installation should be intact"
+  if ! release:hat-swap "$tmpdir/new" "$SCRATCH_HOME"; then
+    die "hat-swap failed — your previous installation should be intact"
+    return 1
+  fi
 
   tui:info "Updated to scratch $version"
 }
@@ -125,8 +131,14 @@ main() {
   fi
 
   local local_version remote_version
-  local_version="$(release:local-version)" || die "could not read local version"
-  remote_version="$(release:remote-version)" || die "could not fetch remote version"
+  if ! local_version="$(release:local-version)"; then
+    die "could not read local version"
+    return 1
+  fi
+  if ! remote_version="$(release:remote-version)"; then
+    die "could not fetch remote version"
+    return 1
+  fi
 
   if release:is-newer "$remote_version" "$local_version"; then
     # Update available

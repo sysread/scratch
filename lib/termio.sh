@@ -163,7 +163,10 @@ io:is-non-empty() {
   local input
 
   input="$(cat)"
-  [[ -n "$input" ]] || die "$msg"
+  if [[ -z "$input" ]]; then
+    die "$msg"
+    return 1
+  fi
 
   printf '%s\n' "$input"
 }

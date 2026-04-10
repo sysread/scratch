@@ -54,7 +54,10 @@ prompt:load() {
   local path
   path="$(prompt:dir)/${name}.md"
 
-  [[ -f "$path" ]] || die "prompt: not found: $path"
+  if [[ ! -f "$path" ]]; then
+    die "prompt: not found: $path"
+    return 1
+  fi
 
   cat "$path"
 }

@@ -34,7 +34,18 @@ These are structured via `gum log`.
 Top-level scripts rely on `set -e` to propagate.
 This keeps `die` usable from sourced libraries and functions without killing the whole process unexpectedly.
 
-Precondition guards are single-line: `<predicate> || die "<message>"`.
+Precondition guards inside functions use explicit `if`/`return`:
+
+```bash
+if [[ ! <predicate> ]]; then
+  die "<message>"
+  return 1
+fi
+```
+
+The single-line `<predicate> || die "msg"` form only aborts when the caller
+is under `set -e`, which not every context guarantees (notably bats `run`
+and command substitution).
 
 `tui:die` is for user-facing structured errors - it routes through gum before dying.
 

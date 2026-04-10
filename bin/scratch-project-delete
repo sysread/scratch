@@ -50,7 +50,10 @@ main() {
 
   project:resolve-name name "$arg"
 
-  project:exists "$name" || die "project not found: $name"
+  if ! project:exists "$name"; then
+    die "project not found: $name"
+    return 1
+  fi
 
   if ! gum confirm "Delete project '$name'?"; then
     tui:info "Cancelled"

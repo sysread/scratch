@@ -58,19 +58,27 @@ main() {
   done < <(cmd:rest || true)
 
   target_path="${arg:-$(pwd)}"
-  target_path="$(cd "$target_path" 2> /dev/null && pwd -P)" \
-    || die "path does not exist: ${arg:-$(pwd)}"
+  if ! target_path="$(cd "$target_path" 2> /dev/null && pwd -P)"; then
+    die "path does not exist: ${arg:-$(pwd)}"
+    return 1
+  fi
 
   local suggested_name
   suggested_name="$(basename "$target_path")"
 
   local name
-  name="$(gum input \
+  if ! name="$(gum input \
     --header "Project name" \
     --placeholder "$suggested_name" \
-    --value "$suggested_name")" || die "cancelled"
+    --value "$suggested_name")"; then
+    die "cancelled"
+    return 1
+  fi
 
-  [[ -n "$name" ]] || die "project name cannot be empty"
+  if [[ -z "$name" ]]; then
+    die "project name cannot be empty"
+    return 1
+  fi
 
   if project:exists "$name"; then
     die "project already exists: $name"
