@@ -105,10 +105,12 @@ setup() {
   [[ "$output" == *"dependencies"* ]]
 }
 
-@test "dispatch:try help VERB execs VERB --help" {
-  run bash -c 'source '"${SCRATCH_HOME}"'/lib/dispatch.sh; dispatch:try "scratch" help doctor 2>&1'
+@test "dispatch:try dispatches help as a normal verb" {
+  # With bin/scratch-help existing, 'help' is a regular subcommand —
+  # no special-case interception in dispatch:try.
+  run bash -c 'source '"${SCRATCH_HOME}"'/lib/dispatch.sh; dispatch:try "scratch" help --help 2>&1'
   is "$status" 0
-  [[ "$output" == *"Usage"* || "$output" == *"USAGE"* ]]
+  [[ "$output" == *"Browse guides"* ]]
 }
 
 # ---------------------------------------------------------------------------

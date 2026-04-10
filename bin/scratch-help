@@ -13,10 +13,9 @@
 # The AI mode pipes the question to the self-help agent, which uses the
 # self-docs tool to read relevant guides and answer the question.
 #
-# Note on dispatch: `scratch help <verb>` (where <verb> is a known
-# subcommand) is intercepted by dispatch:try before reaching this script,
-# and redirects to `scratch <verb> --help`. Only non-verb arguments
-# reach this script as questions for the self-help agent.
+# All arguments reach this script as questions for the self-help agent.
+# For subcommand-specific help, users pass --help directly to the
+# command (e.g., `scratch search --help`).
 #-------------------------------------------------------------------------------
 
 set -euo pipefail

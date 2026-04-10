@@ -217,18 +217,6 @@ dispatch:try() {
       return 1
       ;;
 
-    help)
-      # help <verb> -> exec <verb> --help
-      shift
-      if (($# > 0)); then
-        local path
-        if path="$(dispatch:path "$prefix" "$1")"; then
-          exec "$path" --help
-        fi
-      fi
-      return 1
-      ;;
-
     synopsis)
       # Caller owns synopsis - it must handle this BEFORE calling dispatch:try
       return 1

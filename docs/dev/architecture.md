@@ -83,9 +83,8 @@ For parents and for commands that bypass `cmd.sh` (like `doctor`), handle synops
 
 ### The `help` Verb
 
-`scratch help <verb>` walks the tree.
-`dispatch:try` intercepts the literal token `help` and, if followed by a known verb, execs that verb's binary with `--help`.
-This works at any level: `scratch project help list` runs `scratch-project-list --help`.
+For subcommand-specific help, pass `--help` directly: `scratch search --help`.
+`scratch help` is a standalone subcommand (guide browser + self-help agent), not a dispatch shortcut.
 
 ## Directory Structure
 

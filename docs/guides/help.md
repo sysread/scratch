@@ -21,9 +21,10 @@ Passes your question to a self-help agent that reads scratch's own documentation
 
 ## Subcommand help
 
-```bash
-scratch help search
-scratch help project
-```
+For help on a specific command, use `--help` or `-h`:
 
-When the second word is a known subcommand, `scratch help <verb>` shows that subcommand's `--help` output. This is handled by the dispatch system, not the help agent.
+```bash
+scratch search --help
+scratch project --help
+scratch index -h
+```

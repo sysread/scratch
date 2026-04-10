@@ -107,7 +107,6 @@ Functions:
 
 `dispatch:try` handles these special cases without execing:
 - `-h` / `--help` - returns 1 (caller prints usage)
-- `help <verb>` - execs `<verb> --help` (walks the tree)
 - `synopsis` - returns 1 (caller must handle synopsis itself before calling)
 
 See the "Entry Point and the Subcommand System" section in `architecture.md` for the full design.
