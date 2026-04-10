@@ -6,5 +6,6 @@ User-facing documentation for scratch.
 - [File Indexing and Search](indexing.md) — indexing files, semantic search, file status
 - [Doctor](doctor.md) — checking your environment for missing dependencies
 - [Intuit](intuit.md) — the multi-phase intuition agent
+- [Help](help.md) — browsing guides and asking questions
 
 For internals and contributor documentation, see [../dev/](../dev/).

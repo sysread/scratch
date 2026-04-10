@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# self-docs tool — list and read scratch's own user guides
+#
+# action=list: print available guide names with titles
+# action=read: print the contents of a specific guide
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+{
+  source "$SCRATCH_HOME/lib/base.sh"
+}
+
+has-commands jq
+
+guides_dir="$SCRATCH_HOME/docs/guides"
+
+action="$(jq -r '.action // empty' <<<"$SCRATCH_TOOL_ARGS_JSON")"
+guide="$(jq -r '.guide // empty' <<<"$SCRATCH_TOOL_ARGS_JSON")"
+
+case "$action" in
+list)
+  for f in "$guides_dir"/*.md; do
+    [[ -f "$f" ]] || continue
+    name="$(basename "$f" .md)"
+    [[ "$name" == "README" ]] && continue
+    # Extract the first heading as the title
+    title="$(grep -m1 '^# ' "$f" | sed 's/^# //')"
+    printf '%s: %s\n' "$name" "$title"
+  done
+  ;;
+
+read)
+  if [[ -z "$guide" ]]; then
+    echo "self-docs: 'guide' parameter is required for action 'read'" >&2
+    exit 1
+  fi
+
+  path="$guides_dir/${guide}.md"
+  if [[ ! -f "$path" ]]; then
+    echo "self-docs: guide not found: $guide" >&2
+    exit 1
+  fi
+
+  cat "$path"
+  ;;
+
+*)
+  echo "self-docs: unknown action: $action" >&2
+  exit 1
+  ;;
+esac

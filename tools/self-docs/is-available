@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# self-docs tool - availability check
+#
+# Always available. The tool only reads files from docs/guides/ using
+# cat and grep — no external dependencies beyond POSIX.
+#
+# Sources base.sh because the contract test requires it.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"
+
+has-commands jq

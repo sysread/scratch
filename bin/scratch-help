@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch help - browse guides or ask questions about scratch
+#
+# Two modes:
+#   scratch help              interactive guide browser (gum filter)
+#   scratch help <question>   AI-powered help via the self-help agent
+#
+# The guide browser lists docs/guides/*.md, lets the user fuzzy-search
+# by title, and renders the selected guide with gum format.
+#
+# The AI mode pipes the question to the self-help agent, which uses the
+# self-docs tool to read relevant guides and answer the question.
+#
+# Note on dispatch: `scratch help <verb>` (where <verb> is a known
+# subcommand) is intercepted by dispatch:try before reaching this script,
+# and redirects to `scratch <verb> --help`. Only non-verb arguments
+# reach this script as questions for the self-help agent.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="Browse guides or ask questions about scratch"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+  source "$SCRIPTDIR/../lib/agent.sh"
+}
+
+has-min-bash-version 5
+
+SCRATCH_HOME="$(cd "$SCRIPTDIR/.." && pwd)"
+export SCRATCH_HOME
+
+cmd:define "help" "$_DESC"
+cmd:define-cli-usage "EXAMPLES" "$(
+  cat << 'EOF'
+scratch help                           # browse guides interactively
+scratch help "how do I index files?"   # ask the self-help agent
+EOF
+)"
+cmd:parse "$@"
+
+#-------------------------------------------------------------------------------
+# Guide browser
+#-------------------------------------------------------------------------------
+_help_browse() {
+  local guides_dir="$SCRIPTDIR/../docs/guides"
+  local -a names=()
+  local -a titles=()
+  local -a display=()
+
+  local f name title
+  for f in "$guides_dir"/*.md; do
+    [[ -f "$f" ]] || continue
+    name="$(basename "$f" .md)"
+    [[ "$name" == "README" ]] && continue
+    title="$(grep -m1 '^# ' "$f" | sed 's/^# //')"
+    names+=("$name")
+    titles+=("$title")
+    display+=("$title")
+  done
+
+  if ((${#display[@]} == 0)); then
+    tui:warn "no guides found"
+    return 1
+  fi
+
+  local choice
+  if ! tui:choose-one choice "${display[@]}"; then
+    return 0
+  fi
+
+  [[ -n "$choice" ]] || return 0
+
+  # Find the matching guide file
+  local i
+  for ((i = 0; i < ${#titles[@]}; i++)); do
+    if [[ "${titles[i]}" == "$choice" ]]; then
+      cat "$guides_dir/${names[i]}.md" | tui:format
+      return 0
+    fi
+  done
+}
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+main() {
+  local -a positionals=()
+  local arg
+  while IFS= read -r arg; do
+    [[ -z "$arg" ]] && continue
+    positionals+=("$arg")
+  done < <(cmd:rest || true)
+
+  if ((${#positionals[@]} == 0)); then
+    _help_browse
+  else
+    printf '%s' "${positionals[*]}" | agent:run self-help | tui:format
+  fi
+}
+
+main

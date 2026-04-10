@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# self-help agent - availability check
+#
+# Always available. Dependencies are transitive through the lib stack.
+# Sources base.sh because the contract test requires it.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"

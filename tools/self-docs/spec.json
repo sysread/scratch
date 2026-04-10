@@ -1,0 +1,19 @@
+{
+  "name": "self-docs",
+  "description": "List and read scratch's own user guides. Use this to find documentation about scratch features, commands, and workflows. This is NOT for the user's project files — it is for scratch's own help documentation.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["list", "read"],
+        "description": "list: show available guides. read: show the contents of a specific guide."
+      },
+      "guide": {
+        "type": "string",
+        "description": "Guide name (e.g., 'indexing', 'projects'). Required when action is 'read'."
+      }
+    },
+    "required": ["action"]
+  }
+}
