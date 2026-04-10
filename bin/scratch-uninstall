@@ -46,7 +46,7 @@ SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
 
 has-min-bash-version 5
 
-SCRATCH_HOME="$(cd "$SCRIPTDIR/.." && pwd)"
+SCRATCH_HOME="$(cd -P "$SCRIPTDIR/.." && pwd)"
 export SCRATCH_HOME
 
 cmd:define "uninstall" "$_DESC"
@@ -69,10 +69,18 @@ _find_symlink() {
   local candidate="$HOME/.local/bin/scratch"
   if [[ -L "$candidate" ]]; then
     local target
+    local target target_dir
     target="$(readlink "$candidate")"
     # Resolve relative symlinks
     if [[ "$target" != /* ]]; then
       target="$(cd -P "$(dirname "$candidate")" && pwd)/$target"
+    fi
+    # Resolve through filesystem symlinks like /var → /private/var.
+    # Uses the parent directory for resolution since the target file
+    # itself may not exist (e.g., after a partial uninstall).
+    target_dir="$(dirname "$target")"
+    if [[ -d "$target_dir" ]]; then
+      target="$(cd -P "$target_dir" && pwd)/$(basename "$target")"
     fi
     # Check it points into our install
     if [[ "$target" == "$SCRATCH_HOME"/* ]]; then

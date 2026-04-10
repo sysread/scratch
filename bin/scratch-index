@@ -50,7 +50,7 @@ SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
 
 has-min-bash-version 5
 
-SCRATCH_HOME="$(cd "$SCRIPTDIR/.." && pwd)"
+SCRATCH_HOME="$(cd -P "$SCRIPTDIR/.." && pwd)"
 export SCRATCH_HOME
 
 # shellcheck source-path=SCRIPTDIR/../lib

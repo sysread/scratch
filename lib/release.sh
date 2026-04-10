@@ -28,10 +28,10 @@ _RELEASE_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 has-commands curl tar
 
 #-------------------------------------------------------------------------------
-# Constants
+# Constants — overridable via env vars for testing
 #-------------------------------------------------------------------------------
-_RELEASE_REPO="sysread/scratch"
-_RELEASE_RAW_URL="https://raw.githubusercontent.com/$_RELEASE_REPO/main/VERSION"
+_RELEASE_REPO="${SCRATCH_RELEASE_REPO:-sysread/scratch}"
+_RELEASE_RAW_URL="${SCRATCH_RELEASE_VERSION_URL:-https://raw.githubusercontent.com/$_RELEASE_REPO/main/VERSION}"
 
 #-------------------------------------------------------------------------------
 # release:local-version

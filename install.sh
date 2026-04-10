@@ -14,13 +14,15 @@
 set -euo pipefail
 
 #-------------------------------------------------------------------------------
-# Constants
+# Constants — overridable via env vars for testing
 #-------------------------------------------------------------------------------
-REPO="sysread/scratch"
-INSTALL_DIR="$HOME/.local/share/scratch"
-BIN_DIR="$HOME/.local/bin"
+REPO="${SCRATCH_INSTALL_REPO:-sysread/scratch}"
+INSTALL_DIR="${SCRATCH_INSTALL_DIR:-$HOME/.local/share/scratch}"
+BIN_DIR="${SCRATCH_INSTALL_BIN_DIR:-$HOME/.local/bin}"
 SYMLINK="$BIN_DIR/scratch"
-VERSION_URL="https://raw.githubusercontent.com/$REPO/main/VERSION"
+VERSION_URL="${SCRATCH_INSTALL_VERSION_URL:-https://raw.githubusercontent.com/$REPO/main/VERSION}"
+SKIP_SETUP="${SCRATCH_INSTALL_SKIP_SETUP:-}"
+SKIP_PATH_CHECK="${SCRATCH_INSTALL_SKIP_PATH_CHECK:-}"
 
 #-------------------------------------------------------------------------------
 # Pre-flight checks
@@ -54,7 +56,7 @@ echo "Latest version: $VERSION"
 #-------------------------------------------------------------------------------
 # Download and unpack
 #-------------------------------------------------------------------------------
-TARBALL_URL="https://github.com/$REPO/releases/download/v${VERSION}/scratch-${VERSION}.tar.gz"
+TARBALL_URL="${SCRATCH_INSTALL_TARBALL_URL:-https://github.com/$REPO/releases/download/v${VERSION}/scratch-${VERSION}.tar.gz}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
@@ -144,17 +146,19 @@ _setup_path() {
   esac
 }
 
-_setup_path
+[[ -n "$SKIP_PATH_CHECK" ]] || _setup_path
 
 #-------------------------------------------------------------------------------
 # Install runtime dependencies
 #-------------------------------------------------------------------------------
-echo ""
-echo "Installing runtime dependencies..."
-if ! "$INSTALL_DIR/helpers/setup"; then
+if [[ -z "$SKIP_SETUP" ]]; then
   echo ""
-  echo "Some dependencies could not be installed automatically."
-  echo "Run 'scratch doctor' after fixing your environment."
+  echo "Installing runtime dependencies..."
+  if ! "$INSTALL_DIR/helpers/setup"; then
+    echo ""
+    echo "Some dependencies could not be installed automatically."
+    echo "Run 'scratch doctor' after fixing your environment."
+  fi
 fi
 
 #-------------------------------------------------------------------------------
