@@ -52,10 +52,10 @@ while IFS= read -r line; do
     if [[ -n "${TUI_PROGRESS_FILE:-}" ]]; then
       _consume_done=$((_consume_done + 1))
       if ((_consume_total == 0)) && [[ -s "$TUI_PROGRESS_FILE" ]]; then
-        read -r _ _consume_total < "$TUI_PROGRESS_FILE" 2> /dev/null || true
+        read -r _ _consume_total <"$TUI_PROGRESS_FILE" 2>/dev/null || true
       fi
       if ((_consume_total > 0)); then
-        printf '%d %d\n' "$_consume_done" "$_consume_total" > "$TUI_PROGRESS_FILE"
+        printf '%d %d\n' "$_consume_done" "$_consume_total" >"$TUI_PROGRESS_FILE"
       fi
     fi
   fi
