@@ -30,6 +30,11 @@ has-commands jq
 
 project="$1"
 
+# Progress tracking — read the total from the spinner progress file
+# (written by produce) and update done count as entries are finalized.
+_consume_done=0
+_consume_total=0
+
 while IFS= read -r line; do
   [[ -n "$line" ]] || continue
 
@@ -42,5 +47,16 @@ while IFS= read -r line; do
   if [[ -n "$entry_id" && -n "$entry_sha" && -n "$embed_json" && "$embed_json" != "null" ]]; then
     index:finalize "$project" file "$entry_id" "$entry_sha" "$embed_json"
     tui:info "embedded" "file=$entry_id"
+
+    # Update spinner progress file
+    if [[ -n "${TUI_PROGRESS_FILE:-}" ]]; then
+      _consume_done=$((_consume_done + 1))
+      if ((_consume_total == 0)) && [[ -s "$TUI_PROGRESS_FILE" ]]; then
+        read -r _ _consume_total < "$TUI_PROGRESS_FILE" 2> /dev/null || true
+      fi
+      if ((_consume_total > 0)); then
+        printf '%d %d\n' "$_consume_done" "$_consume_total" > "$TUI_PROGRESS_FILE"
+      fi
+    fi
   fi
 done

@@ -181,3 +181,38 @@ setup() {
   run --separate-stderr tui:info-if MY_FLAG "should not appear"
   is "$stderr" ""
 }
+
+# ---------------------------------------------------------------------------
+# tui:with-spinner progress file
+# ---------------------------------------------------------------------------
+
+@test "tui:with-spinner exports TUI_PROGRESS_FILE to the command" {
+  # The command runs in a subshell; verify it can see the env var and
+  # that it points to an existing file.
+  _check_progress_env() {
+    [[ -n "$TUI_PROGRESS_FILE" ]] || return 1
+    [[ -f "$TUI_PROGRESS_FILE" ]] || return 1
+    printf 'ok'
+  }
+
+  local out
+  out="$(tui:with-spinner "test" _check_progress_env < /dev/null)"
+  is "$out" "ok"
+}
+
+@test "tui:with-spinner unsets TUI_PROGRESS_FILE after completion" {
+  _noop() { :; }
+  tui:with-spinner "test" _noop < /dev/null
+  [[ -z "${TUI_PROGRESS_FILE:-}" ]]
+}
+
+@test "tui:with-spinner cleans up progress temp file" {
+  local captured_path
+  _capture_path() {
+    printf '%s' "$TUI_PROGRESS_FILE"
+  }
+
+  captured_path="$(tui:with-spinner "test" _capture_path < /dev/null)"
+  [[ -n "$captured_path" ]]
+  [[ ! -f "$captured_path" ]]
+}

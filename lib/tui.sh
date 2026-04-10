@@ -20,6 +20,7 @@ _TUI_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 {
   source "$_TUI_SCRIPTDIR/base.sh"
   source "$_TUI_SCRIPTDIR/termio.sh"
+  source "$_TUI_SCRIPTDIR/tempfiles.sh"
 }
 
 has-commands gum
@@ -308,11 +309,19 @@ tui:with-spinner() {
   shift
 
   # Capture stdin so the background spinner loop doesn't consume it.
-  local tmpin tmpout tmperr
-  tmpin="$(mktemp -t scratch-spin-in.XXXXXX)"
-  tmpout="$(mktemp -t scratch-spin-out.XXXXXX)"
-  tmperr="$(mktemp -t scratch-spin-err.XXXXXX)"
+  local tmpin tmpout tmperr tmpprogress
+  tmp:make tmpin "${TMPDIR:-/tmp}/scratch-spin-in.XXXXXX"
+  tmp:make tmpout "${TMPDIR:-/tmp}/scratch-spin-out.XXXXXX"
+  tmp:make tmperr "${TMPDIR:-/tmp}/scratch-spin-err.XXXXXX"
+  tmp:make tmpprogress "${TMPDIR:-/tmp}/scratch-spin-progress.XXXXXX"
+  tmp:track "${tmpout}.rc"
   cat > "$tmpin"
+
+  # Export the progress file path so child processes (pipeline stages,
+  # subshells) can write updates. Format: "done total" — two integers,
+  # space-separated. When present, the spinner renders progress as
+  # [done/total] pct% before the rotating phrase.
+  export TUI_PROGRESS_FILE="$tmpprogress"
 
   # Run the command in the background, capturing stdout, stderr, and
   # exit code separately.
@@ -348,9 +357,21 @@ tui:with-spinner() {
 
     local phrase_idx=0
     local frames_per_phrase=25
+    local _pg_done _pg_total _pg_pct progress_text
 
     while kill -0 "$work_pid" 2> /dev/null; do
-      printf '\r\033[2K  %s %s' "${frames[fi % ${#frames[@]}]}" "${phrases[phrase_idx % ${#phrases[@]}]}" >&2
+      # Read progress from the shared file if any stage has written it
+      progress_text=""
+      if [[ -s "$tmpprogress" ]]; then
+        if read -r _pg_done _pg_total < "$tmpprogress" 2> /dev/null; then
+          if [[ -n "${_pg_done:-}" && -n "${_pg_total:-}" ]] && ((_pg_total > 0)); then
+            _pg_pct=$((_pg_done * 100 / _pg_total))
+            progress_text="[${_pg_done}/${_pg_total}] ${_pg_pct}% · "
+          fi
+        fi
+      fi
+
+      printf '\r\033[2K  %s %s%s' "${frames[fi % ${#frames[@]}]}" "$progress_text" "${phrases[phrase_idx % ${#phrases[@]}]}" >&2
       fi=$((fi + 1))
 
       if ((fi % frames_per_phrase == 0)); then
@@ -371,7 +392,8 @@ tui:with-spinner() {
   cat "$tmpout"
   cat "$tmperr" >&2
 
-  rm -f "$tmpout" "$tmperr" "$tmpin" "${tmpout}.rc"
+  unset TUI_PROGRESS_FILE
+  rm -f "$tmpout" "$tmperr" "$tmpin" "$tmpprogress" "${tmpout}.rc"
   return "$rc"
 }
 

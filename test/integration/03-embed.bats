@@ -25,7 +25,7 @@ setup() {
 
 @test "embed:text produces a 384-dimensional vector" {
   local output
-  output="$(embed:text "hello world" 2>/dev/null)"
+  output="$(embed:text "hello world" 2> /dev/null)"
 
   local dim
   dim="$(printf '%s' "$output" | jq 'length')"
@@ -40,7 +40,7 @@ setup() {
 @test "embed:pool processes JSONL and returns embeddings" {
   local output
   output="$(printf '{"id":"a","text":"hello world"}\n{"id":"b","text":"goodbye"}\n' \
-    | embed:pool 2 2>/dev/null)"
+    | embed:pool 2 2> /dev/null)"
 
   # Should have 2 lines
   local count
@@ -57,7 +57,7 @@ setup() {
 
 @test "embed:pool exits cleanly when stdin closes" {
   local output
-  output="$(printf '{"id":"1","text":"test"}\n' | embed:pool 2 2>/dev/null)"
+  output="$(printf '{"id":"1","text":"test"}\n' | embed:pool 2 2> /dev/null)"
 
   # Should produce one result and exit
   local id

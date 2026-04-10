@@ -136,6 +136,24 @@ setup() {
   [[ "$out" == *"stats.awk"* ]]
 }
 
+@test "produce writes total to TUI_PROGRESS_FILE" {
+  export TUI_PROGRESS_FILE="${BATS_TEST_TMPDIR}/progress"
+  touch "$TUI_PROGRESS_FILE"
+
+  "$PRODUCE" myproject "$PROJECT_ROOT" false "" > /dev/null 2>&1
+
+  local pg_done pg_total
+  read -r pg_done pg_total < "$TUI_PROGRESS_FILE"
+  is "$pg_done" "0"
+  is "$pg_total" "3"
+}
+
+@test "produce skips progress file when TUI_PROGRESS_FILE is unset" {
+  unset TUI_PROGRESS_FILE
+  run "$PRODUCE" myproject "$PROJECT_ROOT" false ""
+  is "$status" 0
+}
+
 @test "produce SHA is deterministic" {
   local out1 out2
   out1="$("$PRODUCE" myproject "$PROJECT_ROOT" false "" 2> /dev/null)"
@@ -217,4 +235,33 @@ setup() {
 @test "consume handles empty input" {
   run "$CONSUME" myproject < /dev/null
   is "$status" 0
+}
+
+# ---------------------------------------------------------------------------
+# consume progress tracking
+# ---------------------------------------------------------------------------
+
+@test "consume updates TUI_PROGRESS_FILE as entries are finalized" {
+  index:update-summary myproject file "a.pl" "file a"
+  index:update-summary myproject file "b.awk" "file b"
+
+  export TUI_PROGRESS_FILE="${BATS_TEST_TMPDIR}/progress"
+  # Seed with total from produce (0 done, 2 total)
+  printf '0 2\n' > "$TUI_PROGRESS_FILE"
+
+  printf '{"id":"a.pl","sha":"aaa","embedding":[1.0]}\n{"id":"b.awk","sha":"bbb","embedding":[2.0]}\n' \
+    | "$CONSUME" myproject 2> /dev/null
+
+  local pg_done pg_total
+  read -r pg_done pg_total < "$TUI_PROGRESS_FILE"
+  is "$pg_done" "2"
+  is "$pg_total" "2"
+}
+
+@test "consume skips progress when TUI_PROGRESS_FILE is unset" {
+  index:update-summary myproject file "a.pl" "file a"
+  unset TUI_PROGRESS_FILE
+
+  printf '{"id":"a.pl","sha":"aaa","embedding":[1.0]}\n' \
+    | "$CONSUME" myproject 2> /dev/null
 }

@@ -46,6 +46,7 @@ SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
   source "$SCRIPTDIR/../lib/index.sh"
   source "$SCRIPTDIR/../lib/embed.sh"
   source "$SCRIPTDIR/../lib/tui.sh"
+  source "$SCRIPTDIR/../lib/tempfiles.sh"
 }
 
 has-min-bash-version 5
@@ -65,6 +66,7 @@ _index_cleanup() {
 }
 trap '_index_cleanup; exit 130' INT
 trap '_index_cleanup; exit 143' TERM
+tmp:install-traps
 
 cmd:define "index" "$_DESC"
 cmd:optional-arg "--project" "-p" "Project name (default: detect from cwd)" "string" ""
@@ -95,10 +97,16 @@ main() {
 
   local helpers="$SCRIPTDIR/../helpers/index"
 
-  "$helpers/produce" "$project_name" "$proj_root" "$proj_is_git" "$proj_exclude" \
-    | "$helpers/summarize" "$project_name" "$summary_workers" \
-    | embed:pool "$embed_workers" \
-    | "$helpers/consume" "$project_name"
+  # Pipeline wrapped in a function for tui:with-spinner. Variables are
+  # visible in the subshell via bash's fork-inherited scope.
+  _index_pipeline() {
+    "$helpers/produce" "$project_name" "$proj_root" "$proj_is_git" "$proj_exclude" \
+      | "$helpers/summarize" "$project_name" "$summary_workers" \
+      | embed:pool "$embed_workers" \
+      | "$helpers/consume" "$project_name"
+  }
+
+  tui:with-spinner "Indexing..." _index_pipeline < /dev/null
 
   local end_time elapsed
   end_time="$(date +%s)"
