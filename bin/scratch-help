@@ -63,9 +63,24 @@ cmd:parse "$@"
 #-------------------------------------------------------------------------------
 _help_ask() {
   local question="$1"
-  gum spin --show-stdout --title "Thinking..." -- \
-    bash -c 'printf "%s" "$1" | agent:run self-help' _ "$question" \
-    | tui:format
+
+  # Run the agent in the current process (not via gum spin -- bash -c)
+  # because exported functions like agent:run depend on non-exported
+  # private variables (_AGENT_SCRIPTDIR etc.) that don't survive a
+  # new bash process.
+  local tmpout
+  tmpout="$(mktemp -t scratch-help.XXXXXX)"
+
+  # Start spinner in background, run agent in foreground
+  gum spin --title "Thinking..." -- sleep 86400 &
+  local spinner_pid=$!
+
+  printf '%s' "$question" | agent:run self-help > "$tmpout" 2> /dev/null
+  kill "$spinner_pid" 2> /dev/null
+  wait "$spinner_pid" 2> /dev/null || true
+
+  tui:format < "$tmpout"
+  rm -f "$tmpout"
 }
 
 #-------------------------------------------------------------------------------
