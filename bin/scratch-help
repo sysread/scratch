@@ -4,8 +4,8 @@
 # scratch help - browse guides or ask questions about scratch
 #
 # Two modes:
-#   scratch help              interactive guide browser (gum filter)
-#   scratch help <question>   AI-powered help via the self-help agent
+#   scratch help                        interactive guide browser (gum filter)
+#   scratch help -q "how do I index?"   AI-powered help via the self-help agent
 #
 # The guide browser lists docs/guides/*.md, lets the user fuzzy-search
 # by title, and renders the selected guide with gum format.
@@ -13,7 +13,6 @@
 # The AI mode pipes the question to the self-help agent, which uses the
 # self-docs tool to read relevant guides and answer the question.
 #
-# All arguments reach this script as questions for the self-help agent.
 # For subcommand-specific help, users pass --help directly to the
 # command (e.g., `scratch search --help`).
 #-------------------------------------------------------------------------------
@@ -51,10 +50,11 @@ SCRATCH_HOME="$(cd "$SCRIPTDIR/.." && pwd)"
 export SCRATCH_HOME
 
 cmd:define "help" "$_DESC"
+cmd:optional-arg "--question" "-q" "Ask a question about scratch" "string" ""
 cmd:define-cli-usage "EXAMPLES" "$(
   cat << 'EOF'
-scratch help                           # browse guides interactively
-scratch help "how do I index files?"   # ask the self-help agent
+scratch help                              # browse guides interactively
+scratch help -q "how do I index files?"   # ask the self-help agent
 EOF
 )"
 cmd:parse "$@"
@@ -105,17 +105,13 @@ _help_browse() {
 # Main
 #-------------------------------------------------------------------------------
 main() {
-  local -a positionals=()
-  local arg
-  while IFS= read -r arg; do
-    [[ -z "$arg" ]] && continue
-    positionals+=("$arg")
-  done < <(cmd:rest || true)
+  local question
+  question="$(cmd:get --question)"
 
-  if ((${#positionals[@]} == 0)); then
-    _help_browse
+  if [[ -n "$question" ]]; then
+    printf '%s' "$question" | agent:run self-help | tui:format
   else
-    printf '%s' "${positionals[*]}" | agent:run self-help | tui:format
+    _help_browse
   fi
 }
 

@@ -13,8 +13,8 @@ Opens an interactive fuzzy-search picker listing all available guides. Select on
 ## Asking questions
 
 ```bash
-scratch help "how do I index my project?"
-scratch help "what does scratch doctor check?"
+scratch help -q "how do I index my project?"
+scratch help -q "what does scratch doctor check?"
 ```
 
 Passes your question to a self-help agent that reads scratch's own documentation to answer. The agent uses the `self-docs` tool to find and read relevant guides.
