@@ -4,17 +4,16 @@
 # scratch help - browse guides or ask questions about scratch
 #
 # Two modes:
-#   scratch help                        interactive guide browser (gum filter)
-#   scratch help -q "how do I index?"   AI-powered help via the self-help agent
+#   scratch help                        prompt for a question (gum write)
+#   scratch help -q "how do I index?"   ask directly via flag
 #
-# The guide browser lists docs/guides/*.md, lets the user fuzzy-search
-# by title, and renders the selected guide with gum format.
+# Both modes pipe the question to the self-help agent, which uses the
+# self-docs tool to read scratch's guides and answer. The response is
+# shown with a spinner while the agent works, then rendered with gum
+# format.
 #
-# The AI mode pipes the question to the self-help agent, which uses the
-# self-docs tool to read relevant guides and answer the question.
-#
-# For subcommand-specific help, users pass --help directly to the
-# command (e.g., `scratch search --help`).
+# For subcommand-specific help, use --help directly on the command
+# (e.g., `scratch search --help`).
 #-------------------------------------------------------------------------------
 
 set -euo pipefail
@@ -53,52 +52,21 @@ cmd:define "help" "$_DESC"
 cmd:optional-arg "--question" "-q" "Ask a question about scratch" "string" ""
 cmd:define-cli-usage "EXAMPLES" "$(
   cat << 'EOF'
-scratch help                              # browse guides interactively
-scratch help -q "how do I index files?"   # ask the self-help agent
+scratch help                              # prompt for a question interactively
+scratch help -q "how do I index files?"   # ask directly
 EOF
 )"
 cmd:parse "$@"
 
 #-------------------------------------------------------------------------------
-# Guide browser
+# Ask the self-help agent
 #-------------------------------------------------------------------------------
-_help_browse() {
-  local guides_dir="$SCRIPTDIR/../docs/guides"
-  local -a names=()
-  local -a titles=()
-  local -a display=()
-
-  local f name title
-  for f in "$guides_dir"/*.md; do
-    [[ -f "$f" ]] || continue
-    name="$(basename "$f" .md)"
-    [[ "$name" == "README" ]] && continue
-    title="$(grep -m1 '^# ' "$f" | sed 's/^# //')"
-    names+=("$name")
-    titles+=("$title")
-    display+=("$title")
-  done
-
-  if ((${#display[@]} == 0)); then
-    tui:warn "no guides found"
-    return 1
-  fi
-
-  local choice
-  if ! tui:choose-one choice "${display[@]}"; then
-    return 0
-  fi
-
-  [[ -n "$choice" ]] || return 0
-
-  # Find the matching guide file
-  local i
-  for ((i = 0; i < ${#titles[@]}; i++)); do
-    if [[ "${titles[i]}" == "$choice" ]]; then
-      cat "$guides_dir/${names[i]}.md" | tui:format
-      return 0
-    fi
-  done
+_help_ask() {
+  local question="$1"
+  printf '%s' "$question" \
+    | agent:run self-help \
+    | tui:spin "Thinking..." \
+    | tui:format
 }
 
 #-------------------------------------------------------------------------------
@@ -109,9 +77,21 @@ main() {
   question="$(cmd:get --question)"
 
   if [[ -n "$question" ]]; then
-    printf '%s' "$question" | agent:run self-help | tui:format
+    _help_ask "$question"
   else
-    _help_browse
+    # No -q flag: prompt for a question interactively
+    question="$(gum write \
+      --width 80 \
+      --height 6 \
+      --char-limit 0 \
+      --header "What do you need help with?" \
+      --placeholder "e.g., how do I index my project?")"
+
+    if [[ -z "$question" ]]; then
+      return 0
+    fi
+
+    _help_ask "$question"
   fi
 }
 
