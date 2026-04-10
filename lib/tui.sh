@@ -282,6 +282,27 @@ export -f tui:write
 #   tui:with-spinner "Thinking..." agent:run self-help < input.txt
 #   result="$(tui:with-spinner "Indexing..." some_function)"
 #-------------------------------------------------------------------------------
+# Rotating status phrases for the spinner. Shuffled on each invocation
+# so the user sees a different sequence every time.
+_TUI_SPINNER_PHRASES=(
+  "Reversing the polarity of the context window"
+  "Recalibrating the embedding matrix flux"
+  "Initializing quantum token shuffler"
+  "Stabilizing token interference"
+  "Aligning latent vector manifold"
+  "Charging semantic field resonator"
+  "Inverting prompt entropy"
+  "Redirecting gradient descent pathways"
+  "Synchronizing the decoder attention"
+  "Calibrating neural activation dampener"
+  "Polarizing self-attention mechanism"
+  "Recharging photonic energy in the deep learning nodes"
+  "Fluctuating the vector space harmonics"
+  "Boosting the backpropagation neutrino field"
+  "Cross-referencing the hallucination core"
+  "Reticulating splines"
+)
+
 tui:with-spinner() {
   local title="$1"
   shift
@@ -301,15 +322,41 @@ tui:with-spinner() {
   } &
   local work_pid=$!
 
-  # Spin in the foreground on stderr. The spinner frames render on a
-  # single line using carriage return, then get erased when the work
-  # finishes. Only renders when stderr is a TTY.
-  local -a frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-  local i=0
+  # Spin in the foreground on stderr. The spinner renders on a single
+  # line using carriage return, erased when the work finishes. Only
+  # renders when stderr is a TTY.
+  #
+  # The status text rotates through shuffled sci-fi phrases every 25
+  # frames (~2.5s at 100ms/frame), starting with the caller's title.
   if [[ -t 2 ]]; then
+    local -a frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local fi=0
+
+    # Shuffle the phrases (Fisher-Yates via $RANDOM)
+    local -a phrases=("${_TUI_SPINNER_PHRASES[@]}")
+    local n=${#phrases[@]}
+    local j tmp
+    for ((j = n - 1; j > 0; j--)); do
+      local k=$((RANDOM % (j + 1)))
+      tmp="${phrases[j]}"
+      phrases[j]="${phrases[k]}"
+      phrases[k]="$tmp"
+    done
+
+    local current_text="$title"
+    local phrase_idx=0
+    local frames_per_phrase=25
+
     while kill -0 "$work_pid" 2> /dev/null; do
-      printf '\r%s %s' "${frames[i % ${#frames[@]}]}" "$title" >&2
-      i=$((i + 1))
+      printf '\r\033[2K%s %s' "${frames[fi % ${#frames[@]}]}" "$current_text" >&2
+      fi=$((fi + 1))
+
+      # Rotate status text every ~2.5s
+      if ((fi % frames_per_phrase == 0)); then
+        current_text="${phrases[phrase_idx % ${#phrases[@]}]}"
+        phrase_idx=$((phrase_idx + 1))
+      fi
+
       sleep 0.1
     done
     # Clear the spinner line
