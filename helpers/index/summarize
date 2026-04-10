@@ -53,7 +53,7 @@ _summarize_one() {
     local empty_summary='{"summary":"Empty, zero-length file.","questions":[]}'
     index:record "$project" file "$ident" "$sha" "$empty_summary"
     tui:debug-if SCRATCH_DEBUG_INDEX "summarize skipped" "file=$ident" "reason=empty file"
-    printf 'skip\n' >>"$tallyfile"
+    printf 'skip\n' >> "$tallyfile"
     return 0
   fi
 
@@ -65,9 +65,9 @@ _summarize_one() {
   # SHA mismatch and retry this file. This makes indexing idempotent:
   # partial failures never corrupt previously-good data.
   local summary=""
-  if ! summary="$(agent:run summary <"$file_path" 2>&1)"; then
+  if ! summary="$(agent:run summary < "$file_path" 2>&1)"; then
     tui:warn "summarize failed" "file=$ident" "error=$summary"
-    printf 'fail\n' >>"$tallyfile"
+    printf 'fail\n' >> "$tallyfile"
     return 1
   fi
 
@@ -91,8 +91,8 @@ _summarize_one() {
     '{id: $id, sha: $sha, text: $text}')"
   flock "$lockfile" printf '%s\n' "$out_json"
 
-  printf 'ok\n' >>"$tallyfile"
-  tui:info "summarized" "file=$ident"
+  printf 'ok\n' >> "$tallyfile"
+  tui:debug-if SCRATCH_DEBUG_INDEX "summarized" "file=$ident"
 }
 
 pids=()
@@ -132,7 +132,7 @@ done
 # Report tally. grep -c prints "0" AND returns exit code 1 on no
 # matches, so || echo 0 would produce "0\n0". Use || true instead
 # and let grep's "0" output stand.
-ok_count="$(grep -c '^ok$' "$tallyfile" 2>/dev/null || true)"
-fail_count="$(grep -c '^fail$' "$tallyfile" 2>/dev/null || true)"
-skip_count="$(grep -c '^skip$' "$tallyfile" 2>/dev/null || true)"
+ok_count="$(grep -c '^ok$' "$tallyfile" 2> /dev/null || true)"
+fail_count="$(grep -c '^fail$' "$tallyfile" 2> /dev/null || true)"
+skip_count="$(grep -c '^skip$' "$tallyfile" 2> /dev/null || true)"
 tui:info "summarize complete" "ok=${ok_count}" "failed=${fail_count}" "skipped=${skip_count}"
