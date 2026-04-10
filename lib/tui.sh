@@ -286,37 +286,45 @@ tui:with-spinner() {
   local title="$1"
   shift
 
-  # Capture stdin before starting the spinner so the background
-  # gum process doesn't compete for the fd.
-  local tmpin tmpout
+  # Capture stdin so the background spinner loop doesn't consume it.
+  local tmpin tmpout tmperr
   tmpin="$(mktemp -t scratch-spin-in.XXXXXX)"
   tmpout="$(mktemp -t scratch-spin-out.XXXXXX)"
+  tmperr="$(mktemp -t scratch-spin-err.XXXXXX)"
   cat > "$tmpin"
 
-  # Run gum spin with `cat` as the dummy command. The real work
-  # happens in a background subshell that signals the dummy `cat`
-  # to exit when done. This keeps gum in control of the terminal
-  # for clean spinner rendering.
-  local fifo
-  fifo="$(mktemp -u -t scratch-spin-fifo.XXXXXX)"
-  mkfifo "$fifo"
-
-  # Background: do the real work, then unblock the spinner's cat
+  # Run the command in the background, capturing stdout, stderr, and
+  # exit code separately.
   {
-    "$@" < "$tmpin" > "$tmpout" 2> /dev/null
-    printf 'done\n' > "$fifo"
+    "$@" < "$tmpin" > "$tmpout" 2> "$tmperr"
+    printf '%s' "$?" > "${tmpout}.rc"
   } &
   local work_pid=$!
 
-  # Foreground: gum spin runs `cat` which blocks on the fifo until
-  # the background work finishes and writes to it
-  gum spin --title "$title" -- cat "$fifo" > /dev/null 2>&1
+  # Spin in the foreground on stderr. The spinner frames render on a
+  # single line using carriage return, then get erased when the work
+  # finishes. Only renders when stderr is a TTY.
+  local -a frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  local i=0
+  if [[ -t 2 ]]; then
+    while kill -0 "$work_pid" 2> /dev/null; do
+      printf '\r%s %s' "${frames[i % ${#frames[@]}]}" "$title" >&2
+      i=$((i + 1))
+      sleep 0.1
+    done
+    # Clear the spinner line
+    printf '\r\033[2K' >&2
+  fi
 
-  wait "$work_pid" 2> /dev/null
-  local rc=$?
+  wait "$work_pid" 2> /dev/null || true
+  local rc
+  rc="$(cat "${tmpout}.rc" 2> /dev/null || echo 1)"
 
+  # Replay stdout and stderr as if the command ran directly
   cat "$tmpout"
-  rm -f "$tmpout" "$tmpin" "$fifo"
+  cat "$tmperr" >&2
+
+  rm -f "$tmpout" "$tmperr" "$tmpin" "${tmpout}.rc"
   return "$rc"
 }
 
