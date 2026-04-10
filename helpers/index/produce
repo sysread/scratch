@@ -16,7 +16,7 @@ set -euo pipefail
 
 SCRIPT="${BASH_SOURCE[0]}"
 while [[ -L "$SCRIPT" ]]; do
-  DIR="$(cd -P "$(dirname "$SCRIPT")" >/dev/null 2>&1 && pwd)"
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
   TARGET="$(readlink "$SCRIPT")"
   [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
   SCRIPT="$TARGET"
@@ -62,10 +62,10 @@ walk_files() {
     while IFS= read -r pattern; do
       [[ -n "$pattern" ]] || continue
       find_args+=(-not -path "$root/$pattern")
-    done <<<"$exclude"
+    done <<< "$exclude"
 
-    find "${find_args[@]}" -print0 |
-      while IFS= read -r -d '' path; do
+    find "${find_args[@]}" -print0 \
+      | while IFS= read -r -d '' path; do
         printf '%s\n' "${path#"$root"/}"
       done
   fi
@@ -105,7 +105,7 @@ done
 # Publish the total to the spinner progress file so downstream stages
 # can report completion as [done/total].
 if [[ -n "${TUI_PROGRESS_FILE:-}" ]]; then
-  printf '0 %d\n' "$emit_count" >"$TUI_PROGRESS_FILE"
+  printf '0 %d\n' "$emit_count" > "$TUI_PROGRESS_FILE"
 fi
 
 tui:info "index diff" "to_process=${emit_count}" "orphans_removed=${orphan_count}" "current=${skip_count}"

@@ -26,7 +26,7 @@ switch_case_indent = true
 space_redirects = true
 
 # Extensionless scripts in bin/ and helpers/
-[{bin/*,helpers/*}]
+[{bin/*,helpers/**}]
 binary_next_line = true
 switch_case_indent = true
 space_redirects = true
