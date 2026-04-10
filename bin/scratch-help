@@ -63,9 +63,8 @@ cmd:parse "$@"
 #-------------------------------------------------------------------------------
 _help_ask() {
   local question="$1"
-  printf '%s' "$question" \
-    | agent:run self-help \
-    | tui:spin "Thinking..." \
+  gum spin --show-stdout --title "Thinking..." -- \
+    bash -c 'printf "%s" "$1" | agent:run self-help' _ "$question" \
     | tui:format
 }
 
