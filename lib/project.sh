@@ -195,10 +195,20 @@ export -f project:delete
 # Identify which configured project the current directory belongs to.
 # Sets OUT_NAME to the project name and OUT_IS_WORKTREE to "true"/"false".
 #
+# A project is always registered against a main repo root, never a
+# worktree path. Worktrees are views of a project, not separate
+# projects — they share the same config, index, and settings. When
+# the user runs `scratch index` from a worktree, they expect it to
+# operate on the main project. This function resolves worktrees to
+# their parent repo so a single project registration covers all of
+# its worktrees automatically.
+#
 # Detection strategy:
-#   1. If cwd is in a git worktree, resolve to the main repo's root.
-#   2. Walk configured projects and match cwd (or resolved root) against
-#      each project's root path.
+#   1. If cwd is in a git worktree, resolve to the main repo's root
+#      (the parent of --git-common-dir, which points to the shared
+#      .git directory).
+#   2. Walk configured projects and match the resolved root (or cwd
+#      for non-worktree cases) against each project's stored root.
 #
 # Returns 1 if no matching project is found.
 #-------------------------------------------------------------------------------
@@ -226,10 +236,11 @@ project:detect() {
 
     # In a worktree, --git-dir points to .git/worktrees/<name> while
     # --git-common-dir points to the main repo's .git. If they differ,
-    # we're in a worktree and should resolve to the main repo.
+    # we're in a worktree — resolve to the main repo root so we match
+    # against the project registration (which is always the main root,
+    # not any worktree path).
     if [[ "$git_dir" != "$git_common_dir" ]]; then
       is_worktree=true
-      # git-common-dir is the main repo's .git dir; its parent is the root
       resolved_root="$(dirname "$git_common_dir")"
     else
       resolved_root="$toplevel"

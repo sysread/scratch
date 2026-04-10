@@ -83,4 +83,10 @@ Per-project data (like the search index database) is stored alongside the settin
 
 ## Worktree support
 
-If you're in a git worktree, scratch resolves it to the parent repository's project. This means `scratch project show` from a worktree shows the main project, and `scratch index` from a worktree indexes the main repo's files.
+A project is always registered against the main repo root, never a worktree path. Worktrees are treated as views of the same project — they share the same config, search index, and settings. When you run any scratch command from a worktree, it automatically resolves to the parent repository's project.
+
+This means:
+- `scratch project show` from a worktree shows the main project
+- `scratch index` from a worktree indexes the main repo's files
+- `scratch search` from a worktree searches the main project's index
+- One project registration covers all of its worktrees automatically
