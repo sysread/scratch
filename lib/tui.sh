@@ -286,26 +286,37 @@ tui:with-spinner() {
   local title="$1"
   shift
 
-  local tmpout
-  tmpout="$(mktemp -t scratch-spin.XXXXXX)"
-
-  # Capture stdin before starting the spinner (the spinner's bg process
-  # would compete for stdin otherwise).
-  local tmpin
+  # Capture stdin before starting the spinner so the background
+  # gum process doesn't compete for the fd.
+  local tmpin tmpout
   tmpin="$(mktemp -t scratch-spin-in.XXXXXX)"
+  tmpout="$(mktemp -t scratch-spin-out.XXXXXX)"
   cat > "$tmpin"
 
-  gum spin --title "$title" -- sleep 86400 &
-  local spinner_pid=$!
+  # Run gum spin with `cat` as the dummy command. The real work
+  # happens in a background subshell that signals the dummy `cat`
+  # to exit when done. This keeps gum in control of the terminal
+  # for clean spinner rendering.
+  local fifo
+  fifo="$(mktemp -u -t scratch-spin-fifo.XXXXXX)"
+  mkfifo "$fifo"
 
-  "$@" < "$tmpin" > "$tmpout" 2> /dev/null
+  # Background: do the real work, then unblock the spinner's cat
+  {
+    "$@" < "$tmpin" > "$tmpout" 2> /dev/null
+    printf 'done\n' > "$fifo"
+  } &
+  local work_pid=$!
+
+  # Foreground: gum spin runs `cat` which blocks on the fifo until
+  # the background work finishes and writes to it
+  gum spin --title "$title" -- cat "$fifo" > /dev/null 2>&1
+
+  wait "$work_pid" 2> /dev/null
   local rc=$?
 
-  kill "$spinner_pid" 2> /dev/null
-  wait "$spinner_pid" 2> /dev/null || true
-
   cat "$tmpout"
-  rm -f "$tmpout" "$tmpin"
+  rm -f "$tmpout" "$tmpin" "$fifo"
   return "$rc"
 }
 
