@@ -63,6 +63,7 @@ cmd:parse "$@"
 #-------------------------------------------------------------------------------
 _help_ask() {
   local question="$1"
+  printf '> %s\n' "$question" | tui:format >&2
   printf '%s' "$question" \
     | tui:with-spinner "Thinking..." agent:run self-help \
     | tui:format
