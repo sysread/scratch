@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch chats show - display a conversation
+#
+# Prints a conversation's messages formatted with role headers, or dumps
+# the raw JSONL for programmatic access.
+#
+# Examples:
+#   scratch chats show -s abc12345                # pretty-print
+#   scratch chats show -s abc12345 --raw          # dump JSONL
+#   scratch chats show -s abc12345 --verbose      # include metadata
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="Display a conversation"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/project.sh"
+  source "$SCRIPTDIR/../lib/conversations.sh"
+  source "$SCRIPTDIR/../lib/termio.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+}
+
+has-min-bash-version 5
+
+cmd:define "chats show" "$_DESC"
+cmd:optional-arg "--project" "-p" "Project name (default: detect from cwd)" "string" ""
+cmd:required-arg "--slug" "-s" "Conversation slug" "string"
+cmd:flag "--verbose" "-v" "Show metadata alongside messages"
+cmd:flag "--raw" "-r" "Print raw JSONL"
+cmd:parse "$@"
+
+# display-messages PROJECT SLUG
+#
+# Iterate messages and print each with a role header via tui:format.
+display-messages() {
+  local project="$1"
+  local slug="$2"
+
+  local messages
+  messages="$(conversation:load-messages "$project" "$slug")"
+
+  if [[ -z "$messages" ]]; then
+    tui:info "empty conversation"
+    return 0
+  fi
+
+  while IFS= read -r line; do
+    local role
+    local content
+    role="$(jq -r '.role' <<< "$line")"
+    content="$(jq -r '.content // ""' <<< "$line")"
+
+    case "$role" in
+      user)
+        printf '# You\n\n%s\n\n' "$content" | tui:format
+        ;;
+      assistant)
+        printf '# Assistant\n\n%s\n\n' "$content" | tui:format
+        ;;
+      system)
+        # System messages only shown in verbose mode
+        if [[ "$(cmd:get --verbose)" == "1" ]]; then
+          printf '# System\n\n%s\n\n' "$content" | tui:format
+        fi
+        ;;
+      tool)
+        if [[ "$(cmd:get --verbose)" == "1" ]]; then
+          local tool_id
+          tool_id="$(jq -r '.tool_call_id // "unknown"' <<< "$line")"
+          printf '# Tool Result (%s)\n\n%s\n\n' "$tool_id" "$content" | tui:format
+        fi
+        ;;
+      *)
+        if [[ "$(cmd:get --verbose)" == "1" ]]; then
+          printf '# %s\n\n%s\n\n' "$role" "$content" | tui:format
+        fi
+        ;;
+    esac
+  done <<< "$messages"
+}
+
+# display-metadata PROJECT SLUG
+#
+# Print conversation metadata formatted for readability.
+display-metadata() {
+  local project="$1"
+  local slug="$2"
+
+  local meta
+  meta="$(conversation:load-metadata "$project" "$slug")"
+
+  printf '---\n'
+  printf 'Slug:    %s\n' "$(jq -r '.slug' <<< "$meta")"
+  printf 'Created: %s\n' "$(jq -r '.created' <<< "$meta")"
+  printf 'Updated: %s\n' "$(jq -r '.updated' <<< "$meta")"
+  printf 'Rounds:  %s\n' "$(jq -r '.rounds | length' <<< "$meta")"
+  printf '---\n\n'
+}
+
+main() {
+  local project_name
+  project:resolve-name project_name "$(cmd:get --project)"
+
+  local slug
+  cmd:get-into slug "--slug"
+
+  if ! conversation:exists "$project_name" "$slug"; then
+    die "conversation not found: ${project_name}/${slug}"
+    return 1
+  fi
+
+  # Raw mode: dump JSONL and exit
+  if [[ "$(cmd:get --raw)" == "1" ]]; then
+    conversation:load-messages "$project_name" "$slug"
+    return 0
+  fi
+
+  # Verbose mode: show metadata header
+  if [[ "$(cmd:get --verbose)" == "1" ]]; then
+    display-metadata "$project_name" "$slug"
+  fi
+
+  display-messages "$project_name" "$slug"
+}
+
+main

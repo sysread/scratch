@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch chats list - list conversations for a project
+#
+# Reads conversation metadata from the project's chats directory and
+# displays a summary table: slug (truncated), created date, last updated,
+# and round count.
+#
+# Examples:
+#   scratch chats list                  # list for detected project
+#   scratch chats list -p myproject     # list for a specific project
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="List conversations for a project"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/project.sh"
+  source "$SCRIPTDIR/../lib/conversations.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+}
+
+has-min-bash-version 5
+
+cmd:define "chats list" "$_DESC"
+cmd:optional-arg "--project" "-p" "Project name (default: detect from cwd)" "string" ""
+cmd:parse "$@"
+
+main() {
+  local project_name
+  project:resolve-name project_name "$(cmd:get --project)"
+
+  local listing
+  listing="$(conversation:list "$project_name")"
+
+  if [[ -z "$listing" ]]; then
+    tui:info "no conversations" "project=$project_name"
+    return 0
+  fi
+
+  # Format as a table: slug (first 8 chars), created, updated, rounds
+  {
+    printf 'SLUG\tCREATED\tUPDATED\tROUNDS\n'
+    while IFS= read -r line; do
+      local slug created updated rounds
+      slug="$(jq -r '.slug[:8]' <<< "$line")"
+      created="$(jq -r '.created[:19]' <<< "$line")"
+      updated="$(jq -r '.updated[:19]' <<< "$line")"
+      rounds="$(jq -r '.round_count' <<< "$line")"
+      printf '%s\t%s\t%s\t%s\n' "$slug" "$created" "$updated" "$rounds"
+    done <<< "$listing"
+  } | column -t -s $'\t'
+}
+
+main

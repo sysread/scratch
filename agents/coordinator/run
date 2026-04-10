@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# coordinator agent
+#
+# Conversational assistant for multi-turn chat sessions. Unlike simple
+# agents that use agent:simple-completion (which builds a 2-message
+# array from stdin), the coordinator receives the full conversation
+# history as a JSON messages array on stdin, prepends its system prompt,
+# and passes the whole thing to chat:completion.
+#
+# stdin:  JSON array of message objects (the conversation so far)
+# stdout: the assistant's response text
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+{
+  source "$SCRATCH_HOME/lib/agent.sh"
+  source "$SCRATCH_HOME/lib/prompt.sh"
+  source "$SCRATCH_HOME/lib/chat.sh"
+  source "$SCRATCH_HOME/lib/model.sh"
+}
+
+# Read the full conversation history from stdin
+messages="$(cat)"
+
+# Prepend the system prompt as the first message
+system_prompt="$(prompt:load coordinator/system)"
+messages="$(jq -c \
+  --arg sys "$system_prompt" \
+  '[{role: "system", content: $sys}] + .' \
+  <<<"$messages")"
+
+model="$(model:profile:model balanced)"
+extras="$(model:profile:extras balanced)"
+
+chat:completion "$model" "$messages" "$extras" | chat:extract-content

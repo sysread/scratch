@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# coordinator agent - availability check
+#
+# Always available. The coordinator uses chat:completion which transitively
+# requires venice:curl + jq + bc. Those binaries are declared at the lib
+# level and verified at source time. Re-declaring them here would claim
+# ownership the agent does not have.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"

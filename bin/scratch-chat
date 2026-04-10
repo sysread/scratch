@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch chat - interactive conversation with an LLM
+#
+# Starts a new conversation or resumes an existing one. Messages are
+# persisted as JSONL and managed by lib/conversations.sh. Each turn is
+# processed by the coordinator agent (agents/coordinator/), which wraps
+# chat:completion with a system prompt and the balanced model profile.
+#
+# The user composes messages via gum write. Accelerators (@exit, @quit)
+# exit the session. On exit, a resume command is printed so the user can
+# pick up where they left off.
+#
+# Examples:
+#   scratch chat                          # new conversation (project from cwd)
+#   scratch chat -p myproject             # new conversation in specific project
+#   scratch chat -f abc12345              # resume by slug
+#   scratch chat -c                       # pick a conversation to resume
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="Start or resume an interactive conversation"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/termio.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/project.sh"
+  source "$SCRIPTDIR/../lib/conversations.sh"
+  source "$SCRIPTDIR/../lib/agent.sh"
+  source "$SCRIPTDIR/../lib/tempfiles.sh"
+}
+
+has-min-bash-version 5
+
+SCRATCH_HOME="$(cd -P "$SCRIPTDIR/.." && pwd)"
+export SCRATCH_HOME
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+source "$SCRIPTDIR/../lib/venice.sh"
+
+cmd:define "chat" "$_DESC"
+cmd:optional-arg "--project" "-p" "Project name (default: detect from cwd)" "string" ""
+cmd:optional-arg "--follow" "-f" "Resume conversation by slug" "string" ""
+cmd:flag "--continue" "-c" "Pick a conversation to resume"
+cmd:parse "$@"
+
+#-------------------------------------------------------------------------------
+# _chat:build-message ROLE CONTENT
+#
+# Print a compact JSON message object to stdout.
+#-------------------------------------------------------------------------------
+_chat:build-message() {
+  local role="$1"
+  local content="$2"
+  jq -c -n --arg role "$role" --arg content "$content" \
+    '{role: $role, content: $content}'
+}
+
+#-------------------------------------------------------------------------------
+# _chat:display-message ROLE CONTENT
+#
+# Render a single message with a role header via tui:format on stderr.
+#-------------------------------------------------------------------------------
+_chat:display-message() {
+  local role="$1"
+  local content="$2"
+
+  local header
+  case "$role" in
+    user) header="You" ;;
+    assistant) header="Assistant" ;;
+    *) return 0 ;;
+  esac
+
+  printf '# %s\n\n%s\n\n' "$header" "$content" | tui:format >&2
+}
+
+#-------------------------------------------------------------------------------
+# _chat:display-history PROJECT SLUG
+#
+# Replay the conversation history to stderr, rendering user and assistant
+# messages with role headers.
+#-------------------------------------------------------------------------------
+_chat:display-history() {
+  local project="$1"
+  local slug="$2"
+
+  local messages
+  messages="$(conversation:load-messages "$project" "$slug")"
+
+  [[ -n "$messages" ]] || return 0
+
+  while IFS= read -r line; do
+    local role content
+    role="$(jq -r '.role' <<< "$line")"
+    content="$(jq -r '.content // ""' <<< "$line")"
+    _chat:display-message "$role" "$content"
+  done <<< "$messages"
+}
+
+#-------------------------------------------------------------------------------
+# _chat:is-accelerator INPUT
+#
+# Return 0 if the input is a recognized accelerator command.
+#-------------------------------------------------------------------------------
+_chat:is-accelerator() {
+  local input="$1"
+  local trimmed
+  trimmed="$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<< "$input")"
+
+  case "$trimmed" in
+    @exit | @quit) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+main() {
+  # Fail fast if no API key
+  venice:api-key > /dev/null
+
+  tmp:install-traps
+
+  local project_name
+  project:resolve-name project_name "$(cmd:get --project)"
+
+  # Resolve the conversation: new, follow, or continue
+  local slug=""
+  local follow_slug
+  cmd:get-into follow_slug "--follow"
+
+  if [[ -n "$follow_slug" ]]; then
+    # Resume by slug
+    if ! conversation:exists "$project_name" "$follow_slug"; then
+      die "conversation not found: ${project_name}/${follow_slug}"
+      return 1
+    fi
+    slug="$follow_slug"
+  elif [[ "$(cmd:get --continue)" == "1" ]]; then
+    # Pick from existing conversations
+    local listing
+    listing="$(conversation:list "$project_name")"
+
+    if [[ -z "$listing" ]]; then
+      die "no conversations to continue in project: ${project_name}"
+      return 1
+    fi
+
+    # Build display lines for gum filter: "slug[:8]  updated  rounds"
+    local display_lines=""
+    local -a slugs=()
+    while IFS= read -r line; do
+      local s u r
+      s="$(jq -r '.slug' <<< "$line")"
+      u="$(jq -r '.updated[:19]' <<< "$line")"
+      r="$(jq -r '.round_count' <<< "$line")"
+      slugs+=("$s")
+      local display_line
+      display_line="$(printf '%-10s  %s  %d rounds' "${s:0:8}" "$u" "$r")"
+      if [[ -n "$display_lines" ]]; then
+        display_lines="${display_lines}"$'\n'"${display_line}"
+      else
+        display_lines="$display_line"
+      fi
+    done <<< "$listing"
+
+    local chosen
+    if ! tui:choose-one chosen "Select a conversation" "conversation" <<< "$display_lines"; then
+      return 0
+    fi
+
+    # Extract slug from the chosen display line (first field, may be truncated)
+    local chosen_prefix="${chosen%% *}"
+    local i
+    for i in "${!slugs[@]}"; do
+      if [[ "${slugs[$i]:0:8}" == "$chosen_prefix" ]]; then
+        slug="${slugs[$i]}"
+        break
+      fi
+    done
+
+    if [[ -z "$slug" ]]; then
+      die "could not resolve selected conversation"
+      return 1
+    fi
+  else
+    # New conversation
+    slug="$(conversation:create "$project_name")"
+    tui:info "new conversation" "slug=${slug:0:8}" "project=$project_name"
+  fi
+
+  # Display history if resuming
+  if [[ -n "$follow_slug" || "$(cmd:get --continue)" == "1" ]]; then
+    tui:info "resuming" "slug=${slug:0:8}" "project=$project_name"
+    _chat:display-history "$project_name" "$slug"
+  fi
+
+  # Interactive loop
+  while true; do
+    local user_input
+    if ! tui:write user_input "${slug:0:8}" "Type your message..."; then
+      # Ctrl-C in gum write
+      break
+    fi
+
+    # Check for accelerators
+    if _chat:is-accelerator "$user_input"; then
+      break
+    fi
+
+    # Skip empty input
+    if [[ -z "$user_input" ]]; then
+      continue
+    fi
+
+    # Begin round tracking
+    conversation:begin-round "$project_name" "$slug"
+
+    # Save and display user message
+    local user_msg
+    user_msg="$(_chat:build-message user "$user_input")"
+    conversation:append-message "$project_name" "$slug" "$user_msg"
+    _chat:display-message user "$user_input"
+
+    # Build messages array and get response from coordinator
+    local messages_array
+    messages_array="$(conversation:messages-as-array "$project_name" "$slug")"
+
+    local response
+    response="$(printf '%s' "$messages_array" | tui:with-spinner "Thinking..." agent:run coordinator)"
+
+    # Save and display assistant response
+    local assistant_msg
+    assistant_msg="$(_chat:build-message assistant "$response")"
+    conversation:append-message "$project_name" "$slug" "$assistant_msg"
+    conversation:end-round "$project_name" "$slug"
+
+    _chat:display-message assistant "$response"
+  done
+
+  # Print resume command on exit
+  tui:info "to resume: scratch chat -f ${slug} -p ${project_name}"
+}
+
+main

@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch chats prune - delete old conversations
+#
+# Removes conversations whose last update is older than the specified
+# number of days. Shows a preview table and asks for confirmation before
+# deleting.
+#
+# Examples:
+#   scratch chats prune --days 30          # prune conversations older than 30 days
+#   scratch chats prune -d 7 -p myproject  # prune a specific project
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="Delete old conversations"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/project.sh"
+  source "$SCRIPTDIR/../lib/conversations.sh"
+  source "$SCRIPTDIR/../lib/termio.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+}
+
+has-min-bash-version 5
+has-commands gum
+
+cmd:define "chats prune" "$_DESC"
+cmd:optional-arg "--project" "-p" "Project name (default: detect from cwd)" "string" ""
+cmd:required-arg "--days" "-d" "Delete conversations older than N days" "integer"
+cmd:parse "$@"
+
+#-------------------------------------------------------------------------------
+# _prune:ts-to-epoch TIMESTAMP
+#
+# Convert an ISO8601 timestamp to epoch seconds. Handles both macOS and
+# GNU date. Prints the epoch value to stdout.
+#-------------------------------------------------------------------------------
+_prune:ts-to-epoch() {
+  local ts="$1"
+
+  if date -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2> /dev/null; then
+    return 0
+  fi
+
+  # GNU date fallback
+  date -d "$ts" +%s
+}
+
+main() {
+  local project_name
+  project:resolve-name project_name "$(cmd:get --project)"
+
+  local days
+  cmd:get-into days "--days"
+
+  local cutoff_epoch
+  cutoff_epoch=$(($(date +%s) - (days * 86400)))
+
+  local listing
+  listing="$(conversation:list "$project_name")"
+
+  if [[ -z "$listing" ]]; then
+    tui:info "no conversations" "project=$project_name"
+    return 0
+  fi
+
+  # Filter to conversations older than the cutoff
+  local doomed=""
+  local doomed_count=0
+  while IFS= read -r line; do
+    local updated
+    updated="$(jq -r '.updated' <<< "$line")"
+
+    local updated_epoch
+    updated_epoch="$(_prune:ts-to-epoch "$updated")"
+
+    if ((updated_epoch < cutoff_epoch)); then
+      if [[ -n "$doomed" ]]; then
+        doomed="${doomed}"$'\n'"${line}"
+      else
+        doomed="$line"
+      fi
+      doomed_count=$((doomed_count + 1))
+    fi
+  done <<< "$listing"
+
+  if [[ -z "$doomed" ]]; then
+    tui:info "no conversations older than ${days} days" "project=$project_name"
+    return 0
+  fi
+
+  # Show what will be deleted
+  tui:warn "conversations to delete" "count=$doomed_count" "older_than=${days}_days"
+  {
+    printf 'SLUG\tUPDATED\tROUNDS\n'
+    while IFS= read -r line; do
+      local slug updated rounds
+      slug="$(jq -r '.slug[:8]' <<< "$line")"
+      updated="$(jq -r '.updated[:19]' <<< "$line")"
+      rounds="$(jq -r '.round_count' <<< "$line")"
+      printf '%s\t%s\t%s\n' "$slug" "$updated" "$rounds"
+    done <<< "$doomed"
+  } | column -t -s $'\t' >&2
+
+  printf '\n' >&2
+
+  # Confirm before deleting
+  if ! gum confirm "Delete ${doomed_count} conversation(s)?"; then
+    tui:info "cancelled"
+    return 0
+  fi
+
+  # Delete confirmed conversations
+  while IFS= read -r line; do
+    local slug
+    slug="$(jq -r '.slug' <<< "$line")"
+    conversation:delete "$project_name" "$slug"
+    tui:info "deleted" "slug=${slug:0:8}"
+  done <<< "$doomed"
+
+  tui:info "pruned ${doomed_count} conversation(s)"
+}
+
+main

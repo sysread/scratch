@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch chats - parent dispatcher for conversation management
+#
+# Delegates to leaf subcommands via dispatch:try:
+#
+#   scratch chats list     -> bin/scratch-chats-list
+#   scratch chats show     -> bin/scratch-chats-show
+#   scratch chats prune    -> bin/scratch-chats-prune
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_CHATS_DESC="Manage chat conversations"
+
+# Respond to synopsis BEFORE loading any libraries
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_CHATS_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/termio.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+  source "$SCRIPTDIR/../lib/dispatch.sh"
+}
+
+has-min-bash-version 5
+
+# Try to dispatch to a leaf subcommand. Never returns on success.
+dispatch:try "scratch-chats" "$@" || true
+
+# Fallthrough: no subcommand matched. Print usage.
+dispatch:usage "scratch-chats" "$_CHATS_DESC"
+
+case "${1:-}" in
+  "" | -h | --help | help) exit 0 ;;
+  *) exit 1 ;;
+esac
