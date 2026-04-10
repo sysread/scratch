@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch uninstall - remove scratch from the system
+#
+# Two independent prompted steps:
+#
+#   1. Delete the installation directory (SCRATCH_HOME) and the PATH symlink.
+#      Declining prints the manual commands instead.
+#
+#   2. Delete user data (~/.config/scratch — project configs, index databases).
+#      Declining prints the manual commands instead.
+#
+# Each step is independent: declining step 1 still prompts step 2.
+#
+# Examples:
+#   scratch uninstall        # interactive removal
+#   scratch uninstall --yes  # skip confirmation prompts
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="Remove scratch from the system"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+}
+
+has-min-bash-version 5
+
+SCRATCH_HOME="$(cd "$SCRIPTDIR/.." && pwd)"
+export SCRATCH_HOME
+
+cmd:define "uninstall" "$_DESC"
+cmd:flag "--yes" "-y" "Skip confirmation prompts"
+cmd:parse "$@"
+
+#-------------------------------------------------------------------------------
+# Confirm with the user unless --yes was passed
+#-------------------------------------------------------------------------------
+_confirm() {
+  local message="$1"
+  cmd:has --yes && return 0
+  gum confirm "$message"
+}
+
+#-------------------------------------------------------------------------------
+# Locate the symlink that points into SCRATCH_HOME, if any
+#-------------------------------------------------------------------------------
+_find_symlink() {
+  local candidate="$HOME/.local/bin/scratch"
+  if [[ -L "$candidate" ]]; then
+    local target
+    target="$(readlink "$candidate")"
+    # Resolve relative symlinks
+    if [[ "$target" != /* ]]; then
+      target="$(cd -P "$(dirname "$candidate")" && pwd)/$target"
+    fi
+    # Check it points into our install
+    if [[ "$target" == "$SCRATCH_HOME"/* ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+#-------------------------------------------------------------------------------
+# Step 1: remove installation
+#-------------------------------------------------------------------------------
+_remove_install() {
+  local symlink
+  symlink="$(_find_symlink)" || symlink=""
+
+  echo ""
+  tui:info "Installation directory: $SCRATCH_HOME"
+  if [[ -n "$symlink" ]]; then
+    tui:info "Symlink: $symlink"
+  fi
+
+  if _confirm "Remove the scratch installation?"; then
+    if [[ -n "$symlink" ]]; then
+      rm -f "$symlink"
+    fi
+    # We're running from SCRATCH_HOME, but the script is in memory.
+    # Safe to delete as long as we don't source/exec anything from it after.
+    rm -rf "$SCRATCH_HOME"
+    tui:info "Installation removed."
+  else
+    echo ""
+    echo "To remove manually:"
+    if [[ -n "$symlink" ]]; then
+      echo "  rm $symlink"
+    fi
+    echo "  rm -rf $SCRATCH_HOME"
+  fi
+}
+
+#-------------------------------------------------------------------------------
+# Step 2: remove user data
+#-------------------------------------------------------------------------------
+_remove_data() {
+  local config_dir="${HOME}/.config/scratch"
+
+  if [[ ! -d "$config_dir" ]]; then
+    return 0
+  fi
+
+  echo ""
+  tui:info "User data directory: $config_dir"
+  tui:info "Contains project configurations and index databases."
+
+  if _confirm "Remove user data?"; then
+    rm -rf "$config_dir"
+    tui:info "User data removed."
+  else
+    echo ""
+    echo "To remove manually:"
+    echo "  rm -rf $config_dir"
+  fi
+}
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+main() {
+  _remove_install
+  _remove_data
+
+  echo ""
+  tui:info "Done."
+}
+
+main

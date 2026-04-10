@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch version - print the installed version
+#
+# With --check, fetches the latest version from GitHub and reports whether
+# an update is available.
+#
+# Examples:
+#   scratch version                 # print installed version
+#   scratch version --check         # compare against latest release
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="Print the installed version"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+  source "$SCRIPTDIR/../lib/release.sh"
+}
+
+has-min-bash-version 5
+
+SCRATCH_HOME="$(cd "$SCRIPTDIR/.." && pwd)"
+export SCRATCH_HOME
+
+cmd:define "version" "$_DESC"
+cmd:flag "--check" "-c" "Check for available updates"
+cmd:parse "$@"
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+main() {
+  local local_version
+  local_version="$(release:local-version)" || die "could not read local version"
+
+  if ! cmd:has --check; then
+    printf '%s\n' "$local_version"
+    return 0
+  fi
+
+  # --check: compare against remote
+  local remote_version
+  remote_version="$(release:remote-version)" || die "could not fetch remote version"
+
+  if release:is-newer "$remote_version" "$local_version"; then
+    tui:warn "Update available" current "$local_version" latest "$remote_version"
+    tui:info "Run 'scratch update' to install the latest version."
+  else
+    tui:info "Up to date" version "$local_version"
+  fi
+}
+
+main

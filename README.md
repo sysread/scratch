@@ -11,18 +11,24 @@ It's a showcase of what a well-organized bash application can look like: clean a
 ## Install
 
 ```bash
-# Clone
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/sysread/scratch/main/install.sh)"
+```
+
+This downloads the latest release to `~/.local/share/scratch`, links it into `~/.local/bin`, and installs runtime dependencies. If `~/.local/bin` isn't on your PATH, the installer offers to add it.
+
+To update: `scratch update`. To uninstall: `scratch uninstall`.
+
+### From source
+
+```bash
 git clone git@github.com:sysread/scratch.git
 cd scratch
-
-# Install runtime dependencies (bash 5+, jq, gum, curl, elixir)
 ./bin/scratch setup
 
 # Put scratch on your PATH (pick one)
 ln -s "$(pwd)/bin/scratch" ~/bin/scratch             # if ~/bin is on your PATH
 # or: echo "export PATH=\"$(pwd)/bin:\$PATH\"" >> ~/.zshrc
 
-# Verify the environment
 scratch doctor
 ```
 
@@ -40,6 +46,9 @@ SUBCOMMANDS
   intuit       Run the intuition agent against a prompt (positional or stdin)
   project      Manage project configurations
   search       Semantic search over the project file index
+  uninstall    Remove scratch from the system
+  update       Update scratch to the latest release
+  version      Print the installed version
 ```
 
 Every subcommand honors `--help`:

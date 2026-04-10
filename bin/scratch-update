@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch update - self-update to the latest release
+#
+# Downloads the latest release tarball from GitHub and replaces the current
+# installation using a hat-swap (rename old, move new, delete old). If the
+# swap fails mid-way, the previous version is restored.
+#
+# After a successful update, runs helpers/setup to ensure runtime deps are
+# still satisfied.
+#
+# If scratch was installed via git clone, suggests `git pull` instead.
+#
+# Examples:
+#   scratch update           # check and update interactively
+#   scratch update --yes     # skip confirmation prompts
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="Update scratch to the latest release"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+  source "$SCRIPTDIR/../lib/release.sh"
+}
+
+has-min-bash-version 5
+
+SCRATCH_HOME="$(cd "$SCRIPTDIR/.." && pwd)"
+export SCRATCH_HOME
+
+cmd:define "update" "$_DESC"
+cmd:flag "--yes" "-y" "Skip confirmation prompts"
+cmd:parse "$@"
+
+#-------------------------------------------------------------------------------
+# Confirm with the user unless --yes was passed
+#-------------------------------------------------------------------------------
+_confirm() {
+  local message="$1"
+  cmd:has --yes && return 0
+  gum confirm "$message"
+}
+
+#-------------------------------------------------------------------------------
+# Download, validate, and swap
+#-------------------------------------------------------------------------------
+_do_update() {
+  local version="$1"
+
+  # Temp dir adjacent to install dir for same-filesystem renames
+  local tmpdir
+  tmpdir="$(mktemp -d "${SCRATCH_HOME}.tmp.XXXXXX")"
+  trap 'rm -rf "$tmpdir"' RETURN
+
+  tui:info "Downloading scratch $version..."
+  local tarball
+  tarball="$(release:download "$version" "$tmpdir")" \
+    || die "download failed"
+
+  tui:info "Unpacking..."
+  release:unpack "$tarball" "$tmpdir/new" \
+    || die "unpack failed"
+
+  # Validate the unpacked tree has the expected structure
+  local -a expected=("bin/scratch" "lib/base.sh" "VERSION")
+  local f
+  for f in "${expected[@]}"; do
+    if [[ ! -f "$tmpdir/new/$f" ]]; then
+      die "unpacked release is missing $f — aborting"
+    fi
+  done
+
+  tui:info "Swapping installation..."
+  release:hat-swap "$tmpdir/new" "$SCRATCH_HOME" \
+    || die "hat-swap failed — your previous installation should be intact"
+
+  tui:info "Updated to scratch $version"
+}
+
+#-------------------------------------------------------------------------------
+# Post-update: run helpers/setup to verify runtime deps
+#-------------------------------------------------------------------------------
+_post_update_setup() {
+  printf '\n' >&2
+  tui:info "Checking runtime dependencies..."
+  tui:info "This ensures your environment is compatible with the new version."
+  printf '\n' >&2
+
+  if ! "$SCRATCH_HOME/helpers/setup"; then
+    tui:warn "Some dependencies may be missing."
+    tui:warn "Run 'scratch doctor' to diagnose the issue."
+  fi
+}
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+main() {
+  # Git-clone installs should use git pull
+  if release:is-git-install; then
+    tui:warn "This installation is a git clone."
+    tui:info "Use 'git pull' in $SCRATCH_HOME to update."
+    return 1
+  fi
+
+  local local_version remote_version
+  local_version="$(release:local-version)" || die "could not read local version"
+  remote_version="$(release:remote-version)" || die "could not fetch remote version"
+
+  if release:is-newer "$remote_version" "$local_version"; then
+    # Update available
+    tui:info "Update available" current "$local_version" latest "$remote_version"
+
+    if ! _confirm "Update scratch from $local_version to $remote_version?"; then
+      tui:info "Update cancelled."
+      return 0
+    fi
+
+    _do_update "$remote_version"
+    _post_update_setup
+  else
+    # Already up to date — offer reinstall
+    tui:info "Already up to date" version "$local_version"
+
+    if ! _confirm "Reinstall scratch $local_version?"; then
+      return 0
+    fi
+
+    _do_update "$local_version"
+    _post_update_setup
+  fi
+}
+
+main
