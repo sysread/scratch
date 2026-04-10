@@ -63,24 +63,9 @@ cmd:parse "$@"
 #-------------------------------------------------------------------------------
 _help_ask() {
   local question="$1"
-
-  # Run the agent in the current process (not via gum spin -- bash -c)
-  # because exported functions like agent:run depend on non-exported
-  # private variables (_AGENT_SCRIPTDIR etc.) that don't survive a
-  # new bash process.
-  local tmpout
-  tmpout="$(mktemp -t scratch-help.XXXXXX)"
-
-  # Start spinner in background, run agent in foreground
-  gum spin --title "Thinking..." -- sleep 86400 &
-  local spinner_pid=$!
-
-  printf '%s' "$question" | agent:run self-help > "$tmpout" 2> /dev/null
-  kill "$spinner_pid" 2> /dev/null
-  wait "$spinner_pid" 2> /dev/null || true
-
-  tui:format < "$tmpout"
-  rm -f "$tmpout"
+  printf '%s' "$question" \
+    | tui:with-spinner "Thinking..." agent:run self-help \
+    | tui:format
 }
 
 #-------------------------------------------------------------------------------
@@ -93,18 +78,11 @@ main() {
   if [[ -n "$question" ]]; then
     _help_ask "$question"
   else
-    # No -q flag: prompt for a question interactively
-    question="$(gum write \
-      --width 140 \
-      --height 25 \
-      --char-limit 0 \
-      --cursor.mode static \
-      --header "What do you need help with?" \
-      --placeholder "e.g., how do I index my project?")"
-
-    if [[ -z "$question" ]]; then
+    if ! tui:write question "What do you need help with?" "e.g., how do I index my project?"; then
       return 0
     fi
+
+    [[ -n "$question" ]] || return 0
 
     _help_ask "$question"
   fi

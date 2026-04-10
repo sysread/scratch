@@ -230,3 +230,83 @@ tui:choose-one() {
 }
 
 export -f tui:choose-one
+
+#-------------------------------------------------------------------------------
+# tui:write VAR [HEADER] [PLACEHOLDER]
+#
+# Prompt the user for multi-line text input via gum write. The result is
+# assigned to the variable named by VAR (nameref). Returns 0 on submit
+# (including empty), 1 on Ctrl-C.
+#
+# Uses a wide, tall editor with a static cursor (no blinking) and no
+# character limit.
+#
+# Examples:
+#   tui:write question "What's your question?"
+#   tui:write note "Add a note" "e.g., something important"
+#-------------------------------------------------------------------------------
+tui:write() {
+  local -n _tw_into="$1"
+  local header="${2:-}"
+  local placeholder="${3:-}"
+
+  local -a args=(
+    --width 140
+    --height 25
+    --char-limit 0
+    --cursor.mode static
+  )
+
+  [[ -n "$header" ]] && args+=(--header "$header")
+  [[ -n "$placeholder" ]] && args+=(--placeholder "$placeholder")
+
+  # shellcheck disable=SC2034
+  _tw_into="$(gum write "${args[@]}")" || return 1
+}
+
+export -f tui:write
+
+#-------------------------------------------------------------------------------
+# tui:with-spinner TITLE COMMAND [ARGS...]
+#
+# Run COMMAND in the current process while showing a gum spinner. The
+# spinner runs as a background process and is killed when the command
+# finishes. Command output goes to stdout.
+#
+# Why not `gum spin -- command`: gum spin forks a subprocess, which
+# loses non-exported private variables that exported bash functions
+# depend on (e.g., _AGENT_SCRIPTDIR). Running in-process preserves
+# the full shell state.
+#
+# Examples:
+#   tui:with-spinner "Thinking..." agent:run self-help < input.txt
+#   result="$(tui:with-spinner "Indexing..." some_function)"
+#-------------------------------------------------------------------------------
+tui:with-spinner() {
+  local title="$1"
+  shift
+
+  local tmpout
+  tmpout="$(mktemp -t scratch-spin.XXXXXX)"
+
+  # Capture stdin before starting the spinner (the spinner's bg process
+  # would compete for stdin otherwise).
+  local tmpin
+  tmpin="$(mktemp -t scratch-spin-in.XXXXXX)"
+  cat > "$tmpin"
+
+  gum spin --title "$title" -- sleep 86400 &
+  local spinner_pid=$!
+
+  "$@" < "$tmpin" > "$tmpout" 2> /dev/null
+  local rc=$?
+
+  kill "$spinner_pid" 2> /dev/null
+  wait "$spinner_pid" 2> /dev/null || true
+
+  cat "$tmpout"
+  rm -f "$tmpout" "$tmpin"
+  return "$rc"
+}
+
+export -f tui:with-spinner
