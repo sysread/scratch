@@ -52,10 +52,11 @@ _highlight() {
 #-------------------------------------------------------------------------------
 _prompt_bump() {
   local choice
-  choice="$(gum choose \
-    "patch   ${WHITE}$current → $(_highlight patch)" \
-    "minor   ${WHITE}$current → $(_highlight minor)" \
-    "major   ${WHITE}$current → $(_highlight major)"
+  choice="$(
+    gum choose \
+      "patch   ${WHITE}$current → $(_highlight patch)" \
+      "minor   ${WHITE}$current → $(_highlight minor)" \
+      "major   ${WHITE}$current → $(_highlight major)"
   )" || exit 1
 
   echo "${choice%% *}"
@@ -78,7 +79,7 @@ fi
 
 tag="v$version"
 
-if git rev-parse "$tag" >/dev/null 2>&1; then
+if git rev-parse "$tag" > /dev/null 2>&1; then
   echo "error: tag $tag already exists" >&2
   exit 1
 fi
