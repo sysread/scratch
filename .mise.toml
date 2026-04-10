@@ -8,6 +8,7 @@
 #   mise run format           # format with shfmt
 #   mise run fix              # format + perms
 #   mise run check            # lint + test
+#   mise run release          # tag + push a release (runs check first)
 #   mise run setup            # full dev setup
 
 [tools]
@@ -56,3 +57,24 @@ depends = ["format", "perms"]
 [tasks.check]
 description = "Lint and test"
 depends = ["lint", "test"]
+
+[tasks.release]
+description = "Bump version, commit, tag, and push (prompts if no bump type given)"
+depends = ["check"]
+raw = true
+run = 'helpers/release'
+
+[tasks."release:patch"]
+description = "Bump patch version, commit, tag, and push"
+depends = ["check"]
+run = 'helpers/release patch'
+
+[tasks."release:minor"]
+description = "Bump minor version, commit, tag, and push"
+depends = ["check"]
+run = 'helpers/release minor'
+
+[tasks."release:major"]
+description = "Bump major version, commit, tag, and push"
+depends = ["check"]
+run = 'helpers/release major'

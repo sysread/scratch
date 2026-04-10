@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# Release helper — bump VERSION, commit, tag, and push.
+#
+# With an argument (patch, minor, major), bumps directly. Without one,
+# prompts interactively via gum choose, showing each option's version
+# transition with the bumped segment highlighted.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+readonly WHITE=$'\033[1;37m'
+readonly GREEN=$'\033[1;32m'
+readonly RESET=$'\033[0m'
+
+current="$(tr -d '[:space:]' < VERSION)"
+
+if ! [[ "$current" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+  echo "error: VERSION file contains invalid semver: $current" >&2
+  exit 1
+fi
+
+cur_major="${BASH_REMATCH[1]}"
+cur_minor="${BASH_REMATCH[2]}"
+cur_patch="${BASH_REMATCH[3]}"
+
+#-------------------------------------------------------------------------------
+# Compute the new version for a given bump type
+#-------------------------------------------------------------------------------
+_new_version() {
+  case "$1" in
+    major) echo "$((cur_major + 1)).0.0" ;;
+    minor) echo "$cur_major.$((cur_minor + 1)).0" ;;
+    patch) echo "$cur_major.$cur_minor.$((cur_patch + 1))" ;;
+  esac
+}
+
+#-------------------------------------------------------------------------------
+# Format a version string with the bumped segment in bold green
+#-------------------------------------------------------------------------------
+_highlight() {
+  case "$1" in
+    major) echo "${GREEN}$((cur_major + 1))${WHITE}.0.0${RESET}" ;;
+    minor) echo "${WHITE}$cur_major.${GREEN}$((cur_minor + 1))${WHITE}.0${RESET}" ;;
+    patch) echo "${WHITE}$cur_major.$cur_minor.${GREEN}$((cur_patch + 1))${RESET}" ;;
+  esac
+}
+
+#-------------------------------------------------------------------------------
+# Interactive prompt when no argument is given
+#-------------------------------------------------------------------------------
+_prompt_bump() {
+  local choice
+  choice="$(gum choose \
+    "patch   ${WHITE}$current → $(_highlight patch)" \
+    "minor   ${WHITE}$current → $(_highlight minor)" \
+    "major   ${WHITE}$current → $(_highlight major)"
+  )" || exit 1
+
+  echo "${choice%% *}"
+}
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+bump="${1:-}"
+
+if [[ -z "$bump" ]]; then
+  bump="$(_prompt_bump)"
+fi
+
+version="$(_new_version "$bump")"
+if [[ -z "$version" ]]; then
+  echo "error: unknown bump type: $bump (use patch, minor, or major)" >&2
+  exit 1
+fi
+
+tag="v$version"
+
+if git rev-parse "$tag" >/dev/null 2>&1; then
+  echo "error: tag $tag already exists" >&2
+  exit 1
+fi
+
+if [ -n "$(git status --porcelain)" ]; then
+  echo "error: working tree is dirty — commit or stash first" >&2
+  exit 1
+fi
+
+echo "$version" > VERSION
+git add VERSION
+git commit -m "$tag"
+git tag -a "$tag" -m "Release $version"
+echo "Pushing $tag..."
+git push origin main "$tag"
+echo "Released $tag"

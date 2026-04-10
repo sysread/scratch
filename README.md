@@ -33,14 +33,19 @@ $ scratch
 scratch <command> [args...]
 
 SUBCOMMANDS
-  doctor    Check the runtime environment for missing dependencies and required env vars
-  project   Manage project configurations
+  doctor       Check the runtime environment for missing dependencies and required env vars
+  file-info    Show index status and summary for a file
+  help         Browse guides or ask questions about scratch
+  index        Build or update the project file index
+  intuit       Run the intuition agent against a prompt (positional or stdin)
+  project      Manage project configurations
+  search       Semantic search over the project file index
 ```
 
 Every subcommand honors `--help`:
 
 ```
-$ scratch project help list
+$ scratch project list --help
 scratch project list [options]
 ```
 
@@ -85,6 +90,7 @@ mise run lint       # shellcheck
 mise run format     # shfmt
 mise run fix        # format + enforce file permissions
 mise run check      # lint + test
+mise run release    # bump patch, tag, push (runs check first)
 ```
 
 The test suite includes self-reflection tests that catch structural drift: lint, formatting, file permissions, unicode discipline, and a subcommand-contract test that verifies every `bin/scratch-*` honors `--help`.
