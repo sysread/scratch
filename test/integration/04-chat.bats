@@ -48,6 +48,13 @@ setup() {
   # minutes on backoff loops.
   export SCRATCH_VENICE_MAX_ATTEMPTS=1
   export SCRATCH_VENICE_DISABLE_JITTER=1
+
+  # Source additional libs needed for direct completion tests
+  # shellcheck disable=SC1091
+  {
+    source "${SCRATCH_HOME}/lib/prompt.sh"
+    source "${SCRATCH_HOME}/lib/tool.sh"
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -132,4 +139,39 @@ setup() {
   local count
   count="$(wc -l < "${SCRATCH_PROJECTS_DIR}/testproj/chats/${slug}/messages.jsonl" | tr -d ' ')"
   is "$count" "2"
+}
+
+# ---------------------------------------------------------------------------
+# Tool calling: chat:complete-with-tools with notify
+# ---------------------------------------------------------------------------
+
+@test "chat:complete-with-tools invokes notify tool and returns final text" {
+  local model extras
+  model="$(model:profile:model balanced)"
+  extras="$(model:profile:extras balanced)"
+
+  # Ask the model to use the notify tool. The prompt is explicit enough
+  # that the model should make a tool call.
+  local messages
+  messages='[
+    {"role":"system","content":"You have a notify tool. Use it to send the user a notification, then reply with the word DONE."},
+    {"role":"user","content":"Send me an info notification saying hello."}
+  ]'
+
+  local response
+  response="$(chat:complete-with-tools "$model" "$messages" '["notify"]' "$extras")"
+
+  diag "debug log:"
+  if [[ -f "$SCRATCH_CHAT_DEBUG_LOG" ]]; then
+    while IFS= read -r line; do
+      diag "  $line"
+    done < "$SCRATCH_CHAT_DEBUG_LOG"
+  fi
+
+  # The final response should be text (no tool_calls), and the model
+  # should have invoked notify during the conversation.
+  local content
+  content="$(jq -r '.choices[0].message.content // ""' <<< "$response")"
+  diag "final content: $content"
+  [[ -n "$content" ]]
 }

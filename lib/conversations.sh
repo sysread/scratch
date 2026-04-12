@@ -20,8 +20,13 @@
 # are counted in the size but do not create additional rounds.
 #
 # This library handles persistence only. The Venice API layer lives in
-# lib/chat.sh; the coordinator agent orchestrates completions. This
-# library calls neither - it is pure file I/O.
+# lib/chat.sh; bin/scratch-chat orchestrates completions and tool
+# calling. This library calls neither - it is pure file I/O.
+#
+# Deferred (v2):
+#   - Venice per-message metadata field for tagging app-injected
+#     messages. When added, chats show and the resume display should
+#     filter these out unless --verbose is passed.
 #-------------------------------------------------------------------------------
 
 [[ "${_INCLUDED_CONVERSATIONS:-}" == "1" ]] && return 0

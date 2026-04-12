@@ -109,16 +109,34 @@ main() {
     return 0
   fi
 
-  # Show what will be deleted
+  # Show what will be deleted, matching the chat -c picker format:
+  # slug (8 chars), 12hr local time, round count, first user message
   tui:warn "conversations to delete" count "$doomed_count" older_than "${days} days"
   {
-    printf 'SLUG\tUPDATED\tROUNDS\n'
+    printf 'SLUG\tUPDATED\tROUNDS\tFIRST MESSAGE\n'
     while IFS= read -r line; do
-      local slug updated rounds
-      slug="$(jq -r '.slug[:8]' <<< "$line")"
-      updated="$(jq -r '.updated[:19]' <<< "$line")"
+      local slug raw_ts updated rounds preview
+      slug="$(jq -r '.slug' <<< "$line")"
+
+      raw_ts="$(jq -r '.updated' <<< "$line")"
+      updated="$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$raw_ts" "+%Y-%m-%d %l:%M%p" 2> /dev/null \
+        | sed 's/  / /; s/AM/am/; s/PM/pm/' || echo "${raw_ts:0:16}")"
+
       rounds="$(jq -r '.round_count' <<< "$line")"
-      printf '%s\t%s\t%s\n' "$slug" "$updated" "$rounds"
+
+      # First user message for context
+      preview=""
+      local msg_file
+      msg_file="$(conversation:chat-dir "$project_name" "$slug")/messages.jsonl"
+      if [[ -f "$msg_file" ]]; then
+        preview="$(grep -m1 '"role":"user"' "$msg_file" 2> /dev/null \
+          | jq -r '.content // ""' 2> /dev/null \
+          | tr '\n' ' ' \
+          | sed 's/[[:space:]]\{2,\}/ /g' \
+          | cut -c1-60)" || true
+      fi
+
+      printf '%s\t%s\t%sr\t%s\n' "${slug:0:8}" "$updated" "$rounds" "$preview"
     done <<< "$doomed"
   } | column -t -s $'\t' >&2
 

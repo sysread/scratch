@@ -210,11 +210,13 @@ chat:complete-with-tools() {
   while :; do
     response="$(chat:completion "$model" "$messages" "$merged_extras")"
 
-    # Extract tool_calls. // empty makes the test below uniform - if
-    # there are no tool_calls, $tool_calls is empty string.
+    # Extract tool_calls. Some models return null, some return an empty
+    # array [], some omit the field entirely. All three mean "no tool
+    # calls." The // empty jq filter covers null and missing; the bash
+    # test covers empty string and empty array.
     tool_calls="$(jq -c '.choices[0].message.tool_calls // empty' <<< "$response")"
 
-    if [[ -z "$tool_calls" || "$tool_calls" == "null" ]]; then
+    if [[ -z "$tool_calls" || "$tool_calls" == "null" || "$tool_calls" == "[]" ]]; then
       # Plain text response (or any non-tool-call response). Return it.
       printf '%s' "$response"
       return 0
