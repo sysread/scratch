@@ -79,6 +79,39 @@ conversation:create() {
   local slug
   slug="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 
+  _conversation:init-dir "$project" "$slug"
+  printf '%s\n' "$slug"
+}
+
+export -f conversation:create
+
+#-------------------------------------------------------------------------------
+# conversation:create-with-slug PROJECT SLUG
+#
+# Like conversation:create but uses a caller-provided slug instead of
+# generating one. Used for deferred creation where the slug is chosen
+# early (for display) but the files are created later (on first message).
+#-------------------------------------------------------------------------------
+conversation:create-with-slug() {
+  local project="$1"
+  local slug="$2"
+
+  _conversation:init-dir "$project" "$slug"
+}
+
+export -f conversation:create-with-slug
+
+#-------------------------------------------------------------------------------
+# _conversation:init-dir PROJECT SLUG
+#
+# (Private) Create the conversation directory, empty messages.jsonl, and
+# initial metadata.json. Shared by conversation:create and
+# conversation:create-with-slug.
+#-------------------------------------------------------------------------------
+_conversation:init-dir() {
+  local project="$1"
+  local slug="$2"
+
   local chats_dir
   chats_dir="$(conversation:chats-dir "$project")"
 
@@ -98,11 +131,9 @@ conversation:create() {
     --arg updated "$now" \
     '{slug: $slug, created: $created, updated: $updated, rounds: []}' \
     > "${chat_dir}/metadata.json"
-
-  printf '%s\n' "$slug"
 }
 
-export -f conversation:create
+export -f _conversation:init-dir
 
 #-------------------------------------------------------------------------------
 # conversation:exists PROJECT SLUG

@@ -46,6 +46,7 @@ SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
   source "$SCRIPTDIR/../lib/index.sh"
   source "$SCRIPTDIR/../lib/embed.sh"
   source "$SCRIPTDIR/../lib/tui.sh"
+  source "$SCRIPTDIR/../lib/signals.sh"
   source "$SCRIPTDIR/../lib/tempfiles.sh"
 }
 
@@ -58,14 +59,16 @@ export SCRATCH_HOME
 # shellcheck disable=SC1091
 source "$SCRIPTDIR/../lib/venice.sh"
 
-# Clean up the entire process group on interrupt
+# Clean up the entire process group on interrupt. The signal registry
+# handles exit codes (130 for INT, 143 for TERM) after the handler
+# returns, and EXIT handlers (including tmp:cleanup) fire after that.
 _index_cleanup() {
   trap '' INT TERM
   kill 0 2> /dev/null
   wait 2> /dev/null
 }
-trap '_index_cleanup; exit 130' INT
-trap '_index_cleanup; exit 143' TERM
+signal:register INT index-pipeline "_index_cleanup"
+signal:register TERM index-pipeline "_index_cleanup"
 tmp:install-traps
 
 cmd:define "index" "$_DESC"

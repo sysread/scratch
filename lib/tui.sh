@@ -194,6 +194,8 @@ tui:choose() {
       --fuzzy-sort \
       --header "$header" \
       --prompt "$prompt: " \
+      --cursor-text.foreground 10 \
+      --cursor-text.background 236 \
       "${rest[@]}"
   )" || {
     exit_code=$?
@@ -261,8 +263,10 @@ tui:write() {
   [[ -n "$header" ]] && args+=(--header "$header")
   [[ -n "$placeholder" ]] && args+=(--placeholder "$placeholder")
 
+  # Preserve gum write's exit code: 0 = submitted, 1 = escape, 130 = Ctrl-C.
+  # Callers can distinguish cancel from interrupt.
   # shellcheck disable=SC2034
-  _tw_into="$(gum write "${args[@]}")" || return 1
+  _tw_into="$(gum write "${args[@]}")"
 }
 
 export -f tui:write
@@ -380,8 +384,10 @@ tui:with-spinner() {
 
       sleep 0.1
     done
-    # Clear the spinner line
-    printf '\r\033[2K' >&2
+    # Clear both the spinner line and the title line above it so no trace
+    # of the progress UI remains after the work finishes.
+    # \r\033[2K erases the current line; \033[1A moves up one line.
+    printf '\r\033[2K\033[1A\r\033[2K' >&2
   fi
 
   wait "$work_pid" 2> /dev/null || true

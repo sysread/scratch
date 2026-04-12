@@ -54,7 +54,7 @@ main() {
   listing="$(conversation:list "$project_name")"
 
   if [[ -z "$listing" ]]; then
-    tui:info "no conversations" "project=$project_name"
+    tui:info "no conversations" project "$project_name"
     return 0
   fi
 

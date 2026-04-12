@@ -80,7 +80,7 @@ main() {
   listing="$(conversation:list "$project_name")"
 
   if [[ -z "$listing" ]]; then
-    tui:info "no conversations" "project=$project_name"
+    tui:info "no conversations" project "$project_name"
     return 0
   fi
 
@@ -105,12 +105,12 @@ main() {
   done <<< "$listing"
 
   if [[ -z "$doomed" ]]; then
-    tui:info "no conversations older than ${days} days" "project=$project_name"
+    tui:info "no conversations older than ${days} days" project "$project_name"
     return 0
   fi
 
   # Show what will be deleted
-  tui:warn "conversations to delete" "count=$doomed_count" "older_than=${days}_days"
+  tui:warn "conversations to delete" count "$doomed_count" older_than "${days} days"
   {
     printf 'SLUG\tUPDATED\tROUNDS\n'
     while IFS= read -r line; do
@@ -135,7 +135,7 @@ main() {
     local slug
     slug="$(jq -r '.slug' <<< "$line")"
     conversation:delete "$project_name" "$slug"
-    tui:info "deleted" "slug=${slug:0:8}"
+    tui:info "deleted" slug "${slug:0:8}"
   done <<< "$doomed"
 
   tui:info "pruned ${doomed_count} conversation(s)"

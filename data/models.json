@@ -10,10 +10,10 @@
       }
     },
     "balanced": {
-      "_comment": "Same model as smart but with minimal reasoning. The default text profile for general work.",
+      "_comment": "Same model as smart but with reasoning disabled. The default text profile for general work. Avoid reasoning_effort=minimal: OpenAI added that value for a brief window, very few clients used it, and downstream providers (including Venice for some models like zai-org-glm-5-1) return a 500 'Inference processing failed' when it arrives. Use 'none' instead.",
       "model": "zai-org-glm-5-1",
       "params": {
-        "reasoning_effort": "minimal"
+        "reasoning_effort": "none"
       }
     },
     "fast": {

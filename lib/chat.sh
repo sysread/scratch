@@ -31,6 +31,38 @@ _CHAT_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 has-commands jq
 
 #-------------------------------------------------------------------------------
+# _chat:_debug-log EVENT PAYLOAD
+#
+# (Private) Append a debug entry to SCRATCH_CHAT_DEBUG_LOG if set. The log
+# file captures every request/response pair so we can diagnose API errors
+# without running the chat loop interactively.
+#
+# EVENT    short identifier for the entry (e.g., "request", "response")
+# PAYLOAD  JSON string to include in the entry. Logged as-is; callers
+#          compact it with jq -c if they want single-line entries.
+#
+# No-op when SCRATCH_CHAT_DEBUG_LOG is unset or empty. Best-effort:
+# failures to write are swallowed so logging never breaks the chat flow.
+#-------------------------------------------------------------------------------
+_chat:_debug-log() {
+  [[ -n "${SCRATCH_CHAT_DEBUG_LOG:-}" ]] || return 0
+
+  local event="$1"
+  local payload="$2"
+
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  {
+    printf '%s %s\n' "$ts" "$event"
+    printf '%s\n' "$payload"
+    printf -- '---\n'
+  } >> "$SCRATCH_CHAT_DEBUG_LOG" 2> /dev/null || true
+}
+
+export -f _chat:_debug-log
+
+#-------------------------------------------------------------------------------
 # chat:completion MODEL MESSAGES_JSON [EXTRA_JSON]
 #
 # Make a chat completion request and print the full response body to
@@ -75,7 +107,14 @@ chat:completion() {
       '{model: $model, messages: $messages} + $extra'
   )"
 
-  venice:curl POST /chat/completions "$body"
+  _chat:_debug-log "request POST /chat/completions" "$body"
+
+  local response
+  response="$(venice:curl POST /chat/completions "$body")"
+
+  _chat:_debug-log "response" "$response"
+
+  printf '%s' "$response"
 }
 
 export -f chat:completion

@@ -29,7 +29,10 @@ _TEMPFILES_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source-path=SCRIPTDIR/lib
 # shellcheck disable=SC1091
-source "$_TEMPFILES_SCRIPTDIR/base.sh"
+{
+  source "$_TEMPFILES_SCRIPTDIR/base.sh"
+  source "$_TEMPFILES_SCRIPTDIR/signals.sh"
+}
 
 #-------------------------------------------------------------------------------
 # Internal logging helper - safe in non-TTY contexts (EXIT traps, pipes).
@@ -157,44 +160,24 @@ export -f tmp:cleanup
 #-------------------------------------------------------------------------------
 # tmp:install-traps
 #
-# Install EXIT/INT/TERM/HUP traps once per process. Chains with any existing
-# trap handlers so we don't break other cleanup logic. Safe under set -euo
-# pipefail - cleanup is wrapped in || true.
+# Register temp file cleanup via the signal handler registry. Cleanup
+# runs on EXIT only - because _signal:dispatch calls exit after handling
+# INT/TERM/HUP, the EXIT trap fires on all termination paths.
 #
-# IMPORTANT: skipped in subshells (where $BASHPID != $$). Subshells inherit
-# the parent's traps, but installing our own AND chaining the inherited
-# parent traps causes problems when the parent's traps assume they're
-# running in the parent's context. Specifically, bats's bats_teardown_trap
-# inspects state that exists only in the test's main shell; if it fires
-# in a subshell created by `run`, bats reports a spurious test failure.
-#
-# In a subshell we're typically running for a short, well-scoped operation
-# that exits cleanly, and the parent's trap will still fire when the
-# parent eventually exits, so cleanup still happens. Skipping the install
-# in subshells is the right move.
+# Skipped in subshells (where $BASHPID != $$). Subshells inherit the
+# parent's traps, and the parent's cleanup fires when the parent exits.
+# See lib/signals.sh header for the full subshell rationale.
 #-------------------------------------------------------------------------------
 tmp:install-traps() {
   if [[ "$_TMPFILES_TRAPS_INSTALLED" == "1" ]]; then
     return 0
   fi
 
-  # Skip in subshells - see header comment for why.
   if [[ "$BASHPID" != "$$" ]]; then
     return 0
   fi
 
-  local sig prior new_cmd
-  for sig in EXIT INT TERM HUP; do
-    # Capture existing trap: trap -p outputs `trap -- 'cmd' SIGNAL`
-    prior=$(trap -p "$sig" | awk -F"'" '{print $2}')
-    if [[ -n "$prior" ]]; then
-      new_cmd="tmp:cleanup || true; $prior"
-    else
-      new_cmd="tmp:cleanup || true"
-    fi
-    # shellcheck disable=SC2064
-    trap -- "$new_cmd" "$sig"
-  done
+  signal:register EXIT tempfiles "tmp:cleanup || true"
 
   _TMPFILES_TRAPS_INSTALLED=1
   return 0
