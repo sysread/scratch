@@ -1,0 +1,24 @@
+{
+  "name": "read-file",
+  "description": "Read a file from the project directory. Returns line-numbered, hash-annotated content. Each line is prefixed with its line number and a short hash that can be used as an anchor for future edits. Supports reading specific ranges with offset and limit. Only files within the project directory (or its git worktrees) are accessible.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "File path, absolute or relative to the project root"
+      },
+      "offset": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "1-based starting line number. Omit to start from the beginning."
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Maximum number of lines to return. Omit to read the entire file."
+      }
+    },
+    "required": ["path"]
+  }
+}

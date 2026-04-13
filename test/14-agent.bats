@@ -491,7 +491,7 @@ SCRIPT
 
   chat:completion() {
     local n
-    n=$(<"$call_file")
+    n=$(< "$call_file")
     n=$((n + 1))
     printf '%s' "$n" > "$call_file"
     if ((n == 1)); then

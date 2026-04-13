@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# read-file - availability gate
+#
+# Sources lib/base.sh and uses has-commands to declare runtime dependencies.
+# scratch-doctor's scanner reads this script textually for `has-commands `
+# lines and attributes the discovered tools under "tool:read-file".
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"
+
+# jq parses SCRATCH_TOOL_ARGS_JSON in main. perl runs the format.pl
+# formatter (line hashing, binary detection, SHA-256 guardian hash).
+has-commands jq perl

@@ -78,7 +78,10 @@ setup() {
   gum() {
     case "$1" in
       choose) echo "Approve (one-time)" ;;
-      style) shift; echo "$*" >&2 ;;
+      style)
+        shift
+        echo "$*" >&2
+        ;;
     esac
   }
   export -f gum
@@ -94,7 +97,10 @@ setup() {
   gum() {
     case "$1" in
       choose) echo "Deny" ;;
-      style) shift; echo "$*" >&2 ;;
+      style)
+        shift
+        echo "$*" >&2
+        ;;
     esac
   }
   export -f gum
@@ -116,7 +122,7 @@ setup() {
     case "$1" in
       choose)
         local n
-        n=$(<"$call_file")
+        n=$(< "$call_file")
         n=$((n + 1))
         printf '%s' "$n" > "$call_file"
         case "$n" in
@@ -125,7 +131,10 @@ setup() {
           3) echo "Globally" ;;
         esac
         ;;
-      style) shift; echo "$*" >&2 ;;
+      style)
+        shift
+        echo "$*" >&2
+        ;;
       input) echo "ls:*" ;;
     esac
   }

@@ -1,6 +1,7 @@
 {
   "description": "Tools that are safe to run in any context because they do not mutate system state. The default toolbox for agents that need basic capabilities without policy gates.",
   "tools": [
-    "notify"
+    "notify",
+    "read-file"
   ]
 }

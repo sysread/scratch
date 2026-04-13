@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# read-file - read a project file with line numbers and edit-anchor hashes
+#
+# Reads a file from the project directory (or a git worktree of the same
+# repo), annotating each line with its number and a 4-char hex hash derived
+# from the whole-file SHA-256, line number, and line content. The whole-file
+# hash is stored in conversation metadata so future reads can detect
+# changes, and stale line hashes self-invalidate because the file hash is
+# baked into every line hash.
+#
+# Reads its arguments from $SCRATCH_TOOL_ARGS_JSON (set by tool:invoke):
+#
+#   {"path": "lib/foo.sh", "offset": 10, "limit": 50}
+#
+# Security: only files under SCRATCH_PROJECT_ROOT or a git worktree of the
+# same repo are accessible. Paths are canonicalized (symlinks resolved)
+# before the check, so symlink escapes are blocked.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/conversations.sh"
+
+# --- Parse arguments ---
+
+path="$(jq -r '.path // empty' <<< "$SCRATCH_TOOL_ARGS_JSON")"
+offset="$(jq -r '.offset // 0' <<< "$SCRATCH_TOOL_ARGS_JSON")"
+limit="$(jq -r '.limit // 0' <<< "$SCRATCH_TOOL_ARGS_JSON")"
+
+if [[ -z "$path" ]]; then
+  echo "read-file: path is required" >&2
+  exit 1
+fi
+
+# --- Resolve path ---
+
+# Relative paths resolve against project root (or pwd as fallback).
+# Canonicalize the root first (macOS: /tmp -> /private/tmp).
+if [[ "$path" != /* ]]; then
+  local_root="${SCRATCH_PROJECT_ROOT:-$PWD}"
+  local_root="$(perl -MCwd -e 'print Cwd::realpath($ARGV[0]) // $ARGV[0]' "$local_root")"
+  path="${local_root}/${path}"
+fi
+
+# Canonicalize the full path (resolves symlinks, .., etc.)
+canonical="$(perl -MCwd -e 'print Cwd::realpath($ARGV[0]) // ""' "$path")"
+
+if [[ -z "$canonical" ]]; then
+  echo "read-file: file not found: $path" >&2
+  exit 1
+fi
+
+# --- Security check ---
+
+_read_file_is_allowed() {
+  local canonical="$1"
+  local project_root="${SCRATCH_PROJECT_ROOT:-}"
+
+  if [[ -z "$project_root" ]]; then
+    return 1
+  fi
+
+  # Canonicalize project root too (macOS: /tmp -> /private/tmp)
+  project_root="$(perl -MCwd -e 'print Cwd::realpath($ARGV[0]) // ""' "$project_root")"
+  if [[ -z "$project_root" ]]; then
+    return 1
+  fi
+
+  # Direct child of project root
+  if [[ "$canonical" == "$project_root"/* ]]; then
+    return 0
+  fi
+
+  # Check git worktrees of the same repo
+  if git -C "$project_root" rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+    local wt_path
+    while IFS= read -r wt_path; do
+      [[ -n "$wt_path" ]] || continue
+      if [[ "$canonical" == "$wt_path"/* ]]; then
+        return 0
+      fi
+    done < <(git -C "$project_root" worktree list --porcelain | grep '^worktree ' | sed 's/^worktree //')
+  fi
+
+  return 1
+}
+
+if ! _read_file_is_allowed "$canonical"; then
+  echo "read-file: access denied (not in project or its worktrees): $canonical" >&2
+  exit 1
+fi
+
+# --- Retrieve previous guardian hash from conversation metadata ---
+
+prev_hash=""
+if [[ -n "${SCRATCH_PROJECT:-}" && -n "${SCRATCH_CONVERSATION_SLUG:-}" ]]; then
+  if conversation:exists "$SCRATCH_PROJECT" "$SCRATCH_CONVERSATION_SLUG"; then
+    prev_hash="$(
+      conversation:load-metadata "$SCRATCH_PROJECT" "$SCRATCH_CONVERSATION_SLUG" \
+        | jq -r ".file_reads[\"$canonical\"].hash // empty"
+    )" || true
+  fi
+fi
+
+# --- Run formatter ---
+
+max_size="${SCRATCH_READ_FILE_MAX_SIZE:-2097152}"
+
+hash_file="$(mktemp)"
+trap 'rm -f "$hash_file"' EXIT
+
+output="$("$SCRATCH_TOOL_DIR/format.pl" "$canonical" "$offset" "$limit" "$prev_hash" "$max_size" 3>"$hash_file")"
+file_hash="$(<"$hash_file")"
+
+# --- Update conversation metadata ---
+
+if [[ -n "$file_hash" && -n "${SCRATCH_PROJECT:-}" && -n "${SCRATCH_CONVERSATION_SLUG:-}" ]]; then
+  if conversation:exists "$SCRATCH_PROJECT" "$SCRATCH_CONVERSATION_SLUG"; then
+    local_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    conversation:update-metadata "$SCRATCH_PROJECT" "$SCRATCH_CONVERSATION_SLUG" \
+      ".file_reads[\"$canonical\"] = {hash: \"$file_hash\", read_at: \"$local_now\"}" \
+      || true
+  fi
+fi
+
+# --- Output ---
+
+printf '%s\n' "$output"
