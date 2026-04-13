@@ -24,6 +24,10 @@ set -euo pipefail
 # shellcheck source=/dev/null
 source "$SCRATCH_HOME/lib/base.sh"
 # shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/termio.sh"
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/tui.sh"
+# shellcheck source=/dev/null
 source "$SCRATCH_HOME/lib/conversations.sh"
 
 # --- Parse arguments ---
@@ -33,6 +37,7 @@ offset="$(jq -r '.offset // 0' <<< "$SCRATCH_TOOL_ARGS_JSON")"
 limit="$(jq -r '.limit // 0' <<< "$SCRATCH_TOOL_ARGS_JSON")"
 
 if [[ -z "$path" ]]; then
+  tui:error "read-file: path is required"
   echo "read-file: path is required" >&2
   exit 1
 fi
@@ -51,6 +56,7 @@ fi
 canonical="$(perl -MCwd -e 'print Cwd::realpath($ARGV[0]) // ""' "$path")"
 
 if [[ -z "$canonical" ]]; then
+  tui:error "read-file: file not found" path "$path"
   echo "read-file: file not found: $path" >&2
   exit 1
 fi
@@ -91,6 +97,7 @@ _read_file_is_allowed() {
 }
 
 if ! _read_file_is_allowed "$canonical"; then
+  tui:error "read-file: access denied" path "$canonical"
   echo "read-file: access denied (not in project or its worktrees): $canonical" >&2
   exit 1
 fi
@@ -114,7 +121,16 @@ max_size="${SCRATCH_READ_FILE_MAX_SIZE:-2097152}"
 hash_file="$(mktemp)"
 trap 'rm -f "$hash_file"' EXIT
 
-output="$("$SCRATCH_TOOL_DIR/format.pl" "$canonical" "$offset" "$limit" "$prev_hash" "$max_size" 3>"$hash_file")"
+pl_err="$(mktemp)"
+if ! output="$("$SCRATCH_TOOL_DIR/format.pl" "$canonical" "$offset" "$limit" "$prev_hash" "$max_size" 3>"$hash_file" 2>"$pl_err")"; then
+  err_msg="$(<"$pl_err")"
+  rm -f "$pl_err"
+  tui:error "${err_msg:-read-file: format failed}"
+  echo "${err_msg:-read-file: format failed}" >&2
+  exit 1
+fi
+rm -f "$pl_err"
+
 file_hash="$(<"$hash_file")"
 
 # --- Update conversation metadata ---
@@ -128,6 +144,19 @@ if [[ -n "$file_hash" && -n "${SCRATCH_PROJECT:-}" && -n "${SCRATCH_CONVERSATION
   fi
 fi
 
-# --- Output ---
+# --- Display ---
+
+# Relative path for display: strip project root prefix if possible
+rel_path="$canonical"
+if [[ -n "${SCRATCH_PROJECT_ROOT:-}" ]]; then
+  local_root="$(perl -MCwd -e 'print Cwd::realpath($ARGV[0]) // $ARGV[0]' "$SCRATCH_PROJECT_ROOT")"
+  rel_path="${canonical#"$local_root"/}"
+fi
+
+# Extract start-end from the header (format: "lines: X-Y of Z" or "lines: 0 of Z")
+local_header="$(grep '^\[file:' <<< "$output")"
+local_start="$(grep -o 'lines: [0-9]*' <<< "$local_header" | cut -d' ' -f2)" || true
+local_end="$(grep -o 'lines: [0-9]*-[0-9]*' <<< "$local_header" | cut -d- -f2)" || true
+tui:info "read file" file "$rel_path" start "${local_start:-0}" end "${local_end:-0}"
 
 printf '%s\n' "$output"

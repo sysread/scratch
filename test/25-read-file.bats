@@ -48,7 +48,7 @@ setup() {
   export SCRATCH_TOOL_ARGS_JSON='{}'
 
   # Create a fixture file
-  cat > "${TEST_PROJECT_ROOT}/fixture.sh" <<'FIXTURE'
+  cat > "${TEST_PROJECT_ROOT}/fixture.sh" << 'FIXTURE'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -136,8 +136,8 @@ _run_read_file() {
 
   # The header hash should differ
   local first_hash second_hash
-  first_hash="$(head -1 <<< "$first_output" | grep -o 'hash: [a-f0-9]*' | cut -d' ' -f2)"
-  second_hash="$(head -1 <<< "$output" | grep -o 'hash: [a-f0-9]*' | cut -d' ' -f2)"
+  first_hash="$(grep '^\[file:' <<< "$first_output" | grep -o 'hash: [a-f0-9]*' | cut -d' ' -f2)"
+  second_hash="$(grep '^\[file:' <<< "$output" | grep -o 'hash: [a-f0-9]*' | cut -d' ' -f2)"
 
   [[ "$first_hash" != "$second_hash" ]]
 
@@ -185,7 +185,7 @@ _run_read_file() {
 
   # Should match the hash in the output header
   local output_hash
-  output_hash="$(head -1 <<< "$output" | grep -o 'hash: [a-f0-9]*' | cut -d' ' -f2)"
+  output_hash="$(grep '^\[file:' <<< "$output" | grep -o 'hash: [a-f0-9]*' | cut -d' ' -f2)"
   is "$stored_hash" "$output_hash"
 }
 
