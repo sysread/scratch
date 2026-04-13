@@ -2,6 +2,8 @@
 
 # scratch
 
+**NOTE:** _This project is brand new and still under active development. It is not yet in a usable state._
+
 An AI-powered project research and coding tool.
 
 Scratch works on any directory - not just git repos.
