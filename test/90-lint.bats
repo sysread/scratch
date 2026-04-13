@@ -35,7 +35,9 @@ setup() {
     return 1
   fi
 
-  run shellcheck_parallel -xa -- "${files[@]}"
+  # SC2030/SC2031: bin scripts follow sources into lib/ which uses
+  # intentional subshell-scoped variable modifications throughout.
+  run shellcheck_parallel -xa -e SC2030,SC2031 -- "${files[@]}"
   if [[ "$status" -ne 0 ]]; then
     echo "$output"
   fi

@@ -451,6 +451,9 @@ main() {
     is_saved=1
   fi
 
+  # Export slug so session-scoped approvals work inside tool:invoke
+  export SCRATCH_CONVERSATION_SLUG="$slug"
+
   _chat:debug "conversation resolved" slug "$slug" project "$project_name"
 
   # Display history if resuming

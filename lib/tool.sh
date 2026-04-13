@@ -54,6 +54,8 @@ _TOOL_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   source "$_TOOL_SCRIPTDIR/tempfiles.sh"
   source "$_TOOL_SCRIPTDIR/project.sh"
   source "$_TOOL_SCRIPTDIR/workers.sh"
+  source "$_TOOL_SCRIPTDIR/approvals.sh"
+  source "$_TOOL_SCRIPTDIR/approvals/tui/shell.sh"
 }
 
 has-commands jq
@@ -83,6 +85,21 @@ declare -gA _TOOL_SPECS_WARNED=()
 # unavailable toolbox warns on first access and stays silent on every
 # subsequent call from the same process.
 declare -gA _TOOLBOX_WARNED=()
+
+#-------------------------------------------------------------------------------
+# _tool:approval-class NAME
+#
+# (Private) Read the approval_class field from a tool's spec.json.
+# Returns the class name (e.g. "shell") or empty string if unset.
+#-------------------------------------------------------------------------------
+_tool:approval-class() {
+  local name="$1"
+  local tools_dir
+  tools_dir="$(tool:tools-dir)"
+  jq -r '.approval_class // empty' "${tools_dir}/${name}/spec.json" 2> /dev/null || true
+}
+
+export -f _tool:approval-class
 
 #-------------------------------------------------------------------------------
 # tool:tools-dir
@@ -331,6 +348,34 @@ tool:invoke() {
     _TOOL_INVOKE_STDOUT=""
     _TOOL_INVOKE_STDERR="$_TOOL_AVAILABILITY_ERR"
     return 127
+  fi
+
+  # Approval gate: if the tool declares an approval_class in spec.json,
+  # check whether the invocation is pre-approved. If not, show the
+  # approval TUI. Honors SCRATCH_APPROVALS_SKIP=1 for test bypass.
+  local _ti_approval_class
+  _ti_approval_class="$(_tool:approval-class "$name")"
+  if [[ -n "$_ti_approval_class" && "${SCRATCH_APPROVALS_SKIP:-}" != "1" ]]; then
+    case "$_ti_approval_class" in
+      shell)
+        if ! approvals:check-shell "$args_json"; then
+          # Not pre-approved - show the TUI
+          local _ti_approval_result=""
+          local _ti_approval_why=""
+          if ! approvals:tui-shell "$args_json" _ti_approval_result _ti_approval_why; then
+            # Denied
+            if [[ -n "$_ti_approval_why" ]]; then
+              _TOOL_INVOKE_STDOUT="Command denied by user: $_ti_approval_why"
+              _TOOL_INVOKE_STDERR=""
+              return 0
+            fi
+            _TOOL_INVOKE_STDOUT=""
+            _TOOL_INVOKE_STDERR="Command not approved by user"
+            return 1
+          fi
+        fi
+        ;;
+    esac
   fi
 
   main_path="$(tool:tools-dir)/$name/main"
