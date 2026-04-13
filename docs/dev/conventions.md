@@ -219,13 +219,21 @@ If you want to add a general script, use `helpers/` (dev/build helper) or `bin/s
 ## Agent Structure (agents/ directory)
 
 The `agents/` directory holds reusable LLM workflows.
-Each agent is a self-contained directory under `agents/<name>/` with the same three-file contract as tools.
+Each agent is a self-contained directory under `agents/<name>/` with required and optional files.
 
 ```
 agents/<name>/
-  spec.json     metadata: name, description (for listing/help)
-  run           executable, any language; reads stdin, prints stdout
+  spec.json     metadata: name, description (for listing/help). Optional fields:
+                profile (model profile name), toolbox or tools (tool access),
+                extras (additional completion params).
+  pre-fill      executable; transforms the messages array before completion.
+                Reads a JSON messages array from stdin, prints the transformed
+                array to stdout. Common use: prepend a system prompt.
+                Passthrough (cat) for agents that manage prompts internally.
   is-available  bash; runtime gate AND dependency manifest (same as tools)
+  run           (optional) executable entrypoint for standalone mode; any
+                language. Reads user input on stdin, prints final response to
+                stdout. Only needed for agents invoked via agent:run.
 ```
 
 Naming: agent names match `^[a-z][a-z0-9_-]*$`.
@@ -241,7 +249,15 @@ The environment contract for `run` (set by `agent:run`):
 - `SCRATCH_PROJECT` and `SCRATCH_PROJECT_ROOT` - only set if `project:detect` succeeds
 - `SCRATCH_AGENT_DEPTH` - current recursion depth, incremented before fork; dies past `SCRATCH_AGENT_MAX_DEPTH` (default 8)
 
-The agent IS the run script.
+Agents have two invocation modes:
+
+- **`agent:complete NAME MESSAGES_VAR`** - multi-turn entry point. Pipes messages through `pre-fill`, resolves model/tools from `spec.json`, runs the completion+tool-call loop, appends intermediate messages to `MESSAGES_VAR`, and prints final text to stdout. The caller owns display and persistence. Does not require `run`.
+- **`agent:run NAME`** - standalone mode. Execs the `run` script with stdin/stdout piped through. The agent owns everything internally. Used by complex multi-phase agents that manage their own completion lifecycle.
+
+`pre-fill` is required for all agents.
+It is the hook for injecting system prompts, context, or any message-array transformation before the completion round.
+Agents that do not need transformation use a passthrough (`cat`).
+
 There is no JSON config naming "the model" or "the system prompt" because complex agents pick both per-phase.
 A simple single-shot agent uses `agent:simple-completion` and is ~5 lines.
 A complex multi-phase agent (like `agents/intuition/`) is ~120 lines that composes `accumulator`/`workers`/`chat` with multiple model profiles.
@@ -249,6 +265,32 @@ A complex multi-phase agent (like `agents/intuition/`) is ~120 lines that compos
 Prompts live under `data/prompts/<agent-name>/`, not under `agents/<name>/`.
 This keeps prose with prose (anti-slop scan, prompt loader, future "list every prompt" tooling) while keeping the agent directory focused on executable code.
 Loaded via `prompt:load` and `prompt:render`.
+
+## Library Subdirectories (lib/ facade pattern)
+
+When a library feature has multiple sub-concerns, it splits into a subdirectory under `lib/`.
+The top-level file is the public API; the subdirectory files are internal submodules.
+
+```
+lib/foo.sh          public facade - sources lib/foo/*.sh, exports the public API
+lib/foo/bar.sh      internal submodule (not sourced directly by callers)
+lib/foo/baz.sh      internal submodule
+```
+
+The approvals system (`lib/approvals.sh` + `lib/approvals/`) is the first example of this pattern.
+`lib/approvals.sh` is the matching engine and public API.
+`lib/approvals/{session,project,global}.sh` are the persistence backends for each scope level.
+`lib/approvals/tui.sh` and `lib/approvals/tui/shell.sh` handle the interactive approval UI.
+
+All files in subdirectories follow the same conventions as top-level `lib/` files:
+- Include guard (`_INCLUDED_NAME` pattern)
+- Not executable (enforced by the permissions test)
+- shellcheck/shfmt compliance
+
+The lint test glob covers `lib/**/*.sh`, so subdirectory files are automatically included in formatting and lint checks.
+
+Callers source only the facade (`lib/foo.sh`), never the subdirectory files directly.
+The facade owns the import graph for its submodules.
 
 ## Toolbox Structure (toolboxes/ directory)
 

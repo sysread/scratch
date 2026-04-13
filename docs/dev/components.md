@@ -52,6 +52,9 @@ Functions:
 - `tui:choose VAR HEADER PROMPT [FLAGS...]` - fuzzy picker via `gum filter`; result into nameref VAR
 - `tui:choose-one VAR HEADER PROMPT [FLAGS...]` - single-selection variant
 
+`SCRATCH_TUI_USE_TTY` env var routes `gum log` output to `/dev/tty` when set (used by `tool:invoke` so tool stderr doesn't collide with captured output).
+`SCRATCH_LOG_LEVEL=none` (or `0`) suppresses all log output.
+
 ### `lib/tempfiles.sh`
 
 In-memory temp file registry with trap-based cleanup.
@@ -272,7 +275,7 @@ Toolbox functions:
 
 A toolbox is a named bundle of tool names with its own `is-available` gate. See the "Toolboxes" section below for the layout and the three reference toolboxes.
 - `tool:available NAME` - runs `is-available` with the env contract; captures stderr in `_TOOL_AVAILABILITY_ERR`
-- `tool:invoke NAME ARGS_JSON` - synchronously execute `main` with the env contract. Captures stdout into `_TOOL_INVOKE_STDOUT` and stderr into `_TOOL_INVOKE_STDERR` via tempfile redirects (NOT process substitution, to preserve exit codes). Returns the tool's exit code. Returns 127 if `is-available` fails first.
+- `tool:invoke NAME ARGS_JSON` - synchronously execute `main` with the env contract. Captures stdout into `_TOOL_INVOKE_STDOUT` and stderr into `_TOOL_INVOKE_STDERR` via tempfile redirects (NOT process substitution, to preserve exit codes). Returns the tool's exit code. Returns 127 if `is-available` fails first. Checks `spec.json` for an `approval_class` field and gates execution via the approvals system when present. Exports `SCRATCH_TUI_USE_TTY=1` in the tool environment.
 - `tool:invoke-parallel CALLS_JSON` - parallel execution via background jobs + wait. `CALLS_JSON` is a JSON array of `{id, name, args}` matching the OpenAI tool_calls shape. Forks one bg job per call, captures each tool's streams to numbered temp files in a `tmp:make`-allocated workdir (in the parent shell, NOT in subshells, because `tmp:make`'s registry lives in parent process memory). Results assemble in input order regardless of completion order. Failures encode as `ok:false`; silent failures get a synthesized `ERROR: tool '<name>' exited with status <code>` fallback.
 
 Environment contract for tool main scripts:
@@ -297,12 +300,16 @@ Unlike a tool (which the LLM invokes during a chat), an agent is a script that o
 Functions:
 - `agent:agents-dir` - print the agents directory (honors `SCRATCH_AGENTS_DIR` for tests)
 - `agent:list` - sorted agent names, one per line
-- `agent:exists NAME` - silent predicate
+- `agent:exists NAME` - silent predicate; checks for `pre-fill` instead of `run`
 - `agent:dir NAME` - absolute path; dies if missing
 - `agent:spec NAME` - raw spec.json contents
 - `agent:available NAME` - runs `is-available` with the env contract; captures stderr in `_AGENT_AVAILABILITY_ERR`. Honors `SCRATCH_AGENT_SKIP_AVAILABILITY=1`.
 - `agent:run NAME` - execute `agents/NAME/run` with the env contract. Pipes stdin through, propagates stdout and exit code. Refuses to run if `agent:available` fails. Increments `SCRATCH_AGENT_DEPTH` and dies if the new depth exceeds `SCRATCH_AGENT_MAX_DEPTH` (default 8) before forking, so runaway sub-agent recursion burns out fast.
-- `agent:simple-completion PROFILE PROMPT_NAME [TOOLS_JSON] [EXTRAS_JSON]` - common-case helper for single-shot agents. Reads stdin once for the user input, loads the system prompt via `prompt:load`, resolves the profile, builds the messages, optionally builds a tools array via `tool:specs-json`, merges extras (caller wins), and routes through `chat:complete-with-tools` or `chat:completion` depending on whether tools were supplied. Pipes the response through `chat:extract-content` so the agent's stdout is plain text.
+- `agent:complete NAME MESSAGES_VAR RESPONSE_VAR [EXTRAS]` - multi-turn completion entry point
+- `agent:simple-completion NAME INPUT_STRING [EXTRAS]` - common-case helper for single-shot agents. Now wraps `agent:complete`. Signature changed from old `PROFILE PROMPT_NAME` form.
+- `agent:profile NAME` - read `.profile` from spec.json
+- `agent:tools NAME` - read `.toolbox` or `.tools` from spec.json
+- `agent:pre-fill NAME MESSAGES_VAR` - pipe messages through pre-fill script
 
 Environment contract for agent run scripts:
 - stdin = the user input
@@ -360,6 +367,65 @@ Functions:
 - `search:embed TEXT` - generate embedding via `helpers/embed`, returns JSON array
 - `search:query PROJECT_NAME TYPE QUERY [TOP_K]` - embed query, dump entries, pipe through cosine-rank.awk, return tab-delimited score+identifier lines (default top 10)
 - `search:is-stale PROJECT_NAME [MAX_AGE_DAYS]` - returns 0 if stale (> N days or missing), 1 if fresh
+
+### `lib/conversations.sh`
+
+Conversation persistence.
+Depends on `base.sh`, `project.sh`.
+Requires `jq`, `uuidgen`.
+
+Functions:
+- `conversation:chats-dir PROJECT` - print chats dir path; `mkdir -p`
+- `conversation:chat-dir PROJECT SLUG` - print slug dir path
+- `conversation:create PROJECT` - generate UUID slug, create dir + `messages.jsonl` + `metadata.json`, print slug
+- `conversation:create-with-slug PROJECT SLUG` - like `create` but caller provides the slug
+- `conversation:exists PROJECT SLUG` - return 0 if both files present
+- `conversation:list PROJECT` - print JSONL sorted by updated desc
+- `conversation:load-messages PROJECT SLUG` - cat `messages.jsonl`
+- `conversation:messages-as-array PROJECT SLUG` - `jq -s '.'` the JSONL
+- `conversation:append-message PROJECT SLUG MESSAGE_JSON` - append line + touch metadata
+- `conversation:load-metadata PROJECT SLUG` - cat `metadata.json`
+- `conversation:update-metadata PROJECT SLUG JQ_EXPR` - atomic jq transform + mv
+- `conversation:delete PROJECT SLUG` - `rm -rf`
+- `conversation:begin-round PROJECT SLUG` - append `{start, null}` to rounds
+- `conversation:end-round PROJECT SLUG` - compute size, replace null
+- `conversation:build-message ROLE CONTENT` - print compact JSON message
+- `conversation:rewrite PROJECT SLUG MESSAGES_JSON` - replace `messages.jsonl` from array
+
+### `lib/signals.sh`
+
+Signal handler registry.
+Depends on `base.sh` only.
+
+Functions:
+- `signal:register SIGNAL NAME CMD` - add/replace named handler (`EXIT`/`INT`/`TERM`/`HUP`)
+- `signal:unregister SIGNAL NAME` - remove handler by name
+- `signal:list SIGNAL` - print handler names in FIFO order
+
+Private:
+- `_signal:dispatch SIGNAL` - trap target; runs handlers, exits with conventional code for non-EXIT
+- `_signal:install-trap SIGNAL` - set the actual trap; subshell-safe (skips when `BASHPID != $$`)
+
+Design: EXIT fires on all termination paths (INT/TERM/HUP dispatch calls exit). Cleanup registers on EXIT only.
+
+### `lib/approvals.sh`
+
+Approval system facade + matching.
+Depends on `base.sh`.
+Sources `lib/approvals/{session,project,global}.sh`.
+
+Functions:
+- `approvals:is-approved CLASS COMMAND_STRING` - check all scopes (session > project > global)
+- `approvals:check-shell PIPELINE_JSON` - check all expressions in pipeline
+- `approvals:add SCOPE CLASS PATTERN PATTERN_TYPE [MODE]` - write approval record
+- `approvals:remove SCOPE CLASS PATTERN` - delete matching records
+- `approvals:list SCOPE [CLASS]` - print JSONL
+
+Private:
+- `_approvals:match-pattern COMMAND_STRING PATTERN PATTERN_TYPE` - exact/wildcard/regex matcher (regex via perl)
+- `_approvals:command-string EXPRESSION_JSON` - reconstruct `"command arg1 arg2"`
+- `_approvals:mode-applies RECORD_JSON` - check mode condition
+- `_approvals:search-array APPROVALS_JSON CLASS COMMAND_STRING` - search for match
 
 ### `lib/cmd.sh`
 

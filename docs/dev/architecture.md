@@ -102,6 +102,11 @@ bin/          user-facing subcommand executables
   scratch-index            leaf - build/update project file index
   scratch-search           leaf - semantic search over project index
   scratch-file-info        leaf - show index status/summary for a file
+  scratch-chat             leaf - interactive conversation with LLMs
+  scratch-chats            conversation management (parent dispatcher)
+  scratch-chats-list       leaf
+  scratch-chats-show       leaf
+  scratch-chats-prune      leaf
 
 lib/          sourced libraries (not executable)
   base.sh         warn, die, has-commands, require-env-vars
@@ -127,6 +132,20 @@ lib/          sourced libraries (not executable)
                   access goes through this layer)
   index.sh        index:record, index:lookup, index:list (per-project index CRUD)
   search.sh       search:embed, search:query, search:is-stale (search pipeline)
+  conversations.sh  conversation:create, conversation:append-message,
+                  conversation:messages-as-array, conversation:build-message,
+                  conversation:rewrite (conversation persistence as JSONL +
+                  metadata.json)
+  signals.sh      signal:register, signal:unregister, signal:list (centralized
+                  signal handler registry; EXIT/INT/TERM/HUP)
+  approvals.sh    approvals:is-approved, approvals:add, approvals:check-shell
+                  (approval system facade + matching engine)
+  approvals/      first lib/ subdirectory; persistence backends + TUI
+    session.sh    session-scoped approval persistence
+    project.sh    project-scoped approval persistence
+    global.sh     global approval persistence
+    tui.sh        approval display
+    tui/shell.sh  shell command approval workflow
 
 libexec/      internal non-bash executables
   embed.exs       Elixir embedding generator (called by helpers/embed); two modes:
@@ -145,6 +164,8 @@ data/         static config data shipped in the repo (not user settings)
     echo/         system prompt for agents/echo
     intuition/    perception, synthesis, drive-base, drives/* for agents/intuition
     summary/      accumulate + structure prompts for agents/summary
+    coordinator/  system prompt for the chat coordinator agent
+    self-help/    system prompt for the self-help agent
   migrations/     forward-only SQL migration files
     index/        schema for the per-project index database
 
@@ -155,14 +176,18 @@ tools/        LLM tool calling. Each subdirectory is a self-contained tool:
   notify/         proxies tui:info/warn/error so the LLM can talk to the user
 
 agents/       Reusable LLM workflows. Each subdirectory is a self-contained agent:
-              <name>/spec.json     metadata: name, description
-              <name>/run           executable, any language; reads stdin, prints stdout
+              <name>/spec.json     metadata: name, description; optional profile,
+                                   toolbox, tools fields
+              <name>/pre-fill      REQUIRED; transforms messages before completion
+              <name>/run           OPTIONAL (agents using only agent:complete skip it)
               <name>/is-available  bash; runtime gate AND dep manifest (same contract
                                    as tools, including the policy-gate pattern - an
                                    agent can refuse to be available outside edit mode)
-  echo/           single-shot reference; built on agent:simple-completion
+  echo/           single-shot reference; uses agent:simple-completion
   intuition/      complex multi-phase reference (perception + parallel drives + synthesis)
   summary/        file summarizer for indexing (accumulator + structured output)
+  coordinator/    general-purpose conversational assistant for interactive chat
+  self-help/      self-help agent for the help subcommand
 
 toolboxes/    Named bundles of tool names with their own is-available gate.
               <name>/tools.json    {"description": "...", "tools": [...]}
@@ -198,6 +223,16 @@ test/         bats test suite (unit tests only - non-recursive)
   12-tempfiles.bats            tests for lib/tempfiles.sh (tmp:make + tmp:cleanup)
   13-workers.bats              tests for lib/workers.sh (worker pool primitive)
   14-agent.bats                tests for lib/agent.sh (data access + run + simple-completion)
+  15-db.bats                   tests for lib/db.sh
+  16-index.bats                tests for lib/index.sh
+  17-search.bats               tests for lib/search.sh
+  18-index-helpers.bats        tests for index helper scripts
+  19-release.bats              tests for lib/release.sh
+  20-install-update.bats       tests for install/update/uninstall
+  21-conversations.bats        tests for lib/conversations.sh
+  22-signals.bats              tests for lib/signals.sh
+  23-approvals.bats            tests for lib/approvals.sh
+  24-approvals-tui.bats        tests for approval TUI
   90-lint.bats                 self-reflection: shellcheck
   91-formatting.bats           self-reflection: shfmt drift
   92-permissions.bats          self-reflection: +x policy
@@ -211,6 +246,8 @@ test/integration/   bats tests that hit the REAL venice API (opt-in only)
   00-venice.bats         end-to-end smoke tests for venice + model + chat
   01-accumulator.bats    end-to-end accumulator against real models
   02-agent.bats          end-to-end echo + intuition agents against real models
+  03-embed.bats          end-to-end embedding pipeline against real models
+  04-chat.bats           chat feature integration tests
 
 docs/
   guides/     user-facing documentation
@@ -595,14 +632,16 @@ Same shape as `tools/`.
 
 ```
 agents/<name>/
-  spec.json     metadata: name, description
-  run           executable, any language; reads stdin, prints stdout
+  spec.json     metadata: name, description; optional profile, toolbox, tools
+  pre-fill      REQUIRED; transforms messages before completion
+  run           OPTIONAL; executable, any language; reads stdin, prints stdout
   is-available  bash; runtime gate AND dependency manifest
 
 data/prompts/<name>/    one or more prompt files loaded via prompt:load
 ```
 
-The `run` script IS the agent.
+The `pre-fill` script is required for every agent - it transforms the message array before completion.
+The `run` script is optional; agents that only need `agent:complete` don't need one.
 A simple agent is ~5 lines wrapping `agent:simple-completion`.
 A complex agent (like `agents/intuition/`) is ~120 lines that uses `accumulator`/`workers`/`chat`/`prompt`/`model`/`tui` directly and picks model profiles per phase.
 
