@@ -63,7 +63,7 @@ setup() {
   while IFS= read -r rel; do
     [[ -z "$rel" ]] && continue
     files+=("${SCRATCH_HOME}/${rel}")
-  done < <(git -C "$SCRATCH_HOME" ls-files 'lib/*.sh')
+  done < <(git -C "$SCRATCH_HOME" ls-files 'lib/*.sh' 'lib/**/*.sh')
 
   [[ ${#files[@]} -eq 0 ]] && return 0
 
