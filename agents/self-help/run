@@ -4,8 +4,8 @@
 # self-help agent
 #
 # Answers questions about scratch by reading its own user guides via the
-# self-docs tool. Uses agent:simple-completion with tool access so the
-# model can list and read guides as needed to answer the question.
+# self-docs tool. Uses agent:simple-completion which delegates to
+# agent:complete (pre-fill + profile + tools from spec.json).
 #
 # stdin:  the user's question
 # stdout: the answer (markdown)
@@ -16,4 +16,4 @@ set -euo pipefail
 # shellcheck source=/dev/null
 source "$SCRATCH_HOME/lib/agent.sh"
 
-agent:simple-completion fast "self-help/system" '["self-docs"]'
+agent:simple-completion self-help "$(cat)"

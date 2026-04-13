@@ -1,4 +1,6 @@
 {
   "name": "coordinator",
-  "description": "General-purpose conversational assistant for interactive chat sessions. Receives the full conversation history on stdin as a JSON messages array, prepends a system prompt, and returns the assistant's response."
+  "description": "General-purpose conversational assistant for interactive chat sessions.",
+  "profile": "balanced",
+  "toolbox": "read-only"
 }

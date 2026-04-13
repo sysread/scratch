@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# coordinator pre-fill
+#
+# Prepend the coordinator system prompt to the messages array. If a
+# system message is already the first element, leave it alone (caller
+# may be resuming a conversation that was pre-filled in a prior round).
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+{
+  source "$SCRATCH_HOME/lib/base.sh"
+  source "$SCRATCH_HOME/lib/prompt.sh"
+}
+
+messages="$(cat)"
+
+# Skip if a system message is already first
+has_system="$(jq '.[0].role == "system"' <<<"$messages")"
+if [[ "$has_system" == "true" ]]; then
+  printf '%s' "$messages"
+  exit 0
+fi
+
+system_prompt="$(prompt:load coordinator/system)"
+jq -c --arg sys "$system_prompt" \
+  '[{role: "system", content: $sys}] + .' \
+  <<<"$messages"

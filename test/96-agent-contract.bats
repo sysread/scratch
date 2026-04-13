@@ -12,8 +12,10 @@ set -euo pipefail
 #   1. spec.json exists, parses as JSON, has .name and .description fields,
 #      and the .name field matches the directory basename.
 #   2. .name follows the [a-z][a-z0-9_-]* convention (shell-safe identifiers).
-#   3. run exists, is a regular file, is +x.
-#   4. is-available exists, is +x, has a bash shebang, AND sources lib/base.sh.
+#   3. pre-fill exists, is +x, has a bash shebang.
+#   4. run exists and is +x (if present; run is optional for agents that
+#      only use agent:complete).
+#   5. is-available exists, is +x, has a bash shebang, AND sources lib/base.sh.
 #      Sourcing base.sh is the structural requirement so any has-commands /
 #      die / warn calls the script does make actually work. has-commands
 #      itself is encouraged but not required - an agent that is pure policy
@@ -123,7 +125,44 @@ _each_agent() {
   fi
 }
 
-@test "every agent has run, executable" {
+@test "every agent has pre-fill, executable, with bash shebang" {
+  local name
+  local dir
+  local shebang
+  local -a errs=()
+
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    dir="${SCRATCH_HOME}/agents/${name}"
+
+    if [[ ! -f "${dir}/pre-fill" ]]; then
+      errs+=("${name}: missing pre-fill")
+      continue
+    fi
+
+    if [[ ! -x "${dir}/pre-fill" ]]; then
+      errs+=("${name}: pre-fill is not executable")
+      continue
+    fi
+
+    shebang="$(head -n1 "${dir}/pre-fill")"
+    case "$shebang" in
+      "#!/usr/bin/env bash" | "#!/bin/bash" | "#!/usr/bin/bash") ;;
+      *)
+        errs+=("${name}: pre-fill must be bash (shebang was: ${shebang})")
+        ;;
+    esac
+  done < <(_each_agent)
+
+  if ((${#errs[@]} > 0)); then
+    for e in "${errs[@]}"; do
+      diag "$e"
+    done
+    return 1
+  fi
+}
+
+@test "every agent has run, executable (if present)" {
   local name
   local dir
   local -a errs=()
@@ -132,10 +171,8 @@ _each_agent() {
     [[ -z "$name" ]] && continue
     dir="${SCRATCH_HOME}/agents/${name}"
 
-    if [[ ! -f "${dir}/run" ]]; then
-      errs+=("${name}: missing run")
-      continue
-    fi
+    # run is optional - agents that only use agent:complete don't need it
+    [[ -f "${dir}/run" ]] || continue
 
     if [[ ! -x "${dir}/run" ]]; then
       errs+=("${name}: run is not executable")

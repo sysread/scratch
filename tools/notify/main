@@ -27,26 +27,29 @@ source "$SCRATCH_HOME/lib/termio.sh"
 # shellcheck source=/dev/null
 source "$SCRATCH_HOME/lib/tui.sh"
 
-level="$(jq -r '.level' <<< "$SCRATCH_TOOL_ARGS_JSON")"
-message="$(jq -r '.message' <<< "$SCRATCH_TOOL_ARGS_JSON")"
+level="$(jq -r '.level' <<<"$SCRATCH_TOOL_ARGS_JSON")"
+message="$(jq -r '.message' <<<"$SCRATCH_TOOL_ARGS_JSON")"
 
 # Validate the level enum locally. The spec declares an enum but the model
 # can still send garbage; better to fail with a clear message than to call
 # the wrong tui function silently.
+#
+# tui:* output routes to /dev/tty automatically (see lib/tui.sh), so the
+# notification reaches the user even though tool:invoke captures stderr.
 case "$level" in
-  info)
-    tui:info "$message"
-    ;;
-  warning)
-    tui:warn "$message"
-    ;;
-  error)
-    tui:error "$message"
-    ;;
-  *)
-    echo "notify: invalid level '$level' (must be one of: info, warning, error)" >&2
-    exit 1
-    ;;
+info)
+  tui:info "$message"
+  ;;
+warning)
+  tui:warn "$message"
+  ;;
+error)
+  tui:error "$message"
+  ;;
+*)
+  echo "notify: invalid level '$level' (must be one of: info, warning, error)" >&2
+  exit 1
+  ;;
 esac
 
 # Confirmation back to the LLM

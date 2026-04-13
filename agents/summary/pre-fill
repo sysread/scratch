@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# summary pre-fill
+#
+# Passthrough. The summary agent manages its own prompts via the
+# accumulator and a structuring phase. Messages pass through unchanged.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+cat

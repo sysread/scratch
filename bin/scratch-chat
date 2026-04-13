@@ -46,10 +46,7 @@ SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
   source "$SCRIPTDIR/../lib/cmd.sh"
   source "$SCRIPTDIR/../lib/project.sh"
   source "$SCRIPTDIR/../lib/conversations.sh"
-  source "$SCRIPTDIR/../lib/prompt.sh"
-  source "$SCRIPTDIR/../lib/model.sh"
-  source "$SCRIPTDIR/../lib/chat.sh"
-  source "$SCRIPTDIR/../lib/tool.sh"
+  source "$SCRIPTDIR/../lib/agent.sh"
   source "$SCRIPTDIR/../lib/signals.sh"
   source "$SCRIPTDIR/../lib/tempfiles.sh"
 }
@@ -104,39 +101,6 @@ _chat:debug() {
 _chat:debug-exit-notice() {
   [[ -n "$_CHAT_DEBUG_LOG" ]] || return 0
   tui:info "chat debug log" path "$_CHAT_DEBUG_LOG"
-}
-
-#-------------------------------------------------------------------------------
-# _chat:rewrite-messages PROJECT SLUG MESSAGES_ARRAY_JSON
-#
-# Replace the entire messages.jsonl file with the given JSON array.
-# Used after a tool-calling round where intermediate messages (assistant
-# tool_calls + tool results) were appended to the in-memory array and
-# need to be flushed to disk.
-#-------------------------------------------------------------------------------
-_chat:rewrite-messages() {
-  local project="$1"
-  local slug="$2"
-  local messages_json="$3"
-
-  local dir
-  dir="$(conversation:chat-dir "$project" "$slug")"
-
-  # Convert JSON array to JSONL and write atomically
-  jq -c '.[]' <<< "$messages_json" > "${dir}/.messages.jsonl.tmp"
-  mv "${dir}/.messages.jsonl.tmp" "${dir}/messages.jsonl"
-}
-
-#-------------------------------------------------------------------------------
-# _chat:build-message ROLE CONTENT
-#
-# Print a compact JSON message object to stdout.
-#-------------------------------------------------------------------------------
-_chat:build-message() {
-  local role="$1"
-  local content="$2"
-  jq -c -n --arg role "$role" --arg content "$content" \
-    '{role: $role, content: $content}'
 }
 
 #-------------------------------------------------------------------------------
@@ -232,151 +196,67 @@ _chat:display-history() {
 }
 
 #-------------------------------------------------------------------------------
-# _chat:display-tool-call NAME ARGS_JSON
+# _chat:display-new-messages MESSAGES_JSON START_INDEX
 #
-# Render a tool call request to stderr so the user knows what tool the
-# model is invoking and with what arguments.
-#-------------------------------------------------------------------------------
-_chat:display-tool-call() {
-  local name="$1"
-  local args_json="$2"
-  tui:info "tool call" tool "$name" args "$args_json"
-}
-
-#-------------------------------------------------------------------------------
-# _chat:display-tool-result NAME CONTENT OK
+# Display messages added to the array during a completion round (tool
+# calls and tool results). Walks messages[START_INDEX..] and renders
+# each one. Assistant messages with tool_calls show the tool name and
+# flattened args. Tool result messages show the result content.
 #
-# Render a tool call result to stderr.
+# Called after agent:complete returns to show what happened during the
+# round. This is the "after-the-fact" display model: the agent runs
+# the full round, then the caller displays what changed.
 #-------------------------------------------------------------------------------
-_chat:display-tool-result() {
-  local name="$1"
-  local content="$2"
-  local ok="$3"
+_chat:display-new-messages() {
+  local messages_json="$1"
+  local start="$2"
 
-  if [[ "$ok" == "true" ]]; then
-    tui:info "tool result" tool "$name" result "$content"
-  else
-    tui:warn "tool failed" tool "$name" error "$content"
-  fi
-}
+  local count
+  count="$(jq 'length' <<< "$messages_json")"
 
-#-------------------------------------------------------------------------------
-# _chat:complete-round MESSAGES_ARRAY_VAR
-#
-# Run one completion round with tool-call support. The messages array is
-# modified in place (via nameref) as tool calls and results are appended.
-# The final assistant text response is printed to stdout.
-#
-# This function owns the tool-calling loop rather than delegating to
-# chat:complete-with-tools, so the chat UI can display each tool call
-# and result as it happens.
-#
-# Uses the coordinator's system prompt and balanced profile. Tool specs
-# come from the read-only toolbox (currently just notify).
-#-------------------------------------------------------------------------------
-_chat:complete-round() {
-  local -n _cr_messages="$1"
+  local i
+  for ((i = start; i < count; i++)); do
+    local msg
+    msg="$(jq -c ".[$i]" <<< "$messages_json")"
 
-  local model
-  local extras
-  model="$(model:profile:model balanced)"
-  extras="$(model:profile:extras balanced)"
+    local role
+    role="$(jq -r '.role' <<< "$msg")"
 
-  # Resolve tool specs from the read-only toolbox
-  local tool_names_json
-  tool_names_json="$(tool:box read-only | jq -c '.tools')"
+    case "$role" in
+      assistant)
+        # Check for tool_calls on this assistant message
+        local tool_calls_arr
+        tool_calls_arr="$(jq -c '.tool_calls // []' <<< "$msg")"
+        if [[ "$tool_calls_arr" != "[]" ]]; then
+          local tc tc_count
+          tc_count="$(jq 'length' <<< "$tool_calls_arr")"
+          for ((tc = 0; tc < tc_count; tc++)); do
+            local call_name call_args
+            call_name="$(jq -r ".[$tc].function.name" <<< "$tool_calls_arr")"
+            call_args="$(jq -c ".[$tc].function.arguments | (fromjson? // {})" <<< "$tool_calls_arr")"
 
-  local tool_names_args
-  mapfile -t tool_names_args < <(jq -r '.[]' <<< "$tool_names_json")
+            # Flatten args into key/value pairs for gum log. "level" is
+            # renamed to "lvl" because gum log absorbs it as its own keyword.
+            local -a kv_pairs=(tool "$call_name")
+            local key display_key val
+            while IFS= read -r key; do
+              val="$(jq -r --arg k "$key" '.[$k] | tostring' <<< "$call_args")"
+              display_key="$key"
+              [[ "$key" == "level" ]] && display_key="lvl"
+              kv_pairs+=("$display_key" "$val")
+            done < <(jq -r 'keys[]' <<< "$call_args" 2> /dev/null)
 
-  local tool_specs
-  tool_specs="$(tool:specs-json "${tool_names_args[@]}")"
-
-  local merged_extras
-  merged_extras="$(jq -c --argjson t "$tool_specs" '. + {tools: $t}' <<< "$extras")"
-
-  # Prepend system prompt
-  local system_prompt
-  system_prompt="$(prompt:load coordinator/system)"
-  local api_messages
-  api_messages="$(jq -c \
-    --arg sys "$system_prompt" \
-    '[{role: "system", content: $sys}] + .' \
-    <<< "$_cr_messages")"
-
-  local response
-  local tool_calls
-  local assistant_msg
-
-  while :; do
-    _chat:debug "completion request" model "$model"
-    response="$(chat:completion "$model" "$api_messages" "$merged_extras")"
-    _chat:debug "completion response" status "ok"
-
-    # Check for tool calls
-    tool_calls="$(jq -c '.choices[0].message.tool_calls // empty' <<< "$response")"
-
-    if [[ -z "$tool_calls" || "$tool_calls" == "null" || "$tool_calls" == "[]" ]]; then
-      # Plain text response - extract content and return
-      local content
-      content="$(jq -r '.choices[0].message.content // ""' <<< "$response")"
-      printf '%s' "$content"
-      return 0
-    fi
-
-    # Display each tool call to the user
-    local calls
-    calls="$(jq -c '[.[] | {
-      id: .id,
-      name: .function.name,
-      args: (.function.arguments | (fromjson? // {}))
-    }]' <<< "$tool_calls")"
-
-    local i call_count
-    call_count="$(jq 'length' <<< "$calls")"
-    for ((i = 0; i < call_count; i++)); do
-      local call_name call_args
-      call_name="$(jq -r ".[$i].name" <<< "$calls")"
-      call_args="$(jq -c ".[$i].args" <<< "$calls")"
-      _chat:display-tool-call "$call_name" "$call_args"
-    done
-
-    # Execute tools
-    _chat:debug "tool invoke" count "$call_count"
-    local results
-    results="$(tool:invoke-parallel "$calls")"
-
-    # Display results
-    for ((i = 0; i < call_count; i++)); do
-      local result_name result_content result_ok
-      result_name="$(jq -r ".[$i].name" <<< "$calls")"
-      result_content="$(jq -r ".[$i].content" <<< "$results")"
-      result_ok="$(jq -r ".[$i].ok" <<< "$results")"
-      _chat:display-tool-result "$result_name" "$result_content" "$result_ok"
-    done
-
-    # Append assistant message (with tool_calls) and tool results to
-    # both the API messages and the persistent messages array
-    assistant_msg="$(jq -c '.choices[0].message' <<< "$response")"
-
-    local tool_result_messages
-    tool_result_messages="$(jq -c \
-      '[.[] | {role: "tool", tool_call_id: .tool_call_id, content: .content}]' \
-      <<< "$results")"
-
-    # Update API messages for next round
-    api_messages="$(jq -c \
-      --argjson assistant "$assistant_msg" \
-      --argjson results "$tool_result_messages" \
-      '. + [$assistant] + $results' \
-      <<< "$api_messages")"
-
-    # Update persistent messages (without system prompt)
-    _cr_messages="$(jq -c \
-      --argjson assistant "$assistant_msg" \
-      --argjson results "$tool_result_messages" \
-      '. + [$assistant] + $results' \
-      <<< "$_cr_messages")"
+            tui:info "tool call" "${kv_pairs[@]}"
+          done
+        fi
+        ;;
+      tool)
+        local tool_id content
+        tool_id="$(jq -r '.tool_call_id // "unknown"' <<< "$msg")"
+        content="$(jq -r '.content // ""' <<< "$msg")"
+        tui:info "tool result" id "$tool_id" result "$content"
+        ;;
+    esac
   done
 }
 
@@ -579,6 +459,9 @@ main() {
     _chat:display-history "$project_name" "$slug"
   fi
 
+  # Session-start separator with timestamp
+  _chat:print-separator
+
   # Interactive loop
   while true; do
     local user_input
@@ -624,32 +507,35 @@ main() {
 
     # Save and display user message
     local user_msg
-    user_msg="$(_chat:build-message user "$user_input")"
+    user_msg="$(conversation:build-message user "$user_input")"
     conversation:append-message "$project_name" "$slug" "$user_msg"
     _chat:debug "message appended" role user size "${#user_input}"
     _chat:display-message user "$user_input"
 
-    # Run the completion round. The messages array is modified in place
-    # as tool calls and results are appended. The round function
-    # displays tool calls and results to the user as they happen.
+    # Run the completion round via agent:complete. The agent handles
+    # pre-fill (system prompt), model/tool resolution, and the tool-call
+    # loop. Messages are modified in place; we diff before/after to
+    # display tool calls that happened during the round.
     local messages_array
     messages_array="$(conversation:messages-as-array "$project_name" "$slug")"
 
+    local before_count
+    before_count="$(jq 'length' <<< "$messages_array")"
+
     _chat:debug "round start" slug "$slug"
-    local response
-    response="$(_chat:complete-round messages_array)"
+    local response=""
+    agent:complete coordinator messages_array response
     _chat:debug "round complete" response_size "${#response}"
 
-    # Persist the final messages array (includes any tool call/result
-    # messages that were appended during the round) and the assistant's
-    # text response.
-    local assistant_msg
-    assistant_msg="$(_chat:build-message assistant "$response")"
+    # Display any tool call traffic that happened during the round
+    _chat:display-new-messages "$messages_array" "$before_count"
 
-    # Rewrite messages.jsonl with the full array (which now includes
-    # tool calls and results from the round). Then append the final
-    # assistant text response.
-    _chat:rewrite-messages "$project_name" "$slug" "$messages_array"
+    # Persist: rewrite with the updated array (tool calls + results),
+    # then append the final assistant text response.
+    local assistant_msg
+    assistant_msg="$(conversation:build-message assistant "$response")"
+
+    conversation:rewrite "$project_name" "$slug" "$messages_array"
     conversation:append-message "$project_name" "$slug" "$assistant_msg"
     _chat:debug "message appended" role assistant size "${#response}"
     conversation:end-round "$project_name" "$slug"

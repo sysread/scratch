@@ -7,8 +7,8 @@
 # up grammatically. Useful as the first concrete agent and as a smoke
 # test for the agent layer end to end.
 #
-# This is the canonical example of a simple, single-shot agent: load a
-# system prompt, pick a profile, hand off. Five lines.
+# stdin:  user input text
+# stdout: paraphrased version
 #-------------------------------------------------------------------------------
 
 set -euo pipefail
@@ -16,4 +16,4 @@ set -euo pipefail
 # shellcheck source=/dev/null
 source "$SCRATCH_HOME/lib/agent.sh"
 
-agent:simple-completion fast "echo/system"
+agent:simple-completion echo "$(cat)"

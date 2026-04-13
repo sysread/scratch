@@ -1,4 +1,5 @@
 {
   "name": "summary",
-  "description": "Generate a structured summary of a source file for the project index. Reads file content on stdin, produces JSON with a narrative summary and synthetic search questions. Uses the accumulator for large files."
+  "description": "Generate a structured summary of a source file for the project index. Reads file content on stdin, produces JSON with a narrative summary and synthetic search questions. Uses the accumulator for large files.",
+  "profile": "long-context"
 }

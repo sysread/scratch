@@ -1,4 +1,5 @@
 {
   "name": "intuition",
-  "description": "Reference implementation of a complex multi-phase agent. Reads a conversation transcript on stdin, summarizes it via the accumulator (perception phase), fans out parallel drive reactions via the worker pool, then synthesizes them into a single first-person directive. Adapted from fnord's AI.Agent.Intuition. Demonstrates that a single agent can use the accumulator, multiple model profiles, parallel sub-completions, and prompt subdirectories - all in one ~80 line bash run script."
+  "description": "Reference implementation of a complex multi-phase agent. Reads a conversation transcript on stdin, summarizes it via the accumulator (perception phase), fans out parallel drive reactions via the worker pool, then synthesizes them into a single first-person directive. Adapted from fnord's AI.Agent.Intuition.",
+  "profile": "fast"
 }

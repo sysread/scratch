@@ -347,6 +347,7 @@ tool:invoke() {
   # shellcheck disable=SC2030,SC2031
   (
     export SCRATCH_TOOL_ARGS_JSON="$args_json"
+    export SCRATCH_TUI_USE_TTY=1
     export SCRATCH_TOOL_DIR
     SCRATCH_TOOL_DIR="$(tool:tools-dir)/$name"
     export SCRATCH_HOME

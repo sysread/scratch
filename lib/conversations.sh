@@ -378,6 +378,47 @@ conversation:end-round() {
 export -f conversation:end-round
 
 #-------------------------------------------------------------------------------
+# conversation:build-message ROLE CONTENT
+#
+# Print a compact JSON message object to stdout. Convenience wrapper so
+# callers don't need to hand-roll jq for the common {role, content} shape.
+#-------------------------------------------------------------------------------
+conversation:build-message() {
+  local role="$1"
+  local content="$2"
+  jq -c -n --arg role "$role" --arg content "$content" \
+    '{role: $role, content: $content}'
+}
+
+export -f conversation:build-message
+
+#-------------------------------------------------------------------------------
+# conversation:rewrite PROJECT SLUG MESSAGES_ARRAY_JSON
+#
+# Replace the entire messages.jsonl file with the given JSON array.
+# Used after a tool-calling round where intermediate messages (assistant
+# tool_calls + tool results) were appended to an in-memory array and
+# need to be flushed to disk. Write is atomic (tmp + mv).
+#-------------------------------------------------------------------------------
+conversation:rewrite() {
+  local project="$1"
+  local slug="$2"
+  local messages_json="$3"
+  local dir
+  dir="$(conversation:chat-dir "$project" "$slug")"
+
+  if [[ ! -d "$dir" ]]; then
+    die "conversation not found: ${project}/${slug}"
+    return 1
+  fi
+
+  jq -c '.[]' <<< "$messages_json" > "${dir}/.messages.jsonl.tmp"
+  mv "${dir}/.messages.jsonl.tmp" "${dir}/messages.jsonl"
+}
+
+export -f conversation:rewrite
+
+#-------------------------------------------------------------------------------
 # Internal helpers
 #-------------------------------------------------------------------------------
 

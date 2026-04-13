@@ -1,39 +1,25 @@
 #!/usr/bin/env bash
 
 #-------------------------------------------------------------------------------
-# coordinator agent
+# coordinator agent - standalone mode
 #
-# Conversational assistant for multi-turn chat sessions. Unlike simple
-# agents that use agent:simple-completion (which builds a 2-message
-# array from stdin), the coordinator receives the full conversation
-# history as a JSON messages array on stdin, prepends its system prompt,
-# and passes the whole thing to chat:completion.
+# For standalone invocations via agent:run (not the chat loop). Reads a
+# JSON messages array from stdin, runs agent:complete, returns text.
+# The chat loop uses agent:complete directly for multi-turn support.
 #
-# stdin:  JSON array of message objects (the conversation so far)
+# stdin:  JSON array of message objects
 # stdout: the assistant's response text
 #-------------------------------------------------------------------------------
 
 set -euo pipefail
 
 # shellcheck source=/dev/null
-{
-  source "$SCRATCH_HOME/lib/agent.sh"
-  source "$SCRATCH_HOME/lib/prompt.sh"
-  source "$SCRATCH_HOME/lib/chat.sh"
-  source "$SCRATCH_HOME/lib/model.sh"
-}
+source "$SCRATCH_HOME/lib/agent.sh"
 
-# Read the full conversation history from stdin
+# In standalone mode, stdin is the full messages array (not a single
+# string). Read it and pass to agent:complete directly.
+# shellcheck disable=SC2034
 messages="$(cat)"
-
-# Prepend the system prompt as the first message
-system_prompt="$(prompt:load coordinator/system)"
-messages="$(jq -c \
-  --arg sys "$system_prompt" \
-  '[{role: "system", content: $sys}] + .' \
-  <<<"$messages")"
-
-model="$(model:profile:model balanced)"
-extras="$(model:profile:extras balanced)"
-
-chat:completion "$model" "$messages" "$extras" | chat:extract-content
+response=""
+agent:complete coordinator messages response
+printf '%s' "$response"

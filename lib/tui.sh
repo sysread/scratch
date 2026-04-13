@@ -48,12 +48,18 @@ has-commands gum
 #
 #       some_command | tui:log info
 #
-# Output goes to stderr unconditionally (gum log writes to stderr).
-# stdout stays clean for program data per the conventions doc.
+# Output goes to stderr by default. When SCRATCH_TUI_USE_TTY is set
+# (tool:invoke does this), output routes to /dev/tty so log messages
+# reach the user even though tool:invoke captures stderr. Falls back
+# to stderr when /dev/tty is absent. stdout stays clean for program
+# data.
+#
+# Suppress all output with SCRATCH_LOG_LEVEL=none (or 0).
 #-------------------------------------------------------------------------------
 # Log level filtering. SCRATCH_LOG_LEVEL controls the minimum severity
 # that produces output. Levels below the threshold return 0 silently.
 # Default: info (debug is suppressed unless explicitly enabled).
+# Set SCRATCH_LOG_LEVEL=none to suppress all output.
 #
 # Level numbers are resolved by a helper function rather than an
 # associative array because bash can't export associative arrays to
@@ -64,6 +70,7 @@ _tui:_level-num() {
     info) echo 1 ;;
     warn) echo 2 ;;
     error) echo 3 ;;
+    none | 0) echo 4 ;;
     *) echo 1 ;;
   esac
 }
@@ -72,6 +79,33 @@ export -f '_tui:_level-num'
 
 _TUI_MIN_LEVEL="$(_tui:_level-num "${SCRATCH_LOG_LEVEL:-info}")"
 export _TUI_MIN_LEVEL
+
+#-------------------------------------------------------------------------------
+# _tui:_gum-log LEVEL [ARGS...]
+#
+# (Private) Call gum log, routing output to /dev/tty when
+# SCRATCH_TUI_USE_TTY is set, falling back to stderr otherwise.
+#
+# tool:invoke sets SCRATCH_TUI_USE_TTY=1 before running tool scripts
+# because it captures stderr for error reporting. Without the /dev/tty
+# redirect, any tui:* calls inside a tool's main script would be
+# swallowed. The env var approach is surgical: only tool invocations
+# get the redirect, so tests (which capture stderr via bats) and
+# normal command execution are unaffected.
+#
+# gum log writes to stderr by default. The `2>/dev/tty` redirect sends
+# it to the terminal; gum's isatty() check still returns true because
+# /dev/tty IS a terminal, so ANSI styling is preserved.
+#-------------------------------------------------------------------------------
+_tui:_gum-log() {
+  if [[ -n "${SCRATCH_TUI_USE_TTY:-}" && -e /dev/tty ]]; then
+    gum log --structured "$@" 2> /dev/tty
+  else
+    gum log --structured "$@"
+  fi
+}
+
+export -f '_tui:_gum-log'
 
 tui:log() {
   local level="$1"
@@ -88,11 +122,11 @@ tui:log() {
   fi
 
   if (($# > 0)); then
-    gum log --structured --level "$level" "$@"
+    _tui:_gum-log --level "$level" "$@"
   else
     local line
     while IFS= read -r line; do
-      gum log --structured --level "$level" "$line"
+      _tui:_gum-log --level "$level" "$line"
     done
   fi
 
@@ -105,14 +139,14 @@ tui:warn() { tui:log warn "$@"; }
 tui:error() { tui:log error "$@"; }
 
 # Conditional variants: log only when the named env var is set (any value).
-# Bypasses the global SCRATCH_LOG_LEVEL — the env var is the sole gate.
+# Bypasses the global SCRATCH_LOG_LEVEL - the env var is the sole gate.
 # Useful for per-feature debug output that should fire regardless of the
 # global log level when explicitly enabled.
 #   tui:debug-if SCRATCH_DEBUG_INDEX "summarized" file "$ident"
-tui:debug-if() { [[ -n "${!1:-}" ]] && shift && gum log --structured --level debug "$@" || true; }
-tui:info-if() { [[ -n "${!1:-}" ]] && shift && gum log --structured --level info "$@" || true; }
-tui:warn-if() { [[ -n "${!1:-}" ]] && shift && gum log --structured --level warn "$@" || true; }
-tui:error-if() { [[ -n "${!1:-}" ]] && shift && gum log --structured --level error "$@" || true; }
+tui:debug-if() { [[ -n "${!1:-}" ]] && shift && _tui:_gum-log --level debug "$@" || true; }
+tui:info-if() { [[ -n "${!1:-}" ]] && shift && _tui:_gum-log --level info "$@" || true; }
+tui:warn-if() { [[ -n "${!1:-}" ]] && shift && _tui:_gum-log --level warn "$@" || true; }
+tui:error-if() { [[ -n "${!1:-}" ]] && shift && _tui:_gum-log --level error "$@" || true; }
 
 tui:die() {
   tui:error "$1" "${@:2}"

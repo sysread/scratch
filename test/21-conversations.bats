@@ -339,3 +339,54 @@ setup() {
   dir="$(conversation:chat-dir "testproj" "abc-123")"
   [[ "$dir" == *"/testproj/chats/abc-123" ]]
 }
+
+# ---------------------------------------------------------------------------
+# conversation:build-message
+# ---------------------------------------------------------------------------
+
+@test "conversation:build-message produces valid JSON with role and content" {
+  local msg
+  msg="$(conversation:build-message user "hello world")"
+
+  run jq -r '.role' <<< "$msg"
+  is "$output" "user"
+
+  run jq -r '.content' <<< "$msg"
+  is "$output" "hello world"
+}
+
+@test "conversation:build-message handles special characters" {
+  local msg
+  msg="$(conversation:build-message assistant 'she said "hi" & waved')"
+
+  run jq -r '.content' <<< "$msg"
+  is "$output" 'she said "hi" & waved'
+}
+
+# ---------------------------------------------------------------------------
+# conversation:rewrite
+# ---------------------------------------------------------------------------
+
+@test "conversation:rewrite replaces messages.jsonl atomically" {
+  local slug
+  slug="$(conversation:create "testproj")"
+
+  conversation:append-message "testproj" "$slug" '{"role":"user","content":"old"}'
+
+  # Rewrite with a new array
+  local new_array='[{"role":"user","content":"new1"},{"role":"assistant","content":"new2"}]'
+  conversation:rewrite "testproj" "$slug" "$new_array"
+
+  # Verify contents replaced
+  local arr
+  arr="$(conversation:messages-as-array "testproj" "$slug")"
+
+  run jq 'length' <<< "$arr"
+  is "$output" "2"
+
+  run jq -r '.[0].content' <<< "$arr"
+  is "$output" "new1"
+
+  run jq -r '.[1].content' <<< "$arr"
+  is "$output" "new2"
+}

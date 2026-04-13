@@ -3,55 +3,47 @@
 #-------------------------------------------------------------------------------
 # Agent layer
 #
-# An agent in scratch is a self-contained directory under agents/ with three
+# An agent in scratch is a self-contained directory under agents/ with four
 # required files:
 #
-#   agents/<name>/spec.json    - metadata: name, description, optional
-#                               input/output hints. Not executable.
-#   agents/<name>/run          - the executable entrypoint; any language.
-#                               Receives the user input on stdin and prints
-#                               the final response to stdout. Stderr is logs.
-#   agents/<name>/is-available - bash script. Two purposes:
-#                               1. Runtime gate: exit 0 if the agent is usable
-#                                  in the current environment, non-zero (with
-#                                  reason on stderr) if not. May check env
-#                                  vars, repo state, project context, edit
-#                                  mode, etc. - not just dependencies.
-#                               2. Dependency manifest: must source lib/base.sh
-#                                  and call has-commands for any external
-#                                  programs the agent or its libs need. The
-#                                  doctor scanner picks up these declarations
-#                                  textually and attributes them to "agent:<name>".
+#   agents/<name>/spec.json    - metadata: name, description. Optional fields:
+#                                profile (model profile name), toolbox or
+#                                tools (tool access), extras (additional
+#                                completion params).
+#   agents/<name>/pre-fill     - executable; transforms the messages array
+#                                before completion. Reads a JSON messages
+#                                array from stdin, prints the transformed
+#                                array to stdout. Common use: prepend a
+#                                system prompt. Passthrough (cat) for agents
+#                                that manage prompts internally.
+#   agents/<name>/run          - executable entrypoint for standalone mode;
+#                                any language. Reads user input on stdin,
+#                                prints final response to stdout. Optional
+#                                for agents that only need agent:complete.
+#   agents/<name>/is-available - bash script. Runtime gate AND dependency
+#                                manifest (see conventions doc).
 #
-# Unlike tools (which the LLM calls during a chat completion), an agent is
-# the unit of reusable LLM workflow. A simple agent might be a 5-line wrapper
-# around chat:complete-with-tools via agent:simple-completion. A complex agent
-# might orchestrate multiple phases: accumulate over a huge input, fan out
-# parallel sub-completions via workers:run-parallel, synthesize the results,
-# and branch on a structured-output boolean.
+# Two invocation modes:
 #
-# The agent IS the run script. There is no JSON config that names a model or
-# a system prompt - the run script picks both per-phase, freely. This is the
-# main difference from the tool layer (where the spec.json IS the contract).
+#   agent:complete NAME MESSAGES_VAR
+#     Multi-turn entry point. Pipes messages through pre-fill, resolves
+#     model/tools from spec.json, runs the completion+tool-call loop,
+#     appends intermediate messages to MESSAGES_VAR, prints final text
+#     to stdout. The caller owns display and persistence.
 #
-# Environment contract for agent run scripts:
+#   agent:run NAME
+#     Standalone mode. Execs the run script with stdin/stdout piped
+#     through. The agent owns everything internally. Used by complex
+#     multi-phase agents (intuition, summary) that manage their own
+#     completion lifecycle.
 #
-#   stdin                = the user input
-#   stdout               = the final response (plain text)
-#   stderr               = logs / progress (use tui:info / tui:warn)
+# Environment contract for run/pre-fill scripts:
 #
-#   SCRATCH_AGENT_DIR    absolute path to agents/<name>/ (so the script can
-#                        find sibling files - but prompts live under
-#                        data/prompts/<name>/, not in the agent dir)
-#   SCRATCH_HOME         absolute path to the scratch repo root (so the
-#                        script can `source "$SCRATCH_HOME/lib/..."`)
-#   SCRATCH_PROJECT      current project name from project:detect, only set
-#                        if a project is detected
-#   SCRATCH_PROJECT_ROOT current project root path, only set if detected
-#   SCRATCH_AGENT_DEPTH  current recursion depth (incremented by agent:run
-#                        before forking the child). Dies if the new depth
-#                        exceeds SCRATCH_AGENT_MAX_DEPTH (default 8) so a
-#                        runaway sub-agent chain burns out fast.
+#   SCRATCH_AGENT_DIR    absolute path to agents/<name>/
+#   SCRATCH_HOME         absolute path to the scratch repo root
+#   SCRATCH_PROJECT      current project name (if detected)
+#   SCRATCH_PROJECT_ROOT current project root path (if detected)
+#   SCRATCH_AGENT_DEPTH  current recursion depth
 #-------------------------------------------------------------------------------
 
 [[ "${_INCLUDED_AGENT:-}" == "1" ]] && return 0
@@ -129,9 +121,10 @@ export -f agent:list
 #-------------------------------------------------------------------------------
 # agent:exists NAME
 #
-# Return 0 if agents/NAME/ has all three required files (spec.json, run,
-# is-available). Return 1 otherwise. Silent. Does NOT check executable
-# bits; that's the contract test's job at structural-validation time.
+# Return 0 if agents/NAME/ has all required files (spec.json, pre-fill,
+# is-available). The run script is optional (agents that only use
+# agent:complete don't need it). Does NOT check executable bits; that's
+# the contract test's job at structural-validation time.
 #-------------------------------------------------------------------------------
 agent:exists() {
   local name="$1"
@@ -139,7 +132,7 @@ agent:exists() {
   agents_dir="$(agent:agents-dir)"
 
   [[ -f "${agents_dir}/${name}/spec.json" ]] || return 1
-  [[ -f "${agents_dir}/${name}/run" ]] || return 1
+  [[ -f "${agents_dir}/${name}/pre-fill" ]] || return 1
   [[ -f "${agents_dir}/${name}/is-available" ]] || return 1
   return 0
 }
@@ -155,7 +148,7 @@ export -f agent:exists
 agent:dir() {
   local name="$1"
   if ! agent:exists "$name"; then
-    die "agent: not found: $name (expected agents/$name/ with spec.json + run + is-available)"
+    die "agent: not found: $name (expected agents/$name/ with spec.json + pre-fill + is-available)"
     return 1
   fi
   printf '%s\n' "$(agent:agents-dir)/$name"
@@ -313,87 +306,260 @@ agent:run() {
 export -f agent:run
 
 #-------------------------------------------------------------------------------
-# agent:simple-completion PROFILE PROMPT_NAME [TOOLS_JSON] [EXTRAS_JSON]
+# agent:profile NAME
 #
-# Common-case helper for single-shot agents.
-#
-# Reduces a trivial agent's run script to roughly:
-#
-#   #!/usr/bin/env bash
-#   set -euo pipefail
-#   source "$SCRATCH_HOME/lib/agent.sh"
-#   agent:simple-completion balanced "echo/system"
-#
-# Resolves PROFILE via model:profile:resolve, loads PROMPT_NAME via
-# prompt:load, reads stdin once for the user input, builds a 2-message
-# array (system prompt + user input), merges the profile's extras with
-# the caller's EXTRAS_JSON (caller wins), and calls either
-# chat:complete-with-tools (if TOOLS_JSON is a non-empty array) or
-# chat:completion (if TOOLS_JSON is omitted, empty, or "[]"). Pipes the
-# final response through chat:extract-content so the agent's stdout is
-# the model's text content, not the full response envelope.
-#
-# PROMPT_NAME is passed verbatim to prompt:load, so the same naming
-# convention applies (e.g. "echo/system" -> data/prompts/echo/system.md).
-#
-# Reads stdin once at the top of the function. The agent's run script
-# must NOT also read stdin via cat before calling this helper.
-#
-# All errors propagate via die from the underlying primitives. The
-# helper itself does no extra error wrapping.
+# Print the model profile name for the agent (from spec.json .profile).
+# Dies if the agent has no profile declared.
 #-------------------------------------------------------------------------------
-agent:simple-completion() {
-  local profile="$1"
-  local prompt_name="$2"
-  local tools_json="${3:-}"
-  local extras_json="${4:-}"
+agent:profile() {
+  local name="$1"
+  local profile
+  profile="$(agent:spec "$name" | jq -r '.profile // empty')"
+  if [[ -z "$profile" ]]; then
+    die "agent: '$name' has no profile in spec.json"
+    return 1
+  fi
+  printf '%s' "$profile"
+}
 
-  # Read the user input once. The whole point of stdin-as-input is that
-  # this happens here, not in every agent's run script.
-  local user_input
-  user_input="$(cat)"
+export -f agent:profile
 
-  local system_prompt
-  system_prompt="$(prompt:load "$prompt_name")" || return 1
+#-------------------------------------------------------------------------------
+# agent:tools NAME
+#
+# Print a JSON array of tool names for the agent. Resolves from spec.json:
+# if .toolbox is set, reads the toolbox; if .tools is set, uses the array
+# directly. Returns "[]" if neither is declared.
+#-------------------------------------------------------------------------------
+agent:tools() {
+  local name="$1"
+  local spec
+  spec="$(agent:spec "$name")"
+
+  local toolbox
+  toolbox="$(jq -r '.toolbox // empty' <<< "$spec")"
+  if [[ -n "$toolbox" ]]; then
+    tool:box "$toolbox" | jq -c '.tools'
+    return 0
+  fi
+
+  local tools
+  tools="$(jq -c '.tools // empty' <<< "$spec")"
+  if [[ -n "$tools" ]]; then
+    printf '%s' "$tools"
+    return 0
+  fi
+
+  printf '[]'
+}
+
+export -f agent:tools
+
+#-------------------------------------------------------------------------------
+# agent:pre-fill NAME MESSAGES_VAR
+#
+# Pipe the messages array through the agent's pre-fill script and assign
+# the result back to MESSAGES_VAR. The pre-fill script receives the JSON
+# messages array on stdin and prints the transformed array to stdout.
+#
+# Runs in a subshell with the agent env contract so pre-fill can source
+# scratch libraries via SCRATCH_HOME.
+#-------------------------------------------------------------------------------
+agent:pre-fill() {
+  local name="$1"
+  local -n _apf_messages="$2"
+
+  local pre_fill_script
+  pre_fill_script="$(agent:agents-dir)/$name/pre-fill"
+
+  if [[ ! -x "$pre_fill_script" ]]; then
+    die "agent: '$name' has no executable pre-fill script"
+    return 1
+  fi
+
+  # shellcheck disable=SC2034
+  # SC2030/SC2031: env modifications are intentionally subshell-local.
+  # shellcheck disable=SC2030,SC2031
+  _apf_messages="$(
+    (
+      export SCRATCH_AGENT_DIR
+      SCRATCH_AGENT_DIR="$(agent:agents-dir)/$name"
+      export SCRATCH_HOME
+      SCRATCH_HOME="$(cd "$_AGENT_SCRIPTDIR/.." && pwd -P)"
+      printf '%s' "$_apf_messages" | "$pre_fill_script"
+    )
+  )"
+}
+
+export -f agent:pre-fill
+
+#-------------------------------------------------------------------------------
+# agent:complete NAME MESSAGES_VAR RESPONSE_VAR [EXTRAS_JSON]
+#
+# Multi-turn completion entry point. Pipes messages through the agent's
+# pre-fill script, resolves model and tools from spec.json, runs the
+# completion loop (including tool calls), and assigns the final assistant
+# text response to RESPONSE_VAR.
+#
+# Both MESSAGES_VAR and RESPONSE_VAR are namerefs. Using namerefs for
+# both outputs (instead of printing text to stdout) is required because
+# $(...) subshells would discard the nameref modifications to the
+# messages array - the classic bash subshell variable-loss gotcha.
+#
+# MESSAGES_VAR is modified in place: intermediate messages (assistant
+# tool_calls, tool results) are appended as the loop runs. The caller
+# can diff the array before/after to see what happened. The final
+# assistant text message is NOT appended - the caller owns that.
+#
+# The pre-filled messages (with system prompt) are used for API calls but
+# NOT written back to MESSAGES_VAR. The caller's array stays free of the
+# system prompt so it reflects what the user sees, not what the API sees.
+#-------------------------------------------------------------------------------
+agent:complete() {
+  local name="$1"
+  local -n _ac_messages="$2"
+  local -n _ac_response="$3"
+  local caller_extras="${4:-}"
+
+  if ! agent:available "$name"; then
+    die "agent: '$name' is not available: $_AGENT_AVAILABILITY_ERR"
+    return 1
+  fi
+
+  # Resolve agent configuration from spec.json
+  local profile
+  profile="$(agent:profile "$name")"
 
   local model
-  model="$(model:profile:model "$profile")" || return 1
+  model="$(model:profile:model "$profile")"
 
   local profile_extras
-  profile_extras="$(model:profile:extras "$profile")" || return 1
+  profile_extras="$(model:profile:extras "$profile")"
 
-  # Merge the caller's extras over the profile's extras (caller wins).
+  # Merge caller extras over profile extras (caller wins)
   local merged_extras
-  if [[ -n "$extras_json" ]]; then
+  if [[ -n "$caller_extras" ]]; then
     merged_extras="$(jq -c -n \
       --argjson p "$profile_extras" \
-      --argjson c "$extras_json" \
+      --argjson c "$caller_extras" \
       '$p + $c')"
   else
     merged_extras="$profile_extras"
   fi
 
-  local messages
-  messages="$(jq -c -n \
-    --arg system "$system_prompt" \
-    --arg user "$user_input" \
-    '[{role:"system",content:$system},{role:"user",content:$user}]')"
+  # Resolve tools
+  local tools_json
+  tools_json="$(agent:tools "$name")"
 
-  # Branch on whether tools were requested. tools_json is non-empty
-  # AND a non-empty JSON array -> use chat:complete-with-tools.
-  # Otherwise -> chat:completion directly (no tools, no recursion).
   local tool_count=0
-  if [[ -n "$tools_json" ]]; then
+  if [[ -n "$tools_json" && "$tools_json" != "[]" ]]; then
     tool_count="$(jq 'length' <<< "$tools_json" 2> /dev/null || echo 0)"
   fi
 
+  # Inject tool specs into extras if tools are available
   if ((tool_count > 0)); then
-    chat:complete-with-tools "$model" "$messages" "$tools_json" "$merged_extras" \
-      | chat:extract-content
-  else
-    chat:completion "$model" "$messages" "$merged_extras" \
-      | chat:extract-content
+    local tool_names_args
+    mapfile -t tool_names_args < <(jq -r '.[]' <<< "$tools_json")
+
+    local tool_specs
+    tool_specs="$(tool:specs-json "${tool_names_args[@]}")"
+
+    merged_extras="$(jq -c --argjson t "$tool_specs" \
+      '. + {tools: $t}' <<< "$merged_extras")"
   fi
+
+  # Run pre-fill to get API-ready messages (with system prompt etc.)
+  local api_messages="$_ac_messages"
+  agent:pre-fill "$name" api_messages
+
+  # Completion loop with tool calling.
+  #
+  # Local variable names use _ac_ prefix to avoid colliding with the
+  # caller's variable names via the namerefs. Bash namerefs resolve to
+  # the CURRENT scope first, so a `local response` here would shadow
+  # the caller's `response` variable that _ac_response points to.
+  local _ac_raw
+  local _ac_tool_calls
+
+  while :; do
+    _ac_raw="$(chat:completion "$model" "$api_messages" "$merged_extras")"
+
+    # Check for tool calls. Some models return null, some return [],
+    # some omit the field entirely. All three mean "no tool calls."
+    _ac_tool_calls="$(jq -c '.choices[0].message.tool_calls // empty' <<< "$_ac_raw")"
+
+    if [[ -z "$_ac_tool_calls" || "$_ac_tool_calls" == "null" || "$_ac_tool_calls" == "[]" ]]; then
+      # Plain text response - assign to response nameref and return
+      # shellcheck disable=SC2034
+      _ac_response="$(jq -r '.choices[0].message.content // ""' <<< "$_ac_raw")"
+      return 0
+    fi
+
+    # Build calls array for tool:invoke-parallel
+    local _ac_calls
+    _ac_calls="$(jq -c '[.[] | {
+      id: .id,
+      name: .function.name,
+      args: (.function.arguments | (fromjson? // {}))
+    }]' <<< "$_ac_tool_calls")"
+
+    # Execute tools
+    local _ac_results
+    _ac_results="$(tool:invoke-parallel "$_ac_calls")"
+
+    # Build the messages to append: assistant (with tool_calls) + tool results
+    local _ac_assistant_msg
+    _ac_assistant_msg="$(jq -c '.choices[0].message' <<< "$_ac_raw")"
+
+    local _ac_tool_msgs
+    _ac_tool_msgs="$(jq -c \
+      '[.[] | {role: "tool", tool_call_id: .tool_call_id, content: .content}]' \
+      <<< "$_ac_results")"
+
+    # Append to API messages (includes system prompt)
+    api_messages="$(jq -c \
+      --argjson assistant "$_ac_assistant_msg" \
+      --argjson results "$_ac_tool_msgs" \
+      '. + [$assistant] + $results' \
+      <<< "$api_messages")"
+
+    # Append to caller's messages (no system prompt)
+    _ac_messages="$(jq -c \
+      --argjson assistant "$_ac_assistant_msg" \
+      --argjson results "$_ac_tool_msgs" \
+      '. + [$assistant] + $results' \
+      <<< "$_ac_messages")"
+  done
+}
+
+export -f agent:complete
+
+#-------------------------------------------------------------------------------
+# agent:simple-completion NAME INPUT_STRING [EXTRAS_JSON]
+#
+# Convenience wrapper for one-shot agent invocations. Wraps INPUT_STRING
+# as a single user message, calls agent:complete, and returns the text.
+#
+# Reduces a trivial agent's run script to:
+#
+#   #!/usr/bin/env bash
+#   set -euo pipefail
+#   source "$SCRATCH_HOME/lib/agent.sh"
+#   agent:simple-completion echo "$(cat)"
+#-------------------------------------------------------------------------------
+agent:simple-completion() {
+  local name="$1"
+  local user_input="$2"
+  local extras="${3:-}"
+
+  local messages
+  # shellcheck disable=SC2034
+  messages="$(jq -c -n --arg content "$user_input" \
+    '[{role: "user", content: $content}]')"
+
+  local response=""
+  agent:complete "$name" messages response "$extras"
+  printf '%s' "$response"
 }
 
 export -f agent:simple-completion

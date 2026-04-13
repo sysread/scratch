@@ -1,4 +1,5 @@
 {
   "name": "echo",
-  "description": "Paraphrase the user's input back in cleaner, more grammatical form. Preserves meaning exactly. The first concrete agent and a smoke test for the agent layer."
+  "description": "Paraphrase the user's input back in cleaner, more grammatical form. Preserves meaning exactly. The first concrete agent and a smoke test for the agent layer.",
+  "profile": "fast"
 }

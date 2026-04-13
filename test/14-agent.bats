@@ -39,7 +39,7 @@ setup() {
 
 # make_fake_agent NAME [RUN_BODY] [AVAIL_EXIT_CODE] [DESCRIPTION]
 #
-# Creates a complete fake agent under $SCRATCH_AGENTS_DIR/NAME with all three
+# Creates a complete fake agent under $SCRATCH_AGENTS_DIR/NAME with all
 # required files. RUN_BODY is the body of run (after the bash shebang);
 # defaults to "cat" so the agent echoes its stdin. AVAIL_EXIT_CODE is the
 # exit code is-available returns; defaults to 0.
@@ -60,6 +60,10 @@ make_fake_agent() {
 
   printf '#!/usr/bin/env bash\nset -euo pipefail\n%s\n' "$run_body" > "${dir}/run"
   chmod +x "${dir}/run"
+
+  # Default pre-fill is passthrough
+  printf '#!/usr/bin/env bash\ncat\n' > "${dir}/pre-fill"
+  chmod +x "${dir}/pre-fill"
 
   printf '#!/usr/bin/env bash\nexit %s\n' "$avail_exit" > "${dir}/is-available"
   chmod +x "${dir}/is-available"
@@ -135,14 +139,14 @@ zebra"
   is "$status" 1
 }
 
-@test "agent:exists returns 1 for a dir missing run" {
-  local dir="${SCRATCH_AGENTS_DIR}/nourun"
+@test "agent:exists returns 1 for a dir missing pre-fill" {
+  local dir="${SCRATCH_AGENTS_DIR}/noprefill"
   mkdir -p "$dir"
   printf '{}' > "${dir}/spec.json"
   printf '#!/usr/bin/env bash\nexit 0\n' > "${dir}/is-available"
   chmod +x "${dir}/is-available"
 
-  run agent:exists nourun
+  run agent:exists noprefill
   is "$status" 1
 }
 
@@ -150,8 +154,8 @@ zebra"
   local dir="${SCRATCH_AGENTS_DIR}/noavail"
   mkdir -p "$dir"
   printf '{}' > "${dir}/spec.json"
-  printf '#!/usr/bin/env bash\ncat\n' > "${dir}/run"
-  chmod +x "${dir}/run"
+  printf '#!/usr/bin/env bash\ncat\n' > "${dir}/pre-fill"
+  chmod +x "${dir}/pre-fill"
 
   run agent:exists noavail
   is "$status" 1
@@ -213,6 +217,8 @@ zebra"
   printf '{}' > "${dir}/spec.json"
   printf '#!/usr/bin/env bash\ncat\n' > "${dir}/run"
   chmod +x "${dir}/run"
+  printf '#!/usr/bin/env bash\ncat\n' > "${dir}/pre-fill"
+  chmod +x "${dir}/pre-fill"
   printf '#!/usr/bin/env bash\necho "missing precondition foo" >&2\nexit 1\n' > "${dir}/is-available"
   chmod +x "${dir}/is-available"
 
@@ -283,6 +289,8 @@ zebra"
   printf '{}' > "${dir}/spec.json"
   printf '#!/usr/bin/env bash\necho "should not run"\n' > "${dir}/run"
   chmod +x "${dir}/run"
+  printf '#!/usr/bin/env bash\ncat\n' > "${dir}/pre-fill"
+  chmod +x "${dir}/pre-fill"
   printf '#!/usr/bin/env bash\necho "edit mode required" >&2\nexit 1\n' > "${dir}/is-available"
   chmod +x "${dir}/is-available"
 
@@ -358,16 +366,15 @@ agent:run recursive 2>&1 || true
 }
 
 # ===========================================================================
-# agent:simple-completion - common-case helper tests
+# agent:complete / agent:simple-completion tests
 #
-# Each test stubs chat:completion / chat:complete-with-tools and the model
-# profile lookups directly in the test process. bats `run` inherits the
-# stubs through the function exports without re-sourcing lib/agent.sh
-# (which would overwrite them). The integration test in
-# test/integration/02-agent.bats covers the real-API path.
+# Each test stubs chat:completion and the model profile lookups directly
+# in the test process. Fake agents are created with spec.json (including
+# profile) and pre-fill scripts so the new agent:complete flow is
+# exercised end to end (minus real API calls).
 # ===========================================================================
 
-setup_simple_completion_stubs() {
+setup_complete_stubs() {
   export SCRATCH_PROMPTS_DIR="${BATS_TEST_TMPDIR}/prompts"
   mkdir -p "$SCRATCH_PROMPTS_DIR"
 
@@ -385,6 +392,9 @@ setup_simple_completion_stubs() {
   }
   export -f model:profile:extras
 
+  # Stub chat:completion to log the call and echo back the last user
+  # message as the assistant response (no tool_calls).
+  # shellcheck disable=SC2329
   chat:completion() {
     {
       printf 'model=%s\n' "$1"
@@ -392,88 +402,122 @@ setup_simple_completion_stubs() {
       printf 'extras=%s\n' "${3:-}"
     } >> "$CHAT_CALLS_LOG"
 
-    local user_msg
-    user_msg="$(jq -r '.[1].content' <<< "$2")"
-    jq -c -n --arg c "$user_msg" '{choices:[{message:{content:$c}}]}'
+    local last_user
+    last_user="$(jq -r '[.[] | select(.role == "user")][-1].content // "empty"' <<< "$2")"
+    jq -c -n --arg c "$last_user" '{choices:[{message:{content:$c}}]}'
   }
   export -f chat:completion
 
-  chat:complete-with-tools() {
-    {
-      printf 'tools-call: model=%s\n' "$1"
-      printf 'messages=%s\n' "$2"
-      printf 'tools=%s\n' "$3"
-      printf 'extras=%s\n' "${4:-}"
-    } >> "$CHAT_CALLS_LOG"
-
-    local user_msg
-    user_msg="$(jq -r '.[1].content' <<< "$2")"
-    jq -c -n --arg c "$user_msg" '{choices:[{message:{content:$c}}]}'
+  # Stub tool:box to return empty tools (no toolbox in stubs)
+  tool:box() {
+    printf '{"description":"stub","tools":[]}'
   }
-  export -f chat:complete-with-tools
+  export -f tool:box
 }
 
-@test "agent:simple-completion: no-tools path passes stdin as the user message" {
-  setup_simple_completion_stubs
+# Create a fake agent with a pre-fill that prepends a system prompt
+_make_prefill_agent() {
+  local name="$1"
+  local profile="${2:-balanced}"
+  local prompt_file="$3"
+  local dir="${SCRATCH_AGENTS_DIR}/${name}"
+
+  mkdir -p "$dir"
+
+  jq -n --arg n "$name" --arg p "$profile" \
+    '{name: $n, description: "test", profile: $p}' \
+    > "${dir}/spec.json"
+
+  # Pre-fill that prepends the named prompt
+  cat > "${dir}/pre-fill" << SCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+source "\$SCRATCH_HOME/lib/base.sh"
+source "\$SCRATCH_HOME/lib/prompt.sh"
+messages="\$(cat)"
+sys="\$(prompt:load "$prompt_file")"
+jq -c --arg sys "\$sys" '[{role:"system",content:\$sys}] + .' <<< "\$messages"
+SCRIPT
+  chmod +x "${dir}/pre-fill"
+
+  printf '#!/usr/bin/env bash\ncat\n' > "${dir}/run"
+  chmod +x "${dir}/run"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${dir}/is-available"
+  chmod +x "${dir}/is-available"
+}
+
+@test "agent:simple-completion: passes input as the user message" {
+  setup_complete_stubs
   printf 'system prompt body\n' > "${SCRATCH_PROMPTS_DIR}/test.md"
-  printf 'hello stdin' > "${BATS_TEST_TMPDIR}/in"
+  _make_prefill_agent testbot balanced test
 
-  run agent:simple-completion balanced test < "${BATS_TEST_TMPDIR}/in"
+  run agent:simple-completion testbot "hello world"
   is "$status" 0
-  is "$output" "hello stdin"
+  is "$output" "hello world"
 }
 
-@test "agent:simple-completion: loads the system prompt via prompt:load" {
-  setup_simple_completion_stubs
+@test "agent:simple-completion: pre-fill prepends system prompt" {
+  setup_complete_stubs
   printf 'MARKER_SYSTEM_PROMPT\n' > "${SCRATCH_PROMPTS_DIR}/marked.md"
+  _make_prefill_agent markedbot balanced marked
 
-  run agent:simple-completion balanced marked < /dev/null
+  run agent:simple-completion markedbot "test input"
   is "$status" 0
   grep -q 'MARKER_SYSTEM_PROMPT' "$CHAT_CALLS_LOG"
 }
 
 @test "agent:simple-completion: passes profile model + extras to chat:completion" {
-  setup_simple_completion_stubs
+  setup_complete_stubs
   printf 'sys\n' > "${SCRATCH_PROMPTS_DIR}/p.md"
+  _make_prefill_agent profbot balanced p
 
-  run agent:simple-completion balanced p < /dev/null
+  run agent:simple-completion profbot "test"
   is "$status" 0
   grep -q 'model=fake-model-id' "$CHAT_CALLS_LOG"
   grep -q '"temperature":0.5' "$CHAT_CALLS_LOG"
 }
 
-@test "agent:simple-completion: caller extras override profile extras" {
-  setup_simple_completion_stubs
-  printf 'sys\n' > "${SCRATCH_PROMPTS_DIR}/p.md"
+@test "agent:complete: updates messages array with tool call traffic" {
+  setup_complete_stubs
+  printf 'sys\n' > "${SCRATCH_PROMPTS_DIR}/tc.md"
+  _make_prefill_agent tcbot balanced tc
 
-  run agent:simple-completion balanced p '' '{"temperature":0.99}' < /dev/null
-  is "$status" 0
-  grep -q '"temperature":0.99' "$CHAT_CALLS_LOG"
-}
+  # Override chat:completion to return a tool_call on first call, then
+  # plain text on second call. State tracked via file because
+  # chat:completion runs inside $(...) subshells.
+  local call_file="${BATS_TEST_TMPDIR}/call_count"
+  printf '0' > "$call_file"
+  export call_file
 
-@test "agent:simple-completion: routes through chat:complete-with-tools when tools are non-empty" {
-  setup_simple_completion_stubs
-  printf 'sys\n' > "${SCRATCH_PROMPTS_DIR}/p.md"
+  chat:completion() {
+    local n
+    n=$(<"$call_file")
+    n=$((n + 1))
+    printf '%s' "$n" > "$call_file"
+    if ((n == 1)); then
+      printf '{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"notify","arguments":"{}"}}]}}]}'
+    else
+      printf '{"choices":[{"message":{"content":"done"}}]}'
+    fi
+  }
+  export -f chat:completion
 
-  run agent:simple-completion balanced p '["notify"]' < /dev/null
-  is "$status" 0
-  grep -q 'tools-call' "$CHAT_CALLS_LOG"
-  grep -q '"notify"' "$CHAT_CALLS_LOG"
-}
+  # Stub tool:invoke-parallel to return a result
+  tool:invoke-parallel() {
+    printf '[{"tool_call_id":"c1","content":"ok","ok":true}]'
+  }
+  export -f tool:invoke-parallel
 
-@test "agent:simple-completion: empty tools array routes through chat:completion (no tools)" {
-  setup_simple_completion_stubs
-  printf 'sys\n' > "${SCRATCH_PROMPTS_DIR}/p.md"
+  # shellcheck disable=SC2034
+  local messages='[{"role":"user","content":"test"}]'
+  local result=""
+  agent:complete tcbot messages result
 
-  run agent:simple-completion balanced p '[]' < /dev/null
-  is "$status" 0
-  run ! grep -q 'tools-call' "$CHAT_CALLS_LOG"
-}
+  is "$result" "done"
 
-@test "agent:simple-completion: dies when prompt is missing" {
-  setup_simple_completion_stubs
-
-  run agent:simple-completion balanced no-such-prompt < /dev/null
-  is "$status" 1
-  [[ "$output" == *"no-such-prompt.md"* ]]
+  # Messages array should now have: user + assistant(tool_calls) + tool_result
+  local msg_count
+  msg_count="$(jq 'length' <<< "$messages")"
+  # 1 (user) + 1 (assistant with tool_calls) + 1 (tool result) = 3
+  is "$msg_count" "3"
 }
