@@ -218,4 +218,4 @@ done
 ok_count="$(grep -c '^ok$' "$tallyfile" 2> /dev/null || true)"
 fail_count="$(grep -c '^fail$' "$tallyfile" 2> /dev/null || true)"
 skip_count="$(grep -c '^skip$' "$tallyfile" 2> /dev/null || true)"
-tui:info "summarize complete" ok "$ok_count" failed "$fail_count" skipped "$skip_count"
+tui:debug "summarize complete" ok "$ok_count" failed "$fail_count" skipped "$skip_count"

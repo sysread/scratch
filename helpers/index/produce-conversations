@@ -62,7 +62,7 @@ chats_dir="${SCRATCH_PROJECTS_DIR}/${project}/chats"
 
 # No conversations directory — nothing to do
 if [[ ! -d "$chats_dir" ]]; then
-  tui:info "conversation diff" to_process 0 orphans_removed 0 current 0
+  tui:debug "conversation diff" to_process 0 orphans_removed 0 current 0
   exit 0
 fi
 
@@ -201,4 +201,4 @@ if [[ -n "${TUI_PROGRESS_FILE:-}" ]]; then
   printf '0 %d\n' "$emit_count" > "$TUI_PROGRESS_FILE"
 fi
 
-tui:info "conversation diff" to_process "$emit_count" orphans_removed "$orphan_count" current "$skip_count"
+tui:debug "conversation diff" to_process "$emit_count" orphans_removed "$orphan_count" current "$skip_count"

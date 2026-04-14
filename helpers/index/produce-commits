@@ -140,4 +140,4 @@ if [[ -n "${TUI_PROGRESS_FILE:-}" ]]; then
   printf '0 %d\n' "$emit_count" > "$TUI_PROGRESS_FILE"
 fi
 
-tui:info "commit diff" to_process "$emit_count" current "$skip_count" branch "$default_branch"
+tui:debug "commit diff" to_process "$emit_count" current "$skip_count" branch "$default_branch"
