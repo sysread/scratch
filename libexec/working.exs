@@ -342,12 +342,12 @@ defmodule Working do
       |> Stream.map(&String.trim_trailing/1)
       |> Enum.reduce({0, [], opts}, &process_line/2)
 
-    # Flush pending renders, then detach the live region so the final
-    # summary prints cleanly at the end.
+    # Flush any pending Owl renders. No summary line — the final state of
+    # the live region (which Owl commits to scrollback on exit) is already
+    # an accurate at-a-glance summary.
     Owl.LiveScreen.await_render()
 
-    {done, _recent, _opts} = final_state
-    IO.puts(:stderr, "done: #{done}/#{opts.total}")
+    _ = final_state
   end
 end
 
