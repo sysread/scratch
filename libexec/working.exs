@@ -39,13 +39,52 @@ defmodule Working do
   @moduledoc """
   Progress display wrapping Owl.LiveScreen.
 
-  Two live blocks (:progress, :recent) are updated as matching lines arrive.
-  Non-matching lines route through IO.puts which Owl redirects to appear
-  above the live region.
+  Four live blocks compose the pinned status region (top-to-bottom):
+    :separator  — horizontal rule between log output and the status UI
+    :progress   — label + progress bar + counter
+    :spinner    — animated braille frame + rotating sci-fi phrase
+    :recent     — last-N rolling list of completed items
+
+  Non-matching stdin lines route through IO.puts. Owl is the group leader
+  for this process, so those puts land above the pinned blocks.
+
+  The spinner animates on its own timer via a linked background process
+  that calls Owl.LiveScreen.update(:spinner, ...) every 100ms. When the
+  main process exits, the link tears the ticker down with it.
   """
 
+  @separator_block :separator
   @progress_block :progress
+  @spinner_block :spinner
   @recent_block :recent
+
+  # Braille spinner frames (same set as lib/tui.sh tui:with-spinner).
+  @frames ~w(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+
+  # Rotate phrases every N ticks. At 100ms/tick, 25 ticks = 2.5s per phrase.
+  @frames_per_phrase 25
+  @tick_ms 100
+
+  # Same sci-fi phrase set as lib/tui.sh. Shuffled per run so each invocation
+  # gets a different order.
+  @phrases [
+    "Reversing the polarity of the context window",
+    "Recalibrating the embedding matrix flux",
+    "Initializing quantum token shuffler",
+    "Stabilizing token interference",
+    "Aligning latent vector manifold",
+    "Charging semantic field resonator",
+    "Inverting prompt entropy",
+    "Redirecting gradient descent pathways",
+    "Synchronizing the decoder attention",
+    "Calibrating neural activation dampener",
+    "Polarizing self-attention mechanism",
+    "Recharging photonic energy in the deep learning nodes",
+    "Fluctuating the vector space harmonics",
+    "Boosting the backpropagation neutrino field",
+    "Cross-referencing the hallucination core",
+    "Reticulating splines"
+  ]
 
   @usage """
   Usage: working.exs --total N --match REGEX [options]
@@ -123,6 +162,25 @@ defmodule Working do
   # Rendering
   #---------------------------------------------------------------------------
 
+  def render_separator({width}) do
+    # A horizontal rule that's visually linked to the progress bar width.
+    # width is the number of cells inside [brackets]; add 2 for the brackets
+    # themselves so the rule is flush with the bar.
+    String.duplicate("─", width + 2)
+  end
+
+  def render_spinner({tick, phrases}) do
+    frame = Enum.at(@frames, rem(tick, length(@frames)))
+
+    phrase =
+      case phrases do
+        [] -> ""
+        _ -> Enum.at(phrases, rem(div(tick, @frames_per_phrase), length(phrases)))
+      end
+
+    "#{frame} #{phrase}"
+  end
+
   def render_progress({done, total, width, label}) do
     pct =
       if total > 0 do
@@ -195,11 +253,52 @@ defmodule Working do
     end
   end
 
+  # Background ticker loop. Bumps the spinner state every @tick_ms ms,
+  # which triggers Owl to re-render the :spinner block. The loop never
+  # terminates on its own — it gets killed by a linked exit from the
+  # main process when run/1 returns.
+  defp spinner_tick(tick, phrases) do
+    Owl.LiveScreen.update(@spinner_block, {tick, phrases})
+    Process.sleep(@tick_ms)
+    spinner_tick(tick + 1, phrases)
+  end
+
   #---------------------------------------------------------------------------
   # Main
   #---------------------------------------------------------------------------
 
   def run(opts) do
+    # Capture the real stdin (original group leader) BEFORE rewiring the
+    # group leader to Owl. The group leader handles both reads and writes,
+    # so if we just point it at Owl, IO.stream(:stdio, ...) asks Owl for
+    # input — which it can't serve (:enotsup). By reading from the saved
+    # original GL explicitly, stdin still works while all output flows
+    # through Owl's cursor-aware coordination.
+    stdin_device = Process.group_leader()
+
+    # Route output through LiveScreen so log lines (IO.puts / Logger)
+    # interleave with the live region correctly. Without this, bare IO.puts
+    # writes bypass Owl's cursor bookkeeping — blocks get redrawn at stale
+    # offsets and labels leak into scrollback on every update.
+    case Process.whereis(Owl.LiveScreen) do
+      nil -> :ok
+      pid -> Process.group_leader(self(), pid)
+    end
+
+    # Blocks render top-to-bottom in the order they're added. The separator
+    # sits between scrolling log output above and the pinned status UI below.
+    Owl.LiveScreen.add_block(@separator_block,
+      state: {opts.width},
+      render: &render_separator/1
+    )
+
+    phrases = Enum.shuffle(@phrases)
+
+    Owl.LiveScreen.add_block(@spinner_block,
+      state: {0, phrases},
+      render: &render_spinner/1
+    )
+
     Owl.LiveScreen.add_block(@progress_block,
       state: {0, opts.total, opts.width, opts.label},
       render: &render_progress/1
@@ -210,10 +309,15 @@ defmodule Working do
       render: &render_recent/1
     )
 
-    # Read stdin line by line. IO.stream returns :eof when the writer
-    # closes, which terminates the stream.
+    # Animate the spinner on a background ticker. spawn_link ties its
+    # lifetime to this process — when run/1 returns and the main flow
+    # exits, the ticker gets an exit signal and dies.
+    spawn_link(fn -> spinner_tick(0, phrases) end)
+
+    # Read stdin line by line from the saved original GL. IO.stream returns
+    # :eof when the writer closes, which terminates the stream.
     final_state =
-      IO.stream(:stdio, :line)
+      IO.stream(stdin_device, :line)
       |> Stream.map(&String.trim_trailing/1)
       |> Enum.reduce({0, [], opts}, &process_line/2)
 
@@ -231,6 +335,15 @@ end
 # a cached install, but cold starts pull Owl from hex; no reason to incur
 # that when the user just wants to read -h.
 opts = Working.parse_args(System.argv())
+
+# Force-enable ANSI output. When stdin is a pipe (which is our entire use
+# case), IO.ANSI.enabled? falls back to checking the :standard_io group
+# leader, which inherits tty status from stdin and returns false. Owl's
+# LiveScreen checks that flag and degrades to a non-interactive "just
+# print updates as they come" mode, defeating the whole point. Setting
+# the :elixir, :ansi_enabled app env to true makes IO.ANSI.enabled? skip
+# the group-leader check and trust us.
+Application.put_env(:elixir, :ansi_enabled, true)
 
 Mix.install([{:owl, "~> 0.12"}])
 
