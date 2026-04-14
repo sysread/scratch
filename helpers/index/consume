@@ -71,7 +71,15 @@ while IFS= read -r line; do
     index:finalize "$project" "$entry_type" "$entry_id" "$entry_sha" "$embed_json"
     tui:debug-if SCRATCH_DEBUG_INDEX "indexed" "$entry_type" "$entry_id"
 
-    # Update spinner progress file
+    # Emit a completion marker on stdout. Consume is the tail of the index
+    # pipeline, so its stdout is otherwise unused. libexec/working.exs reads
+    # this to advance its progress bar and populate the recent list. The
+    # format ("ok <type>/<id>") gives working.exs a clean regex match and a
+    # capture group for the displayed name.
+    printf 'ok %s/%s\n' "$entry_type" "$entry_id"
+
+    # Legacy spinner progress file — still populated for callers that don't
+    # pipe through working.exs.
     if [[ -n "${TUI_PROGRESS_FILE:-}" ]]; then
       _consume_done=$((_consume_done + 1))
       if ((_consume_total == 0)) && [[ -s "$TUI_PROGRESS_FILE" ]]; then

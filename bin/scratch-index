@@ -99,42 +99,86 @@ main() {
   start_time="$(date +%s)"
 
   local helpers="$SCRIPTDIR/../helpers/index"
+  local working="$SCRATCH_HOME/libexec/working.exs"
 
-  # Each indexable type runs under its own spinner so the user sees
-  # distinct phases with independent progress counts. Pipeline shape
-  # is the same per phase: <producer> | summarize | embed | consume.
-  # Variables are visible in the subshell via bash's fork-inherited scope.
-
-  _index_files() {
-    "$helpers/produce" "$project_name" "$proj_root" "$proj_is_git" "$proj_exclude" \
-      | "$helpers/summarize" "$project_name" "$summary_workers" \
-      | embed:pool "$embed_workers" \
-      | "$helpers/consume" "$project_name"
-  }
-
-  _index_commits() {
-    "$helpers/produce-commits" "$project_name" "$proj_root" \
-      | "$helpers/summarize" "$project_name" "$summary_workers" \
-      | embed:pool "$embed_workers" \
-      | "$helpers/consume" "$project_name"
-  }
-
-  _index_chats() {
-    "$helpers/produce-conversations" "$project_name" \
-      | "$helpers/summarize" "$project_name" "$summary_workers" \
-      | embed:pool "$embed_workers" \
-      | "$helpers/consume" "$project_name"
-  }
-
-  tui:with-spinner "Indexing files:" _index_files < /dev/null
-
+  # Totals shown in the progress bar are upper bounds computed with cheap
+  # commands — the actual work done can be less (items already indexed get
+  # skipped by the producers). The bar may finish below 100%, which is OK;
+  # the spinner + recent list carry the main UX.
+  local files_total commits_total chats_total
   if [[ "$proj_is_git" == "true" ]]; then
-    tui:with-spinner "Indexing commits:" _index_commits < /dev/null
+    files_total="$(git -C "$proj_root" ls-files 2> /dev/null | wc -l | tr -d ' ')"
+    commits_total="$(git -C "$proj_root" rev-list --count HEAD 2> /dev/null || echo 0)"
+  else
+    files_total="$(find "$proj_root" -type f 2> /dev/null | wc -l | tr -d ' ')"
+    commits_total=0
   fi
+  [[ "$files_total" -gt 0 ]] || files_total=1
 
   local chats_dir="${SCRATCH_PROJECTS_DIR}/${project_name}/chats"
   if [[ -d "$chats_dir" ]]; then
-    tui:with-spinner "Indexing chats:" _index_chats < /dev/null
+    chats_total="$(find "$chats_dir" -mindepth 1 -maxdepth 1 -type d 2> /dev/null | wc -l | tr -d ' ')"
+  else
+    chats_total=0
+  fi
+
+  # Each phase runs its full producer → summarize → embed → consume pipeline
+  # inside a subshell whose stderr is merged with stdout (2>&1) and piped
+  # through libexec/working.exs. Consume's stdout emits "ok <type>/<id>"
+  # per finalized entry, which working.exs matches to advance the progress
+  # bar and fill the recent list. All tui:* log output from the stages
+  # flows through the same pipe and scrolls above the live region.
+
+  _index_files() {
+    (
+      "$helpers/produce" "$project_name" "$proj_root" "$proj_is_git" "$proj_exclude" \
+        | "$helpers/summarize" "$project_name" "$summary_workers" \
+        | embed:pool "$embed_workers" \
+        | "$helpers/consume" "$project_name"
+    ) 2>&1 \
+      | elixir "$working" \
+        --total "$files_total" \
+        --match '^ok ' \
+        --extract '^ok (.+)' \
+        --label 'Indexing files'
+  }
+
+  _index_commits() {
+    (
+      "$helpers/produce-commits" "$project_name" "$proj_root" \
+        | "$helpers/summarize" "$project_name" "$summary_workers" \
+        | embed:pool "$embed_workers" \
+        | "$helpers/consume" "$project_name"
+    ) 2>&1 \
+      | elixir "$working" \
+        --total "$commits_total" \
+        --match '^ok ' \
+        --extract '^ok (.+)' \
+        --label 'Indexing commits'
+  }
+
+  _index_chats() {
+    (
+      "$helpers/produce-conversations" "$project_name" \
+        | "$helpers/summarize" "$project_name" "$summary_workers" \
+        | embed:pool "$embed_workers" \
+        | "$helpers/consume" "$project_name"
+    ) 2>&1 \
+      | elixir "$working" \
+        --total "$chats_total" \
+        --match '^ok ' \
+        --extract '^ok (.+)' \
+        --label 'Indexing chats'
+  }
+
+  _index_files
+
+  if [[ "$proj_is_git" == "true" && "$commits_total" -gt 0 ]]; then
+    _index_commits
+  fi
+
+  if [[ -d "$chats_dir" && "$chats_total" -gt 0 ]]; then
+    _index_chats
   fi
 
   local end_time elapsed
