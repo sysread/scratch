@@ -45,6 +45,7 @@ SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
   source "$SCRIPTDIR/../lib/project.sh"
   source "$SCRIPTDIR/../lib/index.sh"
   source "$SCRIPTDIR/../lib/embed.sh"
+  source "$SCRIPTDIR/../lib/working.sh"
   source "$SCRIPTDIR/../lib/tui.sh"
   source "$SCRIPTDIR/../lib/signals.sh"
   source "$SCRIPTDIR/../lib/tempfiles.sh"
@@ -99,7 +100,6 @@ main() {
   start_time="$(date +%s)"
 
   local helpers="$SCRIPTDIR/../helpers/index"
-  local working="$SCRATCH_HOME/libexec/working.exs"
 
   # Totals shown in the progress bar are upper bounds computed with cheap
   # commands — the actual work done can be less (items already indexed get
@@ -136,11 +136,11 @@ main() {
         | embed:pool "$embed_workers" \
         | "$helpers/consume" "$project_name"
     ) 2>&1 \
-      | elixir "$working" \
+      | working:run \
         --total "$files_total" \
         --match '^ok ' \
         --extract '^ok (.+)' \
-        --label 'Indexing files'
+        --label 'Indexing files:'
   }
 
   _index_commits() {
@@ -150,11 +150,11 @@ main() {
         | embed:pool "$embed_workers" \
         | "$helpers/consume" "$project_name"
     ) 2>&1 \
-      | elixir "$working" \
+      | working:run \
         --total "$commits_total" \
         --match '^ok ' \
         --extract '^ok (.+)' \
-        --label 'Indexing commits'
+        --label 'Indexing commits:'
   }
 
   _index_chats() {
@@ -164,11 +164,11 @@ main() {
         | embed:pool "$embed_workers" \
         | "$helpers/consume" "$project_name"
     ) 2>&1 \
-      | elixir "$working" \
+      | working:run \
         --total "$chats_total" \
         --match '^ok ' \
         --extract '^ok (.+)' \
-        --label 'Indexing chats'
+        --label 'Indexing chats:'
   }
 
   _index_files
