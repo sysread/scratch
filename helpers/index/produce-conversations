@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# index/produce-conversations - emit JSONL for conversations needing indexing
+#
+# Walks project conversations, generates plain-text transcripts, diffs
+# against the index by SHA, and emits one JSONL line per conversation
+# that needs work. Also removes orphaned entries.
+#
+# Transcripts are written to a temp directory (cleaned up by the caller's
+# trap). The format is plain text suitable for embedding: user/assistant
+# messages with brief tool mentions, no JSON syntax.
+#
+# Args: PROJECT_NAME
+# stdout: JSONL {"id":"<slug>","sha":"<hex>","file":"<transcript-path>","type":"conversation"}
+# stderr: tui:info summary
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+SCRATCH_HOME="${SCRATCH_HOME:-$(cd "$SCRIPTDIR/../.." && pwd)}"
+
+# shellcheck source-path=SCRIPTDIR/../../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRATCH_HOME/lib/base.sh"
+  source "$SCRATCH_HOME/lib/index.sh"
+  source "$SCRATCH_HOME/lib/conversations.sh"
+  source "$SCRATCH_HOME/lib/tui.sh"
+  source "$SCRATCH_HOME/lib/tempfiles.sh"
+}
+
+has-commands shasum jq
+
+project="$1"
+chats_dir="${SCRATCH_PROJECTS_DIR}/${project}/chats"
+
+# No conversations directory — nothing to do
+if [[ ! -d "$chats_dir" ]]; then
+  tui:info "conversation diff" to_process 0 orphans_removed 0 current 0
+  exit 0
+fi
+
+# Temp directory for transcript files, cleaned up by the orchestrator's
+# EXIT trap (or our own if run standalone).
+transcript_dir="$(mktemp -d /tmp/scratch-transcripts.XXXXXX)"
+tmp:track "$transcript_dir"
+tmp:install-traps
+
+#-------------------------------------------------------------------------------
+# generate-transcript MESSAGES_JSONL_PATH TRANSCRIPT_PATH
+#
+# Convert a conversation's messages.jsonl into a plain-text transcript
+# for embedding. Strips JSON syntax, preserves semantic content.
+#
+# Format:
+#   [user]
+#   message content
+#
+#   [assistant]
+#   message content
+#
+#   [tool: tool-name]
+#   (truncated output)
+#-------------------------------------------------------------------------------
+generate-transcript() {
+  local messages_path="$1"
+  local output_path="$2"
+  local max_tool_output=200
+
+  # Process messages line by line, building plain text
+  # jq handles the heavy lifting: extract role, content, tool_calls
+  jq -r --argjson max "$max_tool_output" '
+    if .role == "user" then
+      "[user]\n" + (.content // "")
+    elif .role == "assistant" then
+      if .tool_calls then
+        # Assistant message with tool calls: emit content (if any) then
+        # one line per tool call with just the tool name
+        (
+          if (.content // "") != "" then
+            "[assistant]\n" + .content + "\n"
+          else
+            ""
+          end
+        ) + (
+          [.tool_calls[] |
+            "[tool: " + .function.name + "]"
+          ] | join("\n")
+        )
+      else
+        "[assistant]\n" + (.content // "")
+      end
+    elif .role == "tool" then
+      # Tool result: truncate output to keep transcripts compact
+      if ((.content // "") | length) > $max then
+        (.content[:$max] | gsub("\n"; " ")) + "..."
+      elif (.content // "") != "" then
+        (.content | gsub("\n"; " "))
+      else
+        empty
+      end
+    elif .role == "system" then
+      empty
+    else
+      empty
+    end
+  ' "$messages_path" \
+    | awk 'NF || prev_blank==0 { print; prev_blank=(NF==0) }' \
+    > "$output_path"
+}
+
+# Load existing index
+declare -A idx_sha=([_sentinel_]=1)
+unset 'idx_sha[_sentinel_]'
+while IFS=$'\t' read -r ident sha; do
+  [[ -n "$ident" ]] || continue
+  idx_sha["$ident"]="$sha"
+done < <(index:list "$project" conversation)
+
+# Walk conversations, diff, and emit
+declare -A fs_seen=([_sentinel_]=1)
+unset 'fs_seen[_sentinel_]'
+emit_count=0
+skip_count=0
+
+for dir in "$chats_dir"/*/; do
+  [[ -d "$dir" ]] || continue
+
+  local_messages="${dir}messages.jsonl"
+  local_metadata="${dir}metadata.json"
+
+  [[ -f "$local_messages" ]] || continue
+  [[ -f "$local_metadata" ]] || continue
+
+  slug="$(jq -r '.slug' < "$local_metadata")"
+  [[ -n "$slug" && "$slug" != "null" ]] || continue
+
+  fs_seen["$slug"]=1
+
+  # SHA of the messages file for change detection
+  file_sha="$(shasum -a 256 "$local_messages" | cut -d' ' -f1)"
+
+  if [[ -n "${idx_sha[$slug]:-}" && "${idx_sha[$slug]}" == "$file_sha" ]]; then
+    skip_count=$((skip_count + 1))
+    continue
+  fi
+
+  # Generate transcript to temp file
+  transcript_path="${transcript_dir}/${slug}.txt"
+  generate-transcript "$local_messages" "$transcript_path"
+
+  # Skip conversations with no meaningful content
+  if [[ ! -s "$transcript_path" ]]; then
+    skip_count=$((skip_count + 1))
+    continue
+  fi
+
+  jq -c -n --arg id "$slug" --arg sha "$file_sha" --arg file "$transcript_path" \
+    '{id: $id, sha: $sha, file: $file, type: "conversation"}'
+  emit_count=$((emit_count + 1))
+done
+
+# Remove orphaned entries (conversations deleted since last index)
+orphan_count=0
+for ident in "${!idx_sha[@]}"; do
+  if [[ -z "${fs_seen[$ident]:-}" ]]; then
+    index:remove "$project" conversation "$ident"
+    orphan_count=$((orphan_count + 1))
+  fi
+done
+
+# Publish total to the spinner progress file. Each indexable type runs
+# under its own spinner now, so we overwrite rather than accumulate.
+if [[ -n "${TUI_PROGRESS_FILE:-}" ]]; then
+  printf '0 %d\n' "$emit_count" > "$TUI_PROGRESS_FILE"
+fi
+
+tui:info "conversation diff" to_process "$emit_count" orphans_removed "$orphan_count" current "$skip_count"

@@ -36,14 +36,22 @@ _TEMPFILES_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 #-------------------------------------------------------------------------------
 # Internal logging helper - safe in non-TTY contexts (EXIT traps, pipes).
-# Uses tui:debug when available and stderr is a terminal, otherwise plain
-# fprintf to stderr.
+#
+# Routes through tui:debug when available so these cleanup messages respect
+# SCRATCH_LOG_LEVEL and stay quiet by default. The [[ -t 2 ]] check was
+# removed because captured stderr (e.g. under tui:with-spinner) is not a
+# tty but is still a valid sink — gum log handles non-tty output fine, and
+# forcing the printf fallback in that case surfaced cleanup chatter as
+# misleading "WARN:" lines during indexing.
+#
+# Only when tui:debug is genuinely unavailable (library not sourced) do we
+# fall back to printf. The "debug:" prefix signals these are not warnings.
 #-------------------------------------------------------------------------------
 tmp:_log() {
-  if [[ -t 2 ]] && command -v gum > /dev/null 2>&1 && type tui:debug > /dev/null 2>&1; then
+  if type tui:debug > /dev/null 2>&1; then
     tui:debug "$@" || true
   else
-    printf 'WARN: %s\n' "$*" >&2
+    printf 'debug: %s\n' "$*" >&2
   fi
 }
 

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# summary-conversation pre-fill
+#
+# Passthrough. Messages pass through unchanged.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+cat

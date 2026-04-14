@@ -3,19 +3,23 @@
 #-------------------------------------------------------------------------------
 # scratch search - semantic search over the project index
 #
-# Embeds the query, computes cosine similarity against all indexed file
-# summaries, and prints the top results ranked by relevance score.
+# Embeds the query, computes cosine similarity against indexed entries,
+# and prints the top results ranked by relevance score. Searches files
+# by default; use --type to search conversations, commits, or all types.
 #
 # Warns if the index is stale (last indexed > 3 days ago).
 #
 # Examples:
 #   scratch search -q "how does retry logic work"
 #   scratch search -p myproject -q "database schema" -t 5
+#   scratch search -q "auth refactor" -T commit
+#   scratch search -q "discussed caching" -T conversation
+#   scratch search -q "deployment" -T all
 #-------------------------------------------------------------------------------
 
 set -euo pipefail
 
-_DESC="Semantic search over the project file index"
+_DESC="Semantic search over the project index"
 
 if [[ "${1:-}" == "synopsis" ]]; then
   printf '%s\n' "$_DESC"
@@ -47,15 +51,23 @@ cmd:define "search" "$_DESC"
 cmd:optional-arg "--project" "-p" "Project name (default: detect from cwd)" "string" ""
 cmd:required-arg "--query" "-q" "Search query" "string"
 cmd:optional-arg "--top" "-t" "Number of results to return" "string" "10"
+cmd:optional-arg "--type" "-T" "Entry type: file, conversation, commit, or all (default: file)" "string" "file"
 cmd:parse "$@"
 
 main() {
   local project_name
   project:resolve-name project_name "$(cmd:get --project)"
 
-  local query top
+  local query top entry_type
   query="$(cmd:get --query)"
   top="$(cmd:get --top)"
+  entry_type="$(cmd:get --type)"
+
+  # Validate type
+  case "$entry_type" in
+    file | conversation | commit | all) ;;
+    *) die "invalid type: $entry_type (must be file, conversation, commit, or all)" ;;
+  esac
 
   index:ensure "$project_name"
 
@@ -70,7 +82,7 @@ main() {
   fi
 
   local results
-  results="$(search:query "$project_name" file "$query" "$top")"
+  results="$(search:query "$project_name" "$entry_type" "$query" "$top")"
 
   if [[ -z "$results" ]]; then
     tui:info "search" results "0"

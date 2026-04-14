@@ -78,7 +78,7 @@ defmodule Embed do
     Bumblebee.Text.TextEmbedding.text_embedding(
       model,
       tokenizer,
-      compile: [batch_size: 1, sequence_length: 128],
+      compile: [batch_size: 1, sequence_length: 256],
       defn_options: [compiler: EXLA],
       output_pool: :mean_pooling,
       output_attribute: :hidden_state

@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# index/produce-commits - emit JSONL for git commits needing indexing
+#
+# Walks all commits on the default branch, writes each commit's metadata
+# and full message to a temp file, and emits one JSONL line per commit
+# not already in the index. Commits are immutable, so existence in the
+# index means the entry is current — no SHA diffing needed.
+#
+# Args: PROJECT_NAME ROOT
+# stdout: JSONL {"id":"<commit-sha>","sha":"<commit-sha>","file":"<path>","type":"commit"}
+# stderr: tui:info summary
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+SCRATCH_HOME="${SCRATCH_HOME:-$(cd "$SCRIPTDIR/../.." && pwd)}"
+
+# shellcheck source-path=SCRIPTDIR/../../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRATCH_HOME/lib/base.sh"
+  source "$SCRATCH_HOME/lib/index.sh"
+  source "$SCRATCH_HOME/lib/tui.sh"
+  source "$SCRATCH_HOME/lib/tempfiles.sh"
+}
+
+has-commands jq git
+
+project="$1"
+root="$2"
+
+# Temp directory for commit text files
+commit_dir="$(mktemp -d /tmp/scratch-commits.XXXXXX)"
+tmp:track "$commit_dir"
+tmp:install-traps
+
+#-------------------------------------------------------------------------------
+# detect-default-branch ROOT
+#
+# Determine the default branch name. Tries origin/HEAD first (set by
+# clone), then falls back to common names.
+#-------------------------------------------------------------------------------
+detect-default-branch() {
+  local root="$1"
+
+  # Try origin/HEAD (most reliable for cloned repos)
+  local ref
+  if ref="$(git -C "$root" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null)"; then
+    printf '%s\n' "${ref##refs/remotes/origin/}"
+    return 0
+  fi
+
+  # Fall back to checking which common names exist locally
+  local name
+  for name in main master; do
+    if git -C "$root" rev-parse --verify "refs/heads/$name" &>/dev/null; then
+      printf '%s\n' "$name"
+      return 0
+    fi
+  done
+
+  # Last resort: whatever HEAD points at
+  git -C "$root" rev-parse --abbrev-ref HEAD
+}
+
+default_branch="$(detect-default-branch "$root")"
+tui:debug-if SCRATCH_DEBUG_INDEX "commits" default_branch "$default_branch"
+
+# Load existing index — build a set of known commit SHAs
+declare -A idx_known=([_sentinel_]=1)
+unset 'idx_known[_sentinel_]'
+while IFS=$'\t' read -r ident _sha; do
+  [[ -n "$ident" ]] || continue
+  idx_known["$ident"]=1
+done < <(index:list "$project" commit)
+
+emit_count=0
+skip_count=0
+
+# Walk commits on the default branch. Use NUL-delimited format to handle
+# multi-line commit messages safely. Per commit we read 4 NUL-terminated
+# fields: hash, author, date, body. With `-z`, git replaces the inter-commit
+# newline with NUL, so we end each commit with a NUL separator rather than
+# adding an explicit %x00 after %B (which would produce a double-NUL).
+while IFS= read -r -d '' commit_hash && \
+      IFS= read -r -d '' author && \
+      IFS= read -r -d '' date && \
+      IFS= read -r -d '' body; do
+
+  [[ -n "$commit_hash" ]] || continue
+
+  # Already indexed — commits are immutable so skip
+  if [[ -n "${idx_known[$commit_hash]:-}" ]]; then
+    skip_count=$((skip_count + 1))
+    continue
+  fi
+
+  # Write commit text to temp file
+  commit_path="${commit_dir}/${commit_hash}.txt"
+  printf 'commit %s\nAuthor: %s\nDate: %s\n\n%s\n' \
+    "$commit_hash" "$author" "$date" "$body" > "$commit_path"
+
+  jq -c -n --arg id "$commit_hash" --arg sha "$commit_hash" --arg file "$commit_path" \
+    '{id: $id, sha: $sha, file: $file, type: "commit"}'
+  emit_count=$((emit_count + 1))
+
+done < <(git -C "$root" log "$default_branch" --format="%H%x00%an%x00%aI%x00%B" -z)
+
+# Publish total to the spinner progress file. Each indexable type runs
+# under its own spinner now, so we overwrite rather than accumulate.
+if [[ -n "${TUI_PROGRESS_FILE:-}" ]]; then
+  printf '0 %d\n' "$emit_count" > "$TUI_PROGRESS_FILE"
+fi
+
+tui:info "commit diff" to_process "$emit_count" current "$skip_count" branch "$default_branch"

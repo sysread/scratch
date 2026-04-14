@@ -40,6 +40,13 @@ _EMBED_CXX="${CXX:-c++} -Wno-error=missing-template-arg-list-after-template-kw"
 # Strip BASH_FUNC_* by running under env -i with only the vars elixir
 # needs. SCRATCH_MODEL is only forwarded when set to avoid overriding
 # embed.exs's default model with an empty string.
+#
+# Filters XLA/Abseil C++ init noise from stderr — these lines come from
+# the compiled NIF on each cold start and can't be silenced via Elixir's
+# logger config:
+#   WARNING: All log messages before absl::InitializeLog() is called...
+#   I0000 00:00:<ts> <pid> cpu_client.cc:<line>] TfrtCpuClient created.
+# Real Elixir/EXLA errors still pass through.
 #-------------------------------------------------------------------------------
 _embed:_run() {
   local -a env_args=(
@@ -54,7 +61,8 @@ _embed:_run() {
     env_args+=(SCRATCH_MODEL="$SCRATCH_MODEL")
   fi
 
-  env -i "${env_args[@]}" elixir "$@"
+  env -i "${env_args[@]}" elixir "$@" \
+    2> >(grep -v -E '^WARNING: All log messages before absl::InitializeLog|^I[0-9]{4} [0-9:.]+ +[0-9]+ cpu_client\.cc' >&2)
 }
 
 export -f '_embed:_run'

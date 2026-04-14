@@ -87,29 +87,55 @@ main() {
   local proj_root proj_is_git proj_exclude
   project:load "$project_name" proj_root proj_is_git proj_exclude
 
-  tui:info "indexing" "project=$project_name" "root=$proj_root"
+  tui:info "indexing" project "$project_name" root "$proj_root"
   index:ensure "$project_name"
 
   local summary_workers="${SCRATCH_INDEX_PARALLEL_JOBS:-8}"
   local embed_workers="${SCRATCH_INDEX_EMBED_WORKERS:-4}"
 
-  tui:info "pipeline" "summary_workers=$summary_workers" "embed_workers=$embed_workers"
+  tui:info "pipeline" summary_workers "$summary_workers" embed_workers "$embed_workers"
 
   local start_time
   start_time="$(date +%s)"
 
   local helpers="$SCRIPTDIR/../helpers/index"
 
-  # Pipeline wrapped in a function for tui:with-spinner. Variables are
-  # visible in the subshell via bash's fork-inherited scope.
-  _index_pipeline() {
+  # Each indexable type runs under its own spinner so the user sees
+  # distinct phases with independent progress counts. Pipeline shape
+  # is the same per phase: <producer> | summarize | embed | consume.
+  # Variables are visible in the subshell via bash's fork-inherited scope.
+
+  _index_files() {
     "$helpers/produce" "$project_name" "$proj_root" "$proj_is_git" "$proj_exclude" \
       | "$helpers/summarize" "$project_name" "$summary_workers" \
       | embed:pool "$embed_workers" \
       | "$helpers/consume" "$project_name"
   }
 
-  tui:with-spinner "Indexing..." _index_pipeline < /dev/null
+  _index_commits() {
+    "$helpers/produce-commits" "$project_name" "$proj_root" \
+      | "$helpers/summarize" "$project_name" "$summary_workers" \
+      | embed:pool "$embed_workers" \
+      | "$helpers/consume" "$project_name"
+  }
+
+  _index_chats() {
+    "$helpers/produce-conversations" "$project_name" \
+      | "$helpers/summarize" "$project_name" "$summary_workers" \
+      | embed:pool "$embed_workers" \
+      | "$helpers/consume" "$project_name"
+  }
+
+  tui:with-spinner "Indexing files:" _index_files < /dev/null
+
+  if [[ "$proj_is_git" == "true" ]]; then
+    tui:with-spinner "Indexing commits:" _index_commits < /dev/null
+  fi
+
+  local chats_dir="${SCRATCH_PROJECTS_DIR}/${project_name}/chats"
+  if [[ -d "$chats_dir" ]]; then
+    tui:with-spinner "Indexing chats:" _index_chats < /dev/null
+  fi
 
   local end_time elapsed
   end_time="$(date +%s)"
@@ -117,7 +143,7 @@ main() {
 
   index:set-meta "$project_name" "last_indexed_at" "$(date -u +%Y-%m-%dT%H:%M:%S)"
 
-  tui:info "index complete" "elapsed=${elapsed}s"
+  tui:info "index complete" elapsed "${elapsed}s"
 }
 
 main

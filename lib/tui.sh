@@ -362,8 +362,16 @@ tui:with-spinner() {
   export TUI_PROGRESS_FILE="$tmpprogress"
 
   # Run the command in the background, capturing stdout, stderr, and
-  # exit code separately.
+  # exit code separately. Stderr goes to a tempfile so it doesn't collide
+  # with the spinner output on the terminal — we replay it after the
+  # spinner ends.
+  #
+  # CLICOLOR_FORCE=1 tells termenv (used by gum/lipgloss) to keep ANSI
+  # styling even when writing to a non-tty. Without it, gum log would
+  # strip colors on the captured stderr. With it, colors survive the
+  # tempfile round-trip and render correctly when replayed.
   {
+    export CLICOLOR_FORCE=1
     "$@" < "$tmpin" > "$tmpout" 2> "$tmperr"
     printf '%s' "$?" > "${tmpout}.rc"
   } &

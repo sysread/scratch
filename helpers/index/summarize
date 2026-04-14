@@ -38,21 +38,20 @@ touch "$lockfile" "$tallyfile"
 # shellcheck disable=SC2064
 trap "rm -f '$lockfile' '$tallyfile'" EXIT
 
-# Process a single work item: summarize, upsert, emit. Runs in a
-# background subshell. Stdout writes are serialized with flock so
-# concurrent workers don't interleave JSONL lines.
-_summarize_one() {
-  local ident="$1"
-  local sha="$2"
-  local file_path="$3"
-
-  tui:debug-if SCRATCH_DEBUG_INDEX "summarize starting" "file=$ident"
+# Summarize a file or conversation via the appropriate agent. Extracts
+# embeddable text from the structured {summary, questions} JSON response.
+_summarize_via_agent() {
+  local agent_name="$1"
+  local entry_type="$2"
+  local ident="$3"
+  local sha="$4"
+  local file_path="$5"
 
   # Skip empty files
   if [[ ! -s "$file_path" ]]; then
     local empty_summary='{"summary":"Empty, zero-length file.","questions":[]}'
-    index:record "$project" file "$ident" "$sha" "$empty_summary"
-    tui:debug-if SCRATCH_DEBUG_INDEX "summarize skipped" "file=$ident" "reason=empty file"
+    index:record "$project" "$entry_type" "$ident" "$sha" "$empty_summary"
+    tui:debug-if SCRATCH_DEBUG_INDEX "summarize skipped" "$entry_type" "$ident" reason empty
     printf 'skip\n' >> "$tallyfile"
     return 0
   fi
@@ -62,16 +61,16 @@ _summarize_one() {
   #
   # On failure, the existing index entry (if any) is preserved — we
   # only upsert on success. The next `scratch index` run will see the
-  # SHA mismatch and retry this file. This makes indexing idempotent:
-  # partial failures never corrupt previously-good data.
+  # SHA mismatch and retry. Idempotent: partial failures never corrupt
+  # previously-good data.
   local summary=""
-  if ! summary="$(agent:run summary < "$file_path" 2>&1)"; then
-    tui:warn "summarize failed" "file=$ident" "error=$summary"
+  if ! summary="$(agent:run "$agent_name" < "$file_path" 2>&1)"; then
+    tui:warn "summarize failed" "$entry_type" "$ident" error "$summary"
     printf 'fail\n' >> "$tallyfile"
     return 1
   fi
 
-  index:update-summary "$project" file "$ident" "$summary"
+  index:update-summary "$project" "$entry_type" "$ident" "$summary"
 
   # Extract embeddable text from the structured summary
   local embed_text
@@ -87,12 +86,72 @@ _summarize_one() {
   # Include sha so the consume stage can finalize the entry (write the
   # SHA only after embedding succeeds).
   local out_json
-  out_json="$(jq -c -n --arg id "$ident" --arg sha "$sha" --arg text "$embed_text" \
-    '{id: $id, sha: $sha, text: $text}')"
+  out_json="$(jq -c -n --arg id "$ident" --arg sha "$sha" --arg text "$embed_text" --arg type "$entry_type" \
+    '{id: $id, sha: $sha, text: $text, type: $type}')"
   flock "$lockfile" printf '%s\n' "$out_json"
 
   printf 'ok\n' >> "$tallyfile"
-  tui:debug-if SCRATCH_DEBUG_INDEX "summarized" "file=$ident"
+  tui:debug-if SCRATCH_DEBUG_INDEX "summarized" "$entry_type" "$ident"
+}
+
+# Pass through text content directly as embed text, no LLM call.
+# Used for commits where the message is already summary-quality.
+_passthrough_text() {
+  local entry_type="$1"
+  local ident="$2"
+  local sha="$3"
+  local file_path="$4"
+
+  if [[ ! -s "$file_path" ]]; then
+    tui:debug-if SCRATCH_DEBUG_INDEX "passthrough skipped" "$entry_type" "$ident" reason empty
+    printf 'skip\n' >> "$tallyfile"
+    return 0
+  fi
+
+  local embed_text
+  embed_text="$(cat "$file_path")"
+
+  # Store the raw text as the summary too so the DB has something
+  local summary_json
+  summary_json="$(jq -c -n --arg s "$embed_text" '{summary: $s, questions: []}')"
+  index:update-summary "$project" "$entry_type" "$ident" "$summary_json"
+
+  local out_json
+  out_json="$(jq -c -n --arg id "$ident" --arg sha "$sha" --arg text "$embed_text" --arg type "$entry_type" \
+    '{id: $id, sha: $sha, text: $text, type: $type}')"
+  flock "$lockfile" printf '%s\n' "$out_json"
+
+  printf 'ok\n' >> "$tallyfile"
+  tui:debug-if SCRATCH_DEBUG_INDEX "passthrough" "$entry_type" "$ident"
+}
+
+# Process a single work item: dispatch by type, upsert, emit. Runs in a
+# background subshell. Stdout writes are serialized with flock so
+# concurrent workers don't interleave JSONL lines.
+_summarize_one() {
+  local ident="$1"
+  local sha="$2"
+  local file_path="$3"
+  local entry_type="$4"
+
+  tui:debug-if SCRATCH_DEBUG_INDEX "summarize starting" "$entry_type" "$ident"
+
+  case "$entry_type" in
+    file)
+      _summarize_via_agent summary file "$ident" "$sha" "$file_path"
+      ;;
+    conversation)
+      _summarize_via_agent summary-conversation conversation "$ident" "$sha" "$file_path"
+      ;;
+    commit)
+      _passthrough_text commit "$ident" "$sha" "$file_path"
+      ;;
+    *)
+      tui:warn "summarize: unknown type '$entry_type' for $ident"
+      printf 'fail\n' >> "$tallyfile"
+      return 1
+      ;;
+  esac
 }
 
 pids=()
@@ -103,6 +162,7 @@ while IFS= read -r line; do
   ident="$(printf '%s' "$line" | jq -r '.id')"
   sha="$(printf '%s' "$line" | jq -r '.sha')"
   file_path="$(printf '%s' "$line" | jq -r '.file')"
+  entry_type="$(printf '%s' "$line" | jq -r '.type // "file"')"
 
   # If pool is full, block until a slot opens. The || true is
   # intentional: per-worker failures are tracked via the tally file
@@ -119,7 +179,7 @@ while IFS= read -r line; do
   fi
 
   # Dispatch in background
-  _summarize_one "$ident" "$sha" "$file_path" &
+  _summarize_one "$ident" "$sha" "$file_path" "$entry_type" &
   pids+=($!)
 done
 
@@ -135,4 +195,4 @@ done
 ok_count="$(grep -c '^ok$' "$tallyfile" 2> /dev/null || true)"
 fail_count="$(grep -c '^fail$' "$tallyfile" 2> /dev/null || true)"
 skip_count="$(grep -c '^skip$' "$tallyfile" 2> /dev/null || true)"
-tui:info "summarize complete" "ok=${ok_count}" "failed=${fail_count}" "skipped=${skip_count}"
+tui:info "summarize complete" ok "$ok_count" failed "$fail_count" skipped "$skip_count"

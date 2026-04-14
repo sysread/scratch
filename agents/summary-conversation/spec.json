@@ -1,0 +1,5 @@
+{
+  "name": "summary-conversation",
+  "description": "Generate a structured summary of a conversation transcript for the project index. Reads transcript on stdin, produces JSON with a narrative summary and synthetic search questions. Uses the accumulator for long conversations.",
+  "profile": "long-context"
+}

@@ -41,12 +41,13 @@ while IFS= read -r line; do
   entry_id="$(printf '%s' "$line" | jq -r '.id')"
   entry_sha="$(printf '%s' "$line" | jq -r '.sha // empty')"
   embed_json="$(printf '%s' "$line" | jq -c '.embedding')"
+  entry_type="$(printf '%s' "$line" | jq -r '.type // "file"')"
 
-  tui:debug-if SCRATCH_DEBUG_INDEX "embedding received" "file=$entry_id"
+  tui:debug-if SCRATCH_DEBUG_INDEX "embedding received" "$entry_type" "$entry_id"
 
   if [[ -n "$entry_id" && -n "$entry_sha" && -n "$embed_json" && "$embed_json" != "null" ]]; then
-    index:finalize "$project" file "$entry_id" "$entry_sha" "$embed_json"
-    tui:debug-if SCRATCH_DEBUG_INDEX "indexed" "file=$entry_id"
+    index:finalize "$project" "$entry_type" "$entry_id" "$entry_sha" "$embed_json"
+    tui:debug-if SCRATCH_DEBUG_INDEX "indexed" "$entry_type" "$entry_id"
 
     # Update spinner progress file
     if [[ -n "${TUI_PROGRESS_FILE:-}" ]]; then

@@ -79,12 +79,21 @@ search:query() {
     return 1
   fi
 
-  local q_type
-  q_type="$(db:quote "$type")"
+  # Build query: type=all searches all entry types with type-prefixed
+  # identifiers so results can be distinguished. Single-type queries
+  # return bare identifiers for backward compatibility.
+  local sql
+  if [[ "$type" == "all" ]]; then
+    sql="SELECT type || ':' || identifier, embedding FROM entries WHERE embedding IS NOT NULL;"
+  else
+    local q_type
+    q_type="$(db:quote "$type")"
+    sql="SELECT identifier, embedding FROM entries WHERE type = $q_type AND embedding IS NOT NULL;"
+  fi
 
   # Pipe entries through cosine-rank.awk with the needle in argv so it's
   # parsed once at startup, not read from the stream.
-  db:query "$db" "SELECT identifier, embedding FROM entries WHERE type = $q_type AND embedding IS NOT NULL;" \
+  db:query "$db" "$sql" \
     | awk -v needle="$query_embedding" -v top_k="$top_k" -f "$_SEARCH_COSINE_RANK"
 }
 

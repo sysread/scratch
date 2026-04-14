@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# summary-conversation agent - availability check
+#
+# Same deps as summary agent: accumulate:run-profile and chat:completion
+# transitively pull in venice:curl + jq + bc through the lib stack.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"

@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# summary-conversation agent
+#
+# Generates a structured summary of a conversation transcript for the
+# project search index. Same two-phase approach as the file summary agent
+# but with dialog-oriented prompts.
+#
+#   Phase 1 (accumulate): Run the transcript through the accumulator to
+#     produce raw notes. Handles long conversations by chunking.
+#
+#   Phase 2 (structure): Fast completion to reshape notes into the index
+#     schema: {summary: string, questions: string[]}.
+#
+# stdin:  plain-text conversation transcript
+# stdout: JSON object with summary and questions fields
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+{
+  source "$SCRATCH_HOME/lib/agent.sh"
+  source "$SCRATCH_HOME/lib/accumulator.sh"
+  source "$SCRATCH_HOME/lib/prompt.sh"
+  source "$SCRATCH_HOME/lib/chat.sh"
+  source "$SCRATCH_HOME/lib/model.sh"
+}
+
+# Phase 1: accumulate raw notes about the conversation
+input="$(cat)"
+
+if [[ -z "$input" ]]; then
+  die "summary-conversation: empty input on stdin"
+  exit 1
+fi
+
+prompt="$(prompt:load summary-conversation/accumulate)"
+
+notes="$(accumulate:run-profile long-context "$prompt" "$input" '{"extras":{"max_completion_tokens":2048}}')"
+
+# Phase 2: structure the notes into {summary, questions} JSON
+structure_prompt="$(prompt:render summary-conversation/structure notes="$notes")"
+
+model="$(model:profile:model fast)"
+extras="$(model:profile:extras fast)"
+
+schema='{
+  "type": "json_schema",
+  "json_schema": {
+    "name": "conversation_summary",
+    "strict": true,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "questions"],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "description": "Narrative summary of the conversation"
+        },
+        "questions": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "5-10 questions this conversation answers"
+        }
+      }
+    }
+  }
+}'
+
+merged_extras="$(jq -c -n \
+  --argjson e "$extras" \
+  --argjson s "$schema" \
+  '$e + {response_format: $s, max_completion_tokens: 1024}')"
+
+messages="$(jq -c -n \
+  --arg system "$structure_prompt" \
+  '[{role:"system",content:$system},{role:"user",content:"Structure these notes into the required JSON format."}]')"
+
+response="$(chat:completion "$model" "$messages" "$merged_extras")"
+printf '%s' "$response" | jq -r '.choices[0].message.content'
