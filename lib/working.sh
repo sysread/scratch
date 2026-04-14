@@ -36,10 +36,17 @@ _WORKING_SCRIPT="$_WORKING_SCRIPTDIR/../libexec/working.exs"
 #   ( producer | consumer ) 2>&1 | working:run --total 100 --match '^ok '
 #-------------------------------------------------------------------------------
 working:run() {
+  # Forward locale vars so Elixir's IO knows it can emit UTF-8. Without
+  # them, the BEAM falls back to Latin-1 and prints non-ASCII codepoints
+  # as \x{NNNN} escape sequences — which means our braille spinner and
+  # ─ separator render as literal escape strings instead of characters.
   env -i \
     PATH="$PATH" \
     HOME="$HOME" \
     TERM="${TERM:-xterm}" \
+    LANG="${LANG:-en_US.UTF-8}" \
+    LC_ALL="${LC_ALL:-${LANG:-en_US.UTF-8}}" \
+    LC_CTYPE="${LC_CTYPE:-${LANG:-en_US.UTF-8}}" \
     elixir "$_WORKING_SCRIPT" "$@"
 }
 
