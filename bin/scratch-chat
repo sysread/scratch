@@ -189,7 +189,7 @@ _chat:display-history() {
       tool)
         local tool_id
         tool_id="$(jq -r '.tool_call_id // "unknown"' <<< "$line")"
-        tui:debug-if SCRATCH_DEBUG_TOOLS "tool result" id "$tool_id" result "$content"
+        tui:debug "tool result" id "$tool_id" result "$content"
         ;;
     esac
   done <<< "$messages"
@@ -246,7 +246,7 @@ _chat:display-new-messages() {
               kv_pairs+=("$display_key" "$val")
             done < <(jq -r 'keys[]' <<< "$call_args" 2> /dev/null)
 
-            tui:debug-if SCRATCH_DEBUG_TOOLS "tool call" "${kv_pairs[@]}"
+            tui:debug "tool call" "${kv_pairs[@]}"
           done
         fi
         ;;
@@ -254,7 +254,7 @@ _chat:display-new-messages() {
         local tool_id content
         tool_id="$(jq -r '.tool_call_id // "unknown"' <<< "$msg")"
         content="$(jq -r '.content // ""' <<< "$msg")"
-        tui:debug-if SCRATCH_DEBUG_TOOLS "tool result" id "$tool_id" result "$content"
+        tui:debug "tool result" id "$tool_id" result "$content"
         ;;
     esac
   done
