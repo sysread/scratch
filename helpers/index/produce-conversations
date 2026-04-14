@@ -18,6 +18,23 @@
 
 set -euo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat << 'EOF'
+Usage: helpers/index/produce-conversations PROJECT_NAME
+
+Walk project conversations, generate plain-text transcripts to a temp dir,
+SHA-diff messages.jsonl against the index, and emit JSONL work items for
+conversations that are new or changed. Orphan entries are removed.
+
+Arguments:
+  PROJECT_NAME  scratch project name (must have a ~/.config/scratch/projects/<name>/chats dir)
+
+Output:
+  JSONL {"id":"<slug>","sha":"<hex>","file":"<transcript-path>","type":"conversation"}
+EOF
+  exit 0
+fi
+
 SCRIPT="${BASH_SOURCE[0]}"
 while [[ -L "$SCRIPT" ]]; do
   DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
@@ -115,7 +132,7 @@ generate-transcript() {
     end
   ' "$messages_path" \
     | awk 'NF || prev_blank==0 { print; prev_blank=(NF==0) }' \
-    > "$output_path"
+      > "$output_path"
 }
 
 # Load existing index

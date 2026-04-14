@@ -18,6 +18,29 @@
 
 set -euo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat << 'EOF'
+Usage: helpers/index/summarize PROJECT_NAME [WORKERS]
+
+Read JSONL work items from stdin, summarize each entry via the appropriate
+agent (or passthrough for commits), upsert the summary into the index, and
+emit {id, sha, text, type} JSONL for the embed stage. Parallelism via a
+pool of WORKERS (default 4) using bash 5.1 wait -n -p.
+
+Arguments:
+  PROJECT_NAME  scratch project name
+  WORKERS       summary workers (default 4)
+
+Stdin:  JSONL {"id":..., "sha":..., "file":..., "type":"file|conversation|commit"}
+Stdout: JSONL {"id":..., "sha":..., "text":..., "type":...}
+
+Env:
+  SCRATCH_HOME          required (exported by bin/scratch-index)
+  SCRATCH_DEBUG_INDEX   set for per-item debug output
+EOF
+  exit 0
+fi
+
 # SCRATCH_HOME must be set by the caller (bin/scratch-index exports it)
 # shellcheck disable=SC1091,SC2031
 {

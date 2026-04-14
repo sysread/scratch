@@ -28,6 +28,23 @@
 
 set -euo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat << 'EOF'
+Usage: helpers/run-integration-tests [bats args]
+
+Run the scratch integration test suite. Integration tests make REAL API
+calls against Venice and cost real money. Never run automatically — opt in
+via `mise run test:integration` or this script directly.
+
+HOME is still isolated (fresh mktemp dir), but there is no network guard.
+SCRATCH_VENICE_API_KEY / VENICE_API_KEY are forwarded from the caller.
+
+Arguments:
+  [bats args]  forwarded verbatim to bats
+EOF
+  exit 0
+fi
+
 SCRIPT="${BASH_SOURCE[0]}"
 while [[ -L "$SCRIPT" ]]; do
   DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"

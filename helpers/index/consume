@@ -17,6 +17,28 @@
 
 set -euo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat << 'EOF'
+Usage: helpers/index/consume PROJECT_NAME
+
+Read {id, sha, embedding, type} JSONL from stdin (embed pool output) and
+finalize each entry by writing BOTH the embedding AND the content SHA. The
+SHA is only committed here, not during summarize — failed embeddings leave
+the SHA stale so produce re-emits on the next run. Idempotent.
+
+Arguments:
+  PROJECT_NAME  scratch project name
+
+Stdin:  JSONL {"id":..., "sha":..., "embedding":[...], "type":"..."}
+
+Env:
+  SCRATCH_HOME          required (exported by bin/scratch-index)
+  SCRATCH_DEBUG_INDEX   set for per-item debug output
+  TUI_PROGRESS_FILE     optional; progress counter updated as entries finalize
+EOF
+  exit 0
+fi
+
 # SCRATCH_HOME must be set by the caller
 # shellcheck source-path=SCRIPTDIR/../../lib
 # shellcheck disable=SC1091

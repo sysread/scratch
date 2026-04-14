@@ -15,6 +15,25 @@
 
 set -euo pipefail
 
+# Bash 3.2-compatible help block. Case is used instead of [[ ... ]] for
+# belt-and-suspenders portability, since this script may run on the stock
+# macOS shell before bash 5 is installed.
+case "${1:-}" in
+  -h | --help)
+    cat << 'EOF'
+Usage: helpers/setup [--check]
+
+Install scratch's runtime dependencies. Must remain compatible with the
+macOS system bash (3.2) since part of its job is installing bash 5+.
+
+Arguments:
+  --check  exit 0 if all deps are present, 1 (with warnings) if not
+  (none)   install all missing deps
+EOF
+    exit 0
+    ;;
+esac
+
 SCRIPT="${BASH_SOURCE[0]}"
 while [ -L "$SCRIPT" ]; do
   DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"

@@ -11,6 +11,24 @@
 #   db:query ... | awk -v needle="$query_json" -v top_k=10 -f cosine-rank-v2.awk
 
 BEGIN {
+  # awk has no conventional -h/--help, since flags are parsed by awk itself.
+  # We emulate the contract via `-v help=1` for parity with the rest of
+  # libexec/ and helpers/: `awk -v help=1 -f cosine-rank.awk </dev/null`.
+  if (help == 1 || help == "1") {
+    print "Usage: awk -v needle=\"<json>\" [-v top_k=N] -f cosine-rank.awk"
+    print ""
+    print "Line-oriented cosine similarity ranking."
+    print ""
+    print "Input:  tab-delimited  identifier<TAB>embedding_json_array  per line"
+    print "Output: tab-delimited  score<TAB>identifier  top_k rows, desc by score"
+    print ""
+    print "Variables (passed via -v):"
+    print "  needle  JSON array of floats (the query embedding; required)"
+    print "  top_k   max results to emit (default 10)"
+    print "  help    set to 1 to print this message"
+    exit 0
+  }
+
   FS = "\t"
   if (top_k == "") top_k = 10
   ndim = parse_json_array(needle, q)

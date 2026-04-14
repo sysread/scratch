@@ -14,6 +14,26 @@
 
 set -euo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat << 'EOF'
+Usage: helpers/index/produce PROJECT_NAME ROOT IS_GIT [EXCLUDE]
+
+Walk project files, SHA-diff against the index, emit JSONL work items for
+files that are new or changed. Orphan entries (indexed files that no longer
+exist on disk) are removed from the index as a side effect.
+
+Arguments:
+  PROJECT_NAME  scratch project name
+  ROOT          absolute path to project root
+  IS_GIT        "true" if project is a git repo (uses git ls-files), else "find"
+  EXCLUDE       newline-separated glob patterns to exclude (non-git only)
+
+Output:
+  JSONL {"id":"<relpath>","sha":"<hex>","file":"<abspath>","type":"file"}
+EOF
+  exit 0
+fi
+
 SCRIPT="${BASH_SOURCE[0]}"
 while [[ -L "$SCRIPT" ]]; do
   DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"

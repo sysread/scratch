@@ -43,6 +43,33 @@
 #   before invoking this script.
 #-------------------------------------------------------------------------------
 
+# Handle -h/--help before any of the heavy machinery (logger config,
+# Mix.install, Bumblebee model load). No reason to pay a 30+ second cold
+# start just to print usage.
+case System.argv() do
+  [h] when h in ["-h", "--help"] ->
+    IO.puts("""
+    Usage:
+      embed.exs <file>           Embed file contents; print JSON array on stdout
+      embed.exs -                Embed stdin text; print JSON array on stdout
+      embed.exs -n [WORKERS]     Pool mode: JSONL streaming, default 4 workers
+
+    Pool mode reads {id, text} JSONL on stdin and writes {id, embedding}
+    JSONL on stdout, passing through all other input fields. Results arrive
+    in completion order. Exits cleanly when stdin closes.
+
+    Model: sentence-transformers/all-MiniLM-L12-v2 (384-dim, 256-tok context)
+
+    Env:
+      SCRATCH_MODEL   Override the default embedding model
+    """)
+
+    System.halt(0)
+
+  _ ->
+    :ok
+end
+
 # Route Elixir/EXLA log noise to stderr so stdout stays clean for JSON output
 {:ok, cfg} = :logger.get_handler_config(:default)
 cfg = Map.update!(cfg, :config, &Map.put(&1, :type, :standard_error))

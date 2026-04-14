@@ -28,6 +28,20 @@
 
 set -euo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat << 'EOF'
+Usage: helpers/run-tests [bats args]
+
+Run the scratch unit test suite in a clean, isolated environment. HOME is
+overridden to a fresh mktemp dir and a curl network-guard stub is installed
+on PATH so forgotten mocks fail loudly.
+
+Arguments:
+  [bats args]  forwarded verbatim to bats (e.g. a specific test file)
+EOF
+  exit 0
+fi
+
 SCRIPT="${BASH_SOURCE[0]}"
 while [[ -L "$SCRIPT" ]]; do
   DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"

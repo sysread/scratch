@@ -15,6 +15,24 @@
 
 set -euo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat << 'EOF'
+Usage: helpers/index/produce-commits PROJECT_NAME ROOT
+
+Walk commits on the repo's default branch, write each commit's message and
+metadata to a temp file, and emit JSONL work items for commits not already
+in the index. Commits are immutable — existence in the index means current.
+
+Arguments:
+  PROJECT_NAME  scratch project name
+  ROOT          absolute path to git repo root
+
+Output:
+  JSONL {"id":"<sha>","sha":"<sha>","file":"<path>","type":"commit"}
+EOF
+  exit 0
+fi
+
 SCRIPT="${BASH_SOURCE[0]}"
 while [[ -L "$SCRIPT" ]]; do
   DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
@@ -55,7 +73,7 @@ detect-default-branch() {
 
   # Try origin/HEAD (most reliable for cloned repos)
   local ref
-  if ref="$(git -C "$root" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null)"; then
+  if ref="$(git -C "$root" symbolic-ref refs/remotes/origin/HEAD 2> /dev/null)"; then
     printf '%s\n' "${ref##refs/remotes/origin/}"
     return 0
   fi
@@ -63,7 +81,7 @@ detect-default-branch() {
   # Fall back to checking which common names exist locally
   local name
   for name in main master; do
-    if git -C "$root" rev-parse --verify "refs/heads/$name" &>/dev/null; then
+    if git -C "$root" rev-parse --verify "refs/heads/$name" &> /dev/null; then
       printf '%s\n' "$name"
       return 0
     fi
@@ -92,10 +110,10 @@ skip_count=0
 # fields: hash, author, date, body. With `-z`, git replaces the inter-commit
 # newline with NUL, so we end each commit with a NUL separator rather than
 # adding an explicit %x00 after %B (which would produce a double-NUL).
-while IFS= read -r -d '' commit_hash && \
-      IFS= read -r -d '' author && \
-      IFS= read -r -d '' date && \
-      IFS= read -r -d '' body; do
+while IFS= read -r -d '' commit_hash \
+  && IFS= read -r -d '' author \
+  && IFS= read -r -d '' date \
+  && IFS= read -r -d '' body; do
 
   [[ -n "$commit_hash" ]] || continue
 

@@ -10,6 +10,20 @@
 
 set -euo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat << 'EOF'
+Usage: helpers/release [patch|minor|major]
+
+Bump VERSION, commit, tag, and push a new release. Without an argument,
+prompts interactively via gum choose with each option's version transition
+shown and the bumped segment highlighted.
+
+Arguments:
+  patch|minor|major  which semver segment to bump (optional; prompts if omitted)
+EOF
+  exit 0
+fi
+
 readonly WHITE=$'\033[1;37m'
 readonly GREEN=$'\033[1;32m'
 readonly RESET=$'\033[0m'
