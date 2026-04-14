@@ -162,11 +162,31 @@ defmodule Working do
   # Rendering
   #---------------------------------------------------------------------------
 
-  def render_separator({width}) do
-    # A horizontal rule that's visually linked to the progress bar width.
-    # width is the number of cells inside [brackets]; add 2 for the brackets
-    # themselves so the rule is flush with the bar.
-    String.duplicate("─", width + 2)
+  # Terminal column count, falling back to 80 when :io.columns can't tell
+  # (e.g. the process was detached from a tty). Called on each render so
+  # resize events take effect without extra bookkeeping.
+  defp terminal_columns do
+    case :io.columns() do
+      {:ok, n} when n > 0 -> n
+      _ -> 80
+    end
+  end
+
+  # Bar width is the terminal width minus the brackets and the counter
+  # suffix that goes right after the bar: "[...]<counter>". Reserves
+  # enough space for a worst-case counter "[9999/9999 - 100%]" plus a
+  # small pad so the counter doesn't kiss the right edge.
+  defp compute_bar_width(total) do
+    counter_width = String.length("[#{total}/#{total} - 100%]")
+    # 2 = brackets around the bar, 1 = right-edge safety gap
+    terminal_columns() - counter_width - 2 - 1
+    |> max(10)
+  end
+
+  def render_separator(_state) do
+    # Rule spans the full terminal width — visually clean edge-to-edge
+    # break between scrolling log output and the pinned status UI.
+    String.duplicate("─", terminal_columns())
   end
 
   def render_spinner({tick, phrases}) do
@@ -181,7 +201,7 @@ defmodule Working do
     "#{frame} #{phrase}"
   end
 
-  def render_progress({done, total, width, label}) do
+  def render_progress({done, total, _width_unused, label}) do
     pct =
       if total > 0 do
         min(100, trunc(done * 100 / total))
@@ -189,6 +209,7 @@ defmodule Working do
         0
       end
 
+    width = compute_bar_width(total)
     filled = min(width, trunc(done * width / max(total, 1)))
 
     # Show a leading arrow while incomplete so the bar reads "=====>    ".
