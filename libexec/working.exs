@@ -202,12 +202,19 @@ defmodule Working do
   # static "up to date" message.
   def render_separator(:hidden), do: ""
 
+  # Capped width for the horizontal rule. Owl's internal column accounting
+  # gets fooled by our embedded ANSI color codes and wraps a full-width
+  # rule onto a second line. Keeping the rule narrower than the terminal
+  # (and capped at 80) sidesteps the miscount — the rule no longer spans
+  # edge-to-edge, but it also doesn't wrap.
+  @rule_max_width 80
+
   def render_separator(_state) do
-    # Rule spans the full terminal width — visually clean edge-to-edge
-    # break between scrolling log output and the pinned status UI.
-    # Flanked by blank lines above and below so the rule stands away
+    # Rule spans up to @rule_max_width columns, or the terminal width if
+    # narrower. Flanked by blank lines above and below so it stands away
     # from the INFO logs above and the spinner/label below.
-    bar = String.duplicate("─", terminal_columns())
+    width = min(@rule_max_width, terminal_columns())
+    bar = String.duplicate("─", width)
     ["\n", IO.ANSI.format_fragment([:cyan, bar, :reset], true), "\n"]
   end
 
