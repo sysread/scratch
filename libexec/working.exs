@@ -192,7 +192,9 @@ defmodule Working do
   def render_separator(_state) do
     # Rule spans the full terminal width — visually clean edge-to-edge
     # break between scrolling log output and the pinned status UI.
-    String.duplicate("─", terminal_columns())
+    # Flanked by blank lines above and below so the rule stands away
+    # from the INFO logs above and the spinner/label below.
+    "\n" <> String.duplicate("─", terminal_columns()) <> "\n"
   end
 
   def render_spinner(:hidden), do: ""
