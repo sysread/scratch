@@ -171,13 +171,23 @@ main() {
         --label 'Indexing chats:'
   }
 
+  # Short breath between phases gives the previous phase's Owl live
+  # region time to finish tearing down and committing its final snapshot
+  # to scrollback before the next phase's spawns its own. Without the
+  # pause, the BEAM's async shutdown can race the next phase's render
+  # startup and smear output across the boundary. (Elixir's :io is line-
+  # buffered on its own terms; no `local $|=1` escape hatch.)
+  _inter_phase_pause() { sleep 0.3; }
+
   _index_files
 
   if [[ "$proj_is_git" == "true" && "$commits_total" -gt 0 ]]; then
+    _inter_phase_pause
     _index_commits
   fi
 
   if [[ -d "$chats_dir" && "$chats_total" -gt 0 ]]; then
+    _inter_phase_pause
     _index_chats
   fi
 
