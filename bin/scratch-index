@@ -215,7 +215,7 @@ main() {
         --total 4 \
         --match '^ok ' \
         --extract '^ok (.+)' \
-        --label 'Consolidating attachments:'
+        --label 'attachments'
   }
   _inter_phase_pause
   _consolidate_attachments
