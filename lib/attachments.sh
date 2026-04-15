@@ -39,9 +39,12 @@ _ATTACHMENTS_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   source "$_ATTACHMENTS_SCRIPTDIR/base.sh"
   source "$_ATTACHMENTS_SCRIPTDIR/db.sh"
   source "$_ATTACHMENTS_SCRIPTDIR/index.sh"
+  source "$_ATTACHMENTS_SCRIPTDIR/project.sh"
 }
 
 _ATTACHMENTS_COSINE_RANK="$_ATTACHMENTS_SCRIPTDIR/../libexec/cosine-rank.awk"
+
+_ATTACHMENTS_GLOBAL_MIGRATIONS_DIR="$_ATTACHMENTS_SCRIPTDIR/../data/migrations/attachments-global"
 
 # Controlled-vocabulary affect tags. Attachments outside this set are
 # rejected at mint/seed time.
@@ -1028,9 +1031,295 @@ attachments:consolidate() {
   # 5. Record timestamp
   index:set-meta "$project" "last_consolidation_at" "$(date -u +%Y-%m-%dT%H:%M:%S)"
   printf 'ok consolidation\n'
+
+  # 6. Emergent globality. Promote project-scoped attachments that have
+  #    fired across multiple projects into global scope, and bleed health
+  #    from global attachments whose origin project has been deleted.
+  attachments:check-promotion "$project" || true
+  attachments:sweep-global-orphans || true
+  printf 'ok globality\n'
 }
 
 export -f attachments:consolidate
+
+#-------------------------------------------------------------------------------
+# attachments:global-db-path
+#
+# Path to the cross-project attachments database. Lives under
+# SCRATCH_CONFIG_DIR so it sits alongside the per-project dirs.
+#-------------------------------------------------------------------------------
+attachments:global-db-path() {
+  printf '%s/attachments-global.db' "${SCRATCH_CONFIG_DIR}"
+}
+
+export -f attachments:global-db-path
+
+#-------------------------------------------------------------------------------
+# attachments:global-ensure
+#
+# Create the global DB and apply the attachments-global migrations if
+# missing. Idempotent.
+#-------------------------------------------------------------------------------
+attachments:global-ensure() {
+  local db
+  db="$(attachments:global-db-path)"
+  db:init "$db"
+  db:migrate "$db" "$_ATTACHMENTS_GLOBAL_MIGRATIONS_DIR"
+}
+
+export -f attachments:global-ensure
+
+#-------------------------------------------------------------------------------
+# attachments:log-global-fire PROJECT SIGNATURE
+#
+# Append a slim fire record to the global DB. Failure is swallowed —
+# the project-level fire has already been logged, and the global fire
+# is bonus telemetry driving promotion.
+#-------------------------------------------------------------------------------
+attachments:log-global-fire() {
+  local project="$1"
+  local signature="$2"
+
+  [[ -z "$project" || -z "$signature" ]] && return 0
+
+  attachments:global-ensure > /dev/null 2>&1 || return 0
+  local db
+  db="$(attachments:global-db-path)"
+
+  local q_proj q_sig
+  q_proj="$(db:quote "$project")"
+  q_sig="$(db:quote "$signature")"
+
+  db:exec "$db" "
+    INSERT INTO global_fires (shape_signature, project)
+    VALUES ($q_sig, $q_proj);
+  " 2> /dev/null || true
+}
+
+export -f attachments:log-global-fire
+
+#-------------------------------------------------------------------------------
+# attachments:fire-global SITUATION_EMBEDDING [TOP_K]
+#
+# Cosine-rank the situation against live global_attachments and return
+# the top K as a JSON array with the same shape as attachments:fire's
+# per-project output, plus a "global" flag on each object. Prints '[]'
+# when the global DB is missing or empty.
+#
+# Does NOT log fires — globality is driven by project-level fires that
+# propagate into global_fires via attachments:log-global-fire.
+#-------------------------------------------------------------------------------
+attachments:fire-global() {
+  local embedding="$1"
+  local top_k="${2:-5}"
+
+  attachments:global-ensure > /dev/null 2>&1 || {
+    printf '[]'
+    return 0
+  }
+  local db
+  db="$(attachments:global-db-path)"
+
+  local count
+  count="$(db:query "$db" "
+    SELECT count(*)
+    FROM global_attachments
+    WHERE health > 0.3 AND prediction_embedding IS NOT NULL;
+  " 2> /dev/null)" || count=0
+  if [[ -z "$count" || "$count" -eq 0 ]]; then
+    printf '[]'
+    return 0
+  fi
+
+  local ranked
+  ranked="$(
+    db:query "$db" "
+      SELECT id, prediction_embedding
+      FROM global_attachments
+      WHERE health > 0.3 AND prediction_embedding IS NOT NULL;
+    " \
+      | awk -v needle="$embedding" -v top_k="$top_k" -f "$_ATTACHMENTS_COSINE_RANK"
+  )"
+
+  if [[ -z "$ranked" ]]; then
+    printf '[]'
+    return 0
+  fi
+
+  {
+    while IFS=$'\t' read -r score gid; do
+      [[ -z "$gid" ]] && continue
+      local row
+      row="$(db:query-json "$db" "
+        SELECT id, prediction, inner_voice, affect, confidence, health
+        FROM global_attachments
+        WHERE id = $gid;
+      ")"
+      jq -c --arg score "$score" '.[0] + {score: ($score | tonumber), global: true}' <<< "$row"
+    done <<< "$ranked"
+  } | jq -sc '.'
+}
+
+export -f attachments:fire-global
+
+#-------------------------------------------------------------------------------
+# attachments:check-promotion PROJECT [WINDOW_DAYS] [MIN_PROJECTS] [GLOBAL_THRESHOLD]
+#
+# Promote project-scoped attachments that have fired across multiple
+# distinct projects in the last WINDOW_DAYS (default 30) into the
+# global DB with scope='global_candidate'. Candidates that accumulate
+# GLOBAL_THRESHOLD (default 5) cross-project fires in the same window
+# graduate to scope='global'.
+#
+# Signature matching is exact (shape_signature equality); plan Phase 6
+# may revisit with cosine-based dedup once a fresh embedder swap
+# invalidates existing signatures.
+#-------------------------------------------------------------------------------
+attachments:check-promotion() {
+  local project="$1"
+  local window="${2:-30}"
+  local min_projects="${3:-2}"
+  local global_threshold="${4:-5}"
+
+  attachments:ensure "$project"
+  attachments:global-ensure > /dev/null 2>&1 || return 0
+
+  local pdb gdb
+  pdb="$(attachments:db-path "$project")"
+  gdb="$(attachments:global-db-path)"
+
+  # Phase 1: promote eligible project attachments to global_candidate.
+  local candidates
+  candidates="$(db:query "$pdb" "
+    SELECT id, shape_signature, prediction, prediction_embedding,
+           inner_voice, affect, confidence
+    FROM attachments
+    WHERE scope = 'project';
+  ")"
+
+  local aid sig prediction emb voice affect conf
+  while IFS=$'\t' read -r aid sig prediction emb voice affect conf; do
+    [[ -z "$aid" ]] && continue
+
+    local q_sig
+    q_sig="$(db:quote "$sig")"
+
+    local distinct
+    distinct="$(db:query "$gdb" "
+      SELECT COUNT(DISTINCT project)
+      FROM global_fires
+      WHERE shape_signature = $q_sig
+        AND fired_at > datetime('now', '-$window days');
+    " 2> /dev/null)" || distinct=0
+    distinct="${distinct:-0}"
+
+    ((distinct < min_projects)) && continue
+
+    local q_pred q_emb q_voice q_affect q_proj
+    q_pred="$(db:quote "$prediction")"
+    q_emb="$(db:quote "$emb")"
+    q_voice="$(db:quote "$voice")"
+    q_affect="$(db:quote "$affect")"
+    q_proj="$(db:quote "$project")"
+
+    db:exec "$gdb" "
+      INSERT INTO global_attachments
+        (shape_signature, prediction, prediction_embedding, inner_voice,
+         affect, confidence, origin_project)
+      VALUES ($q_sig, $q_pred, $q_emb, $q_voice, $q_affect, $conf, $q_proj)
+      ON CONFLICT(shape_signature) DO UPDATE SET
+        updated_at = datetime('now');
+    "
+
+    db:exec "$pdb" "
+      UPDATE attachments SET scope = 'global_candidate', updated_at = datetime('now')
+      WHERE id = $aid AND scope = 'project';
+    "
+  done <<< "$candidates"
+
+  # Phase 2: graduate global_candidate → global.
+  local grads
+  grads="$(db:query "$gdb" "
+    SELECT id, shape_signature, origin_project
+    FROM global_attachments
+    WHERE scope = 'global_candidate';
+  ")"
+
+  local gid sig2 origin
+  while IFS=$'\t' read -r gid sig2 origin; do
+    [[ -z "$gid" ]] && continue
+    local q_sig2
+    q_sig2="$(db:quote "$sig2")"
+
+    local fire_count
+    fire_count="$(db:query "$gdb" "
+      SELECT COUNT(*)
+      FROM global_fires
+      WHERE shape_signature = $q_sig2
+        AND fired_at > datetime('now', '-$window days');
+    ")"
+    fire_count="${fire_count:-0}"
+
+    if ((fire_count >= global_threshold)); then
+      db:exec "$gdb" "
+        UPDATE global_attachments
+        SET scope = 'global', updated_at = datetime('now')
+        WHERE id = $gid;
+      "
+      if [[ -n "$origin" ]]; then
+        local odb
+        odb="$(attachments:db-path "$origin")"
+        if [[ -f "$odb" ]]; then
+          db:exec "$odb" "
+            UPDATE attachments SET scope = 'global', updated_at = datetime('now')
+            WHERE shape_signature = $q_sig2;
+          " 2> /dev/null || true
+        fi
+      fi
+    fi
+  done <<< "$grads"
+}
+
+export -f attachments:check-promotion
+
+#-------------------------------------------------------------------------------
+# attachments:sweep-global-orphans
+#
+# For every global_attachment, check whether its origin_project's
+# index.db still exists on disk. If not, decay health by 0.5 per sweep.
+# Once health hits 0, the attachment no longer fires (health > 0.3
+# filter) and can be GC'd by a future maintenance pass.
+#-------------------------------------------------------------------------------
+attachments:sweep-global-orphans() {
+  attachments:global-ensure > /dev/null 2>&1 || return 0
+  local db
+  db="$(attachments:global-db-path)"
+
+  local rows
+  rows="$(db:query "$db" "
+    SELECT id, origin_project
+    FROM global_attachments
+    WHERE origin_project IS NOT NULL AND health > 0;
+  ")"
+
+  local gid origin
+  while IFS=$'\t' read -r gid origin; do
+    [[ -z "$gid" || -z "$origin" ]] && continue
+    local project_db
+    project_db="$(attachments:db-path "$origin")"
+    if [[ ! -f "$project_db" ]]; then
+      db:exec "$db" "
+        UPDATE global_attachments
+        SET health = MAX(0.0, health - 0.5),
+            updated_at = datetime('now')
+        WHERE id = $gid;
+      "
+    fi
+  done <<< "$rows"
+  return 0
+}
+
+export -f attachments:sweep-global-orphans
 
 #-------------------------------------------------------------------------------
 # attachments:shape-signature EMBEDDING_JSON
@@ -1180,34 +1469,57 @@ attachments:fire() {
 
   # For each (score, id), log a fire and fetch the attachment's
   # user-facing fields. Builds a JSON object per match; jq -s at the end
-  # slurps the stream of objects into a single array.
-  {
-    while IFS=$'\t' read -r score aid; do
-      [[ -z "$aid" ]] && continue
+  # slurps the stream of objects into a single array. Also propagates a
+  # slim fire record to the global DB (keyed by shape_signature) so
+  # cross-project promotion logic has the data it needs.
+  local local_fires
+  local_fires="$(
+    {
+      while IFS=$'\t' read -r score aid; do
+        [[ -z "$aid" ]] && continue
 
-      local q_emb
-      q_emb="$(db:quote "$embedding")"
+        local q_emb
+        q_emb="$(db:quote "$embedding")"
 
-      db:exec "$db" "
-        INSERT INTO attachment_fires (attachment_id, situation_embedding)
-        VALUES ($aid, $q_emb);
-        UPDATE attachments
-           SET fire_count = fire_count + 1,
-               last_fired_at = datetime('now'),
-               updated_at = datetime('now')
-         WHERE id = $aid;
-      "
+        db:exec "$db" "
+          INSERT INTO attachment_fires (attachment_id, situation_embedding)
+          VALUES ($aid, $q_emb);
+          UPDATE attachments
+             SET fire_count = fire_count + 1,
+                 last_fired_at = datetime('now'),
+                 updated_at = datetime('now')
+           WHERE id = $aid;
+        "
 
-      local row
-      row="$(db:query-json "$db" "
-        SELECT id, prediction, inner_voice, affect, confidence, health
-        FROM attachments
-        WHERE id = $aid;
-      ")"
+        local row sig
+        row="$(db:query-json "$db" "
+          SELECT id, shape_signature, prediction, inner_voice, affect, confidence, health
+          FROM attachments
+          WHERE id = $aid;
+        ")"
+        sig="$(jq -r '.[0].shape_signature' <<< "$row")"
 
-      jq -c --arg score "$score" '.[0] + {score: ($score | tonumber)}' <<< "$row"
-    done <<< "$ranked"
-  } | jq -sc '.'
+        # Log global fire (bonus telemetry; failures silent).
+        attachments:log-global-fire "$project" "$sig"
+
+        # Drop shape_signature from the priming JSON — the coordinator
+        # doesn't need it, and it would just add noise to the block.
+        jq -c --arg score "$score" 'del(.[0].shape_signature) | .[0] + {score: ($score | tonumber)}' <<< "$row"
+      done <<< "$ranked"
+    } | jq -sc '.'
+  )"
+
+  # Also query the global pool. Global results are appended after local
+  # ones (callers cap by top_k on the combined list if desired). Global
+  # entries are tagged with "global": true so downstream consumers can
+  # distinguish or prefer locals.
+  local global_fires
+  global_fires="$(attachments:fire-global "$embedding" "$top_k" 2> /dev/null || printf '[]')"
+
+  # Merge locals + globals, dedup by id-and-global (locals and globals
+  # may have overlapping ids; the 'global' flag distinguishes them).
+  jq -sc '.[0] + .[1] | unique_by([.id, (.global // false)])' \
+    <<< "$(printf '%s\n%s' "$local_fires" "$global_fires")"
 }
 
 export -f attachments:fire

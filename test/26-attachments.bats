@@ -20,8 +20,13 @@ setup() {
   export HOME="${BATS_TEST_TMPDIR}/home"
   mkdir -p "$HOME"
 
+  # SCRATCH_CONFIG_DIR must be overridden too — attachments:global-db-path
+  # reads this directly to place attachments-global.db alongside the
+  # project dirs. Defaulting to $HOME/.config/scratch would be fine, but
+  # making it explicit keeps every test in one clean tmpdir.
+  export SCRATCH_CONFIG_DIR="${BATS_TEST_TMPDIR}/config"
   export SCRATCH_PROJECTS_DIR="${BATS_TEST_TMPDIR}/projects"
-  mkdir -p "${SCRATCH_PROJECTS_DIR}/testproj"
+  mkdir -p "$SCRATCH_CONFIG_DIR" "${SCRATCH_PROJECTS_DIR}/testproj"
   printf '{"root":"/tmp/fake","is_git":false,"exclude":[]}\n' \
     > "${SCRATCH_PROJECTS_DIR}/testproj/settings.json"
 
@@ -876,4 +881,174 @@ JSON
   # Both 'yes' and '?' should appear
   [[ "$output" == *"yes"* ]]
   [[ "$output" == *"?"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Phase 5: global DB + emergent globality
+# ---------------------------------------------------------------------------
+
+@test "attachments:global-db-path resolves under SCRATCH_CONFIG_DIR" {
+  run attachments:global-db-path
+  is "$status" 0
+  is "$output" "${SCRATCH_CONFIG_DIR}/attachments-global.db"
+}
+
+@test "attachments:global-ensure creates both tables and records migration" {
+  attachments:global-ensure
+
+  local db
+  db="$(attachments:global-db-path)"
+  [[ -f "$db" ]]
+
+  run db:exists "$db" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='global_attachments';"
+  is "$status" 0
+  run db:exists "$db" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='global_fires';"
+  is "$status" 0
+  run db:exists "$db" "SELECT 1 FROM migrations WHERE name='001-initial.sql';"
+  is "$status" 0
+}
+
+@test "attachments:log-global-fire inserts a slim record" {
+  attachments:log-global-fire "proj-a" "deadbeef01"
+  attachments:log-global-fire "proj-b" "deadbeef01"
+  local db
+  db="$(attachments:global-db-path)"
+  run db:query "$db" "SELECT count(*) FROM global_fires WHERE shape_signature='deadbeef01';"
+  is "$output" "2"
+}
+
+@test "attachments:fire logs global fire alongside local fire" {
+  attachments:seed "$PROJECT" "pred" '[1.0,0.0,0.0]' "voice" "wary"
+  attachments:fire "$PROJECT" '[1.0,0.0,0.0]' 5 > /dev/null
+
+  local gdb sig
+  gdb="$(attachments:global-db-path)"
+  sig="$(db:query "$(attachments:db-path "$PROJECT")" "SELECT shape_signature FROM attachments WHERE id=1;")"
+
+  run db:query "$gdb" "SELECT count(*) FROM global_fires WHERE shape_signature='$sig' AND project='$PROJECT';"
+  is "$output" "1"
+}
+
+@test "attachments:fire merges local and global hits with a global flag" {
+  # Local attachment
+  attachments:seed "$PROJECT" "local pred" '[1.0,0.0,0.0]' "local v" "wary"
+
+  # Inject a global-only attachment directly
+  attachments:global-ensure
+  local gdb
+  gdb="$(attachments:global-db-path)"
+  db:exec "$gdb" "
+    INSERT INTO global_attachments (shape_signature, prediction, prediction_embedding, inner_voice, affect)
+    VALUES ('globalsig001', 'global pred', '[0.9,0.1,0.0]', 'global v', 'curious');
+  "
+
+  run attachments:fire "$PROJECT" '[1.0,0.0,0.0]' 5
+  is "$status" 0
+
+  local n has_global
+  n="$(jq 'length' <<< "$output")"
+  has_global="$(jq '[.[] | select(.global == true)] | length' <<< "$output")"
+  [[ "$n" -ge 2 ]]
+  [[ "$has_global" -ge 1 ]]
+}
+
+@test "attachments:fire-global returns empty when global DB has nothing live" {
+  run attachments:fire-global '[1.0,0.0]' 5
+  is "$status" 0
+  is "$output" "[]"
+}
+
+@test "attachments:check-promotion promotes attachment with ≥2 cross-project fires" {
+  # Seed a project attachment; grab its signature.
+  attachments:seed "$PROJECT" "shared pred" '[1.0,0.0,0.0]' "v" "curious"
+  local pdb
+  pdb="$(attachments:db-path "$PROJECT")"
+  local sig
+  sig="$(db:query "$pdb" "SELECT shape_signature FROM attachments WHERE id=1;")"
+
+  # Simulate 2 distinct projects firing the same signature
+  attachments:log-global-fire "$PROJECT" "$sig"
+  attachments:log-global-fire "other-proj" "$sig"
+
+  # Before: scope is 'project'
+  run db:query "$pdb" "SELECT scope FROM attachments WHERE id=1;"
+  is "$output" "project"
+
+  attachments:check-promotion "$PROJECT"
+
+  # After: scope is 'global_candidate' locally; global_attachments has the row.
+  run db:query "$pdb" "SELECT scope FROM attachments WHERE id=1;"
+  is "$output" "global_candidate"
+
+  local gdb
+  gdb="$(attachments:global-db-path)"
+  local got
+  got="$(db:query "$gdb" "SELECT scope, origin_project FROM global_attachments WHERE shape_signature='$sig';")"
+  is "$got" $'global_candidate\t'"$PROJECT"
+}
+
+@test "attachments:check-promotion does not promote with only 1 project firing" {
+  attachments:seed "$PROJECT" "only-one pred" '[1.0,0.0,0.0]' "v" "wary"
+  local pdb
+  pdb="$(attachments:db-path "$PROJECT")"
+  local sig
+  sig="$(db:query "$pdb" "SELECT shape_signature FROM attachments WHERE id=1;")"
+
+  attachments:log-global-fire "$PROJECT" "$sig"
+  attachments:log-global-fire "$PROJECT" "$sig"
+  attachments:log-global-fire "$PROJECT" "$sig"
+
+  attachments:check-promotion "$PROJECT"
+
+  run db:query "$pdb" "SELECT scope FROM attachments WHERE id=1;"
+  is "$output" "project"
+}
+
+@test "attachments:check-promotion graduates global_candidate to global" {
+  attachments:seed "$PROJECT" "mature pred" '[1.0,0.0,0.0]' "v" "eager"
+  local pdb
+  pdb="$(attachments:db-path "$PROJECT")"
+  local sig
+  sig="$(db:query "$pdb" "SELECT shape_signature FROM attachments WHERE id=1;")"
+
+  # Two distinct projects + lots of fires (≥5)
+  attachments:log-global-fire "$PROJECT" "$sig"
+  attachments:log-global-fire "other-proj" "$sig"
+  attachments:log-global-fire "other-proj" "$sig"
+  attachments:log-global-fire "other-proj" "$sig"
+  attachments:log-global-fire "other-proj" "$sig"
+
+  attachments:check-promotion "$PROJECT"
+
+  local gdb
+  gdb="$(attachments:global-db-path)"
+  run db:query "$gdb" "SELECT scope FROM global_attachments WHERE shape_signature='$sig';"
+  is "$output" "global"
+  run db:query "$pdb" "SELECT scope FROM attachments WHERE id=1;"
+  is "$output" "global"
+}
+
+@test "attachments:sweep-global-orphans decays global attachments whose origin is gone" {
+  attachments:global-ensure
+  local gdb
+  gdb="$(attachments:global-db-path)"
+
+  # Real origin project
+  db:exec "$gdb" "INSERT INTO global_attachments
+    (shape_signature, prediction, prediction_embedding, inner_voice, affect, origin_project)
+    VALUES ('sig-alive', 'p', '[0.1]', 'v', 'wary', '$PROJECT');"
+  # Fake origin project (no DB on disk)
+  db:exec "$gdb" "INSERT INTO global_attachments
+    (shape_signature, prediction, prediction_embedding, inner_voice, affect, origin_project)
+    VALUES ('sig-orphan', 'p', '[0.1]', 'v', 'wary', 'nonexistent');"
+
+  # Create the real project's DB so sweep finds it alive
+  attachments:ensure "$PROJECT" > /dev/null
+
+  attachments:sweep-global-orphans
+
+  run db:query "$gdb" "SELECT health FROM global_attachments WHERE shape_signature='sig-alive';"
+  is "$output" "1.0"
+  run db:query "$gdb" "SELECT health FROM global_attachments WHERE shape_signature='sig-orphan';"
+  is "$output" "0.5"
 }
