@@ -43,15 +43,34 @@ has-commands sqlite3
 #-------------------------------------------------------------------------------
 _db:_sql() {
   # foreign_keys is per-connection and must be set on every sqlite3 call.
-  # busy_timeout tells SQLite to spin waiting for a lock rather than
-  # failing immediately with "database is locked". Without it, the
-  # summarize stage's 8 parallel workers racing index:update-summary
-  # writes were dropping entries wholesale — especially for passthrough
-  # (commits) where workers have no LLM call pacing them.
-  printf 'PRAGMA foreign_keys = ON;\nPRAGMA busy_timeout = 10000;\n%s' "$1"
+  printf 'PRAGMA foreign_keys = ON;\n%s' "$1"
 }
 
 export -f '_db:_sql'
+
+#-------------------------------------------------------------------------------
+# _db:_sqlite3 [SQLITE_ARGS...]
+#
+# Invoke the sqlite3 CLI with a connection-level busy timeout preconfigured
+# via the `.timeout MS` dot-command. All extra args pass through verbatim
+# (e.g. `-separator`, `-json`, the db path).
+#
+# Why dot-command and not SQL PRAGMA: `PRAGMA busy_timeout = 10000;` echoes
+# the new value to stdout, which would pollute db:query / db:query-json
+# output with a spurious "10000" line. The `.timeout` dot-command sets the
+# same knob silently.
+#
+# The busy timeout (10s) makes concurrent writers wait for the write lock
+# to clear instead of failing immediately with "database is locked" — a
+# problem the indexer hit when the summarize stage's 8 parallel workers
+# raced through index:update-summary and dropped most writes wholesale
+# (especially on the commit passthrough path with no LLM pacing).
+#-------------------------------------------------------------------------------
+_db:_sqlite3() {
+  sqlite3 -cmd '.timeout 10000' "$@"
+}
+
+export -f '_db:_sqlite3'
 
 #-------------------------------------------------------------------------------
 # db:quote VALUE
@@ -84,7 +103,7 @@ db:exec() {
   local sql="$2"
 
   local err
-  if ! err="$(_db:_sql "$sql" | sqlite3 "$db" 2>&1)"; then
+  if ! err="$(_db:_sql "$sql" | _db:_sqlite3 "$db" 2>&1)"; then
     die "db:exec: $err"
     return 1
   fi
@@ -104,7 +123,7 @@ db:query() {
   local sql="$2"
 
   local output
-  if ! output="$(_db:_sql "$sql" | sqlite3 -separator $'\t' "$db" 2>&1)"; then
+  if ! output="$(_db:_sql "$sql" | _db:_sqlite3 -separator $'\t' "$db" 2>&1)"; then
     die "db:query: $output"
     return 1
   fi
@@ -127,7 +146,7 @@ db:query-json() {
   local sql="$2"
 
   local output
-  if ! output="$(_db:_sql "$sql" | sqlite3 -json "$db" 2>&1)"; then
+  if ! output="$(_db:_sql "$sql" | _db:_sqlite3 -json "$db" 2>&1)"; then
     die "db:query-json: $output"
     return 1
   fi
@@ -153,7 +172,7 @@ db:exists() {
   local sql="$2"
 
   local output
-  if ! output="$(_db:_sql "$sql" | sqlite3 "$db" 2>&1)"; then
+  if ! output="$(_db:_sql "$sql" | _db:_sqlite3 "$db" 2>&1)"; then
     die "db:exists: $output"
     return 1
   fi
@@ -178,7 +197,7 @@ db:init() {
   [[ -d "$dir" ]] || mkdir -p "$dir"
 
   # WAL is persistent; foreign_keys is per-connection (handled by _db:_sql)
-  sqlite3 "$db" "PRAGMA journal_mode = WAL;" > /dev/null
+  _db:_sqlite3 "$db" "PRAGMA journal_mode = WAL;" > /dev/null
 }
 
 export -f db:init
