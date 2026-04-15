@@ -1,0 +1,5 @@
+{
+  "name": "relator",
+  "description": "Given two substrate situations, articulate a short label for how they relate. Part of the attachments consolidation pipeline: the relator runs once per candidate substrate pair, labeling structural analogies the graph-cluster step turns into attachments.",
+  "profile": "fast"
+}

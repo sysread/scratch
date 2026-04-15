@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# helpers/index/consolidate-attachments PROJECT
+#
+# Run one consolidation pass for the attachments memory model. This is
+# invoked from bin/scratch-index after the file/commit/chat indexing
+# phases complete — the "meditation" step of the indexer. See
+# /root/.claude/plans/piped-prancing-cat.md.
+#
+# Emits "ok <stage> <n>" lines per phase so working:run ticks the
+# progress bar alongside the other index stages.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../../lib/base.sh"
+  source "$SCRIPTDIR/../../lib/attachments.sh"
+}
+
+project="${1:-}"
+
+if [[ -z "$project" ]]; then
+  die "consolidate-attachments: PROJECT argument required"
+  exit 1
+fi
+
+attachments:consolidate "$project"

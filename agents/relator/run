@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# relator agent - articulate a short label for a substrate pair
+#
+# stdin: JSON object {"a": {...}, "b": {...}} where each value is a
+#        substrate_events row (fields: situation, outcome, affect, kind).
+# stdout: JSON object {"label": "...", "kind": "..."}.
+#
+# The label is a short (≤ 12 words) human-readable handle for how A and
+# B relate — the kind of thing a person might say out loud if asked
+# "what's similar about these two moments?" kind is one of:
+#   "pattern"       — both instances of the same recurring situation
+#   "contrast"      — same situation with opposite outcomes
+#   "prerequisite"  — A seems to set up B
+#   "consequence"   — B seems to follow from A
+#   "orthogonal"    — weak/no relation (caller may discard)
+#
+# Runs on the fast profile with disable_thinking. If the model returns
+# malformed JSON, we try once more with a retry prompt; second failure
+# emits a safe fallback ({"label":"similar situation","kind":"pattern"})
+# rather than crashing the consolidation pipeline.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+{
+  source "$SCRATCH_HOME/lib/base.sh"
+  source "$SCRATCH_HOME/lib/prompt.sh"
+  source "$SCRATCH_HOME/lib/chat.sh"
+  source "$SCRATCH_HOME/lib/model.sh"
+}
+
+RELATOR_MODEL="$(model:profile:model fast)"
+RELATOR_EXTRAS="$(
+  model:profile:extras fast |
+    jq -c '. + {venice_parameters: ((.venice_parameters // {}) + {disable_thinking: true})}'
+)"
+
+input="$(cat)"
+
+if [[ -z "$input" ]]; then
+  die "relator: empty input on stdin"
+  exit 1
+fi
+
+system_prompt="$(prompt:load relator/system)"
+user_msg="$(jq -n --argjson in "$input" '$in | @json' | jq -r .)"
+
+messages="$(
+  jq -c -n \
+    --arg s "$system_prompt" \
+    --arg u "$user_msg" \
+    '[{role:"system",content:$s},{role:"user",content:$u}]'
+)"
+
+raw="$(
+  chat:completion "$RELATOR_MODEL" "$messages" "$RELATOR_EXTRAS" |
+    chat:extract-content
+)"
+
+# The model often fences its JSON; strip ```json ... ``` wrappers first.
+raw="$(printf '%s' "$raw" | sed -e 's/^```json//' -e 's/^```//' -e 's/```$//')"
+
+if ! parsed="$(jq -c '{label: (.label // ""), kind: (.kind // "pattern")}' <<< "$raw" 2>/dev/null)"; then
+  # Safe fallback: emit a generic pattern label rather than failing the
+  # whole consolidation pass on one bad response.
+  parsed='{"label":"similar situation","kind":"pattern"}'
+fi
+
+printf '%s\n' "$parsed"

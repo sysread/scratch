@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# relator pre-fill
+#
+# Passthrough. The relator run script manages its own prompt construction.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+cat

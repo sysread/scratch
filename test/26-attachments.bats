@@ -414,3 +414,329 @@ setup() {
   is "$status" 0
   [[ "$output" == *"Texture: mostly curious"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# Phase 3: reinforce + classify-reaction
+# ---------------------------------------------------------------------------
+
+@test "attachments:classify-reaction picks disconfirm first" {
+  run attachments:classify-reaction "no, thanks, that's wrong"
+  is "$output" "disconfirm"
+}
+
+@test "attachments:classify-reaction picks confirm for satisfaction tokens" {
+  run attachments:classify-reaction "yes that's exactly right"
+  is "$output" "confirm"
+  run attachments:classify-reaction "thanks"
+  is "$output" "confirm"
+  run attachments:classify-reaction "perfect"
+  is "$output" "confirm"
+}
+
+@test "attachments:classify-reaction returns neutral for ambiguous text" {
+  run attachments:classify-reaction "tell me about the weather"
+  is "$output" "neutral"
+}
+
+@test "attachments:reinforce bumps confirm and updates confidence" {
+  attachments:seed "$PROJECT" "p" '[1.0,0.0]' "v" "wary"
+  run attachments:reinforce 1 "confirm" "$PROJECT"
+  is "$status" 0
+  local db
+  db="$(attachments:db-path "$PROJECT")"
+  run db:query "$db" "SELECT confirm_count, confidence FROM attachments WHERE id=1;"
+  # Laplace: confirm=1, disconfirm=0 → (1+1)/(1+0+2) = 2/3 = 0.6666...
+  # confidence is stored as REAL; sqlite prints it without trimming.
+  local conf
+  conf="$(db:query "$db" "SELECT confirm_count FROM attachments WHERE id=1;")"
+  is "$conf" "1"
+}
+
+@test "attachments:reinforce bumps disconfirm" {
+  attachments:seed "$PROJECT" "p" '[1.0,0.0]' "v" "wary"
+  attachments:reinforce 1 "disconfirm" "$PROJECT"
+  local db
+  db="$(attachments:db-path "$PROJECT")"
+  run db:query "$db" "SELECT disconfirm_count FROM attachments WHERE id=1;"
+  is "$output" "1"
+}
+
+@test "attachments:reinforce resolves unresolved fires in the last 10 minutes" {
+  attachments:seed "$PROJECT" "p" '[1.0,0.0]' "v" "wary"
+  attachments:fire "$PROJECT" '[1.0,0.0]' 5 > /dev/null
+
+  local db
+  db="$(attachments:db-path "$PROJECT")"
+  run db:query "$db" "SELECT was_confirmed IS NULL FROM attachment_fires WHERE attachment_id=1;"
+  is "$output" "1"
+
+  attachments:reinforce 1 "confirm" "$PROJECT"
+
+  run db:query "$db" "SELECT was_confirmed FROM attachment_fires WHERE attachment_id=1;"
+  is "$output" "1"
+}
+
+@test "attachments:reinforce with neutral is a no-op" {
+  attachments:seed "$PROJECT" "p" '[1.0,0.0]' "v" "wary"
+  run attachments:reinforce 1 "neutral" "$PROJECT"
+  is "$status" 0
+  local db
+  db="$(attachments:db-path "$PROJECT")"
+  run db:query "$db" "SELECT confirm_count + disconfirm_count FROM attachments WHERE id=1;"
+  is "$output" "0"
+}
+
+@test "attachments:apply-reaction applies classify to recent fires" {
+  attachments:seed "$PROJECT" "p" '[1.0,0.0]' "v" "wary"
+  attachments:fire "$PROJECT" '[1.0,0.0]' 5 > /dev/null
+
+  attachments:apply-reaction "$PROJECT" "thanks, perfect"
+
+  local db
+  db="$(attachments:db-path "$PROJECT")"
+  run db:query "$db" "SELECT confirm_count, disconfirm_count FROM attachments WHERE id=1;"
+  is "$output" $'1\t0'
+}
+
+# ---------------------------------------------------------------------------
+# Phase 3: associate + substrate-neighbors
+# ---------------------------------------------------------------------------
+
+@test "attachments:associate inserts and bumps reinforcement on duplicate" {
+  attachments:record-turn "$PROJECT" "s" "0" "moment A"
+  attachments:record-turn "$PROJECT" "s" "1" "moment B"
+
+  local id1 id2
+  id1="$(attachments:associate "$PROJECT" 1 2 "label one" '[0.1,0.2]')"
+  id2="$(attachments:associate "$PROJECT" 1 2 "label one" '[0.1,0.2]')"
+  is "$id1" "$id2"
+
+  local db
+  db="$(attachments:db-path "$PROJECT")"
+  run db:query "$db" "SELECT reinforcement FROM associations WHERE id=$id1;"
+  is "$output" "2"
+}
+
+@test "attachments:associate allows multiple labels per pair" {
+  attachments:record-turn "$PROJECT" "s" "0" "A"
+  attachments:record-turn "$PROJECT" "s" "1" "B"
+
+  local id1 id2
+  id1="$(attachments:associate "$PROJECT" 1 2 "label one" '[0.1,0.2]')"
+  id2="$(attachments:associate "$PROJECT" 1 2 "label two" '[0.3,0.4]')"
+  [[ "$id1" != "$id2" ]]
+}
+
+@test "attachments:substrate-neighbors emits dedup pairs in canonical order" {
+  attachments:record-turn "$PROJECT" "s" "0" "a"
+  attachments:record-turn "$PROJECT" "s" "1" "b"
+  attachments:record-turn "$PROJECT" "s" "2" "c"
+
+  # Hand-set embeddings so we control the cosine topology
+  local db
+  db="$(attachments:db-path "$PROJECT")"
+  db:exec "$db" "
+    UPDATE substrate_events SET situation_embedding='[1.0,0.0,0.0]' WHERE id=1;
+    UPDATE substrate_events SET situation_embedding='[0.9,0.1,0.0]' WHERE id=2;
+    UPDATE substrate_events SET situation_embedding='[0.0,1.0,0.0]' WHERE id=3;
+  "
+
+  run attachments:substrate-neighbors "$PROJECT" "" 8
+  is "$status" 0
+  # Expect (1,2) as the closest pair; canonical order (smaller first)
+  [[ "$output" == *$'1\t2'* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Phase 3: cluster-associations
+# ---------------------------------------------------------------------------
+
+@test "attachments:cluster-associations groups near-duplicate labels" {
+  attachments:record-turn "$PROJECT" "s" "0" "a"
+  attachments:record-turn "$PROJECT" "s" "1" "b"
+  attachments:record-turn "$PROJECT" "s" "2" "c"
+  attachments:record-turn "$PROJECT" "s" "3" "d"
+
+  # Two near-duplicate labels (high cosine) plus one distinct one.
+  attachments:associate "$PROJECT" 1 2 "ambiguous scope" '[1.0,0.0,0.0]' > /dev/null
+  attachments:associate "$PROJECT" 2 3 "ambiguous scope similar" '[0.95,0.05,0.0]' > /dev/null
+  attachments:associate "$PROJECT" 3 4 "user wants terse" '[0.0,1.0,0.0]' > /dev/null
+
+  local clusters
+  clusters="$(attachments:cluster-associations "$PROJECT" 0.15)"
+  local n
+  n="$(printf '%s\n' "$clusters" | grep -c '^{')"
+  is "$n" "2"
+}
+
+# ---------------------------------------------------------------------------
+# Phase 3: mint-cluster (via stubbed agent)
+# ---------------------------------------------------------------------------
+
+@test "attachments:mint-cluster skips below count threshold" {
+  attachments:ensure "$PROJECT"
+  local cluster='{"association_ids":[1,2],"total_reinforcement":10,"count":2,"centroid_embedding":[0.1,0.2],"sample_labels":["x"]}'
+  run attachments:mint-cluster "$PROJECT" "$cluster" 3 5
+  is "$status" 0
+  is "$output" ""
+}
+
+@test "attachments:mint-cluster skips below reinforcement threshold" {
+  attachments:ensure "$PROJECT"
+  local cluster='{"association_ids":[1,2,3],"total_reinforcement":2,"count":3,"centroid_embedding":[0.1,0.2],"sample_labels":["x"]}'
+  run attachments:mint-cluster "$PROJECT" "$cluster" 3 5
+  is "$status" 0
+  is "$output" ""
+}
+
+@test "attachments:mint-cluster mints when minter confirms (stubbed agent)" {
+  # Seed real substrate + associations so provenance joins find rows
+  attachments:record-turn "$PROJECT" "s" "0" "A"
+  attachments:record-turn "$PROJECT" "s" "1" "B"
+  attachments:record-turn "$PROJECT" "s" "2" "C"
+  attachments:associate "$PROJECT" 1 2 "label1" '[1.0,0.0,0.0]' > /dev/null
+  attachments:associate "$PROJECT" 2 3 "label2" '[0.9,0.1,0.0]' > /dev/null
+  attachments:associate "$PROJECT" 1 3 "label3" '[0.95,0.05,0.0]' > /dev/null
+
+  # Stub the agent invocation via SCRATCH_ATTACHMENTS_AGENT_CMD
+  export SCRATCH_ATTACHMENTS_AGENT_CMD="${BATS_TEST_TMPDIR}/stub-agent"
+  cat > "$SCRATCH_ATTACHMENTS_AGENT_CMD" << 'STUB'
+#!/usr/bin/env bash
+cat > /dev/null  # discard input
+case "$1" in
+  attachment-minter)
+    printf '{"confirm":true,"prediction":"in X, user likely wants Y","inner_voice":"just do it","affect":"confident","confidence":0.7}\n'
+    ;;
+  *) exit 1 ;;
+esac
+STUB
+  chmod +x "$SCRATCH_ATTACHMENTS_AGENT_CMD"
+
+  local cluster='{"association_ids":[1,2,3],"total_reinforcement":10,"count":3,"centroid_embedding":[1.0,0.0,0.0],"sample_labels":["label1","label2","label3"]}'
+  run attachments:mint-cluster "$PROJECT" "$cluster" 3 5
+  is "$status" 0
+  [[ "$output" =~ ^[0-9]+$ ]]
+
+  local aid="$output"
+  local db
+  db="$(attachments:db-path "$PROJECT")"
+
+  # Attachment inserted
+  run db:query "$db" "SELECT prediction, affect, confidence FROM attachments WHERE id=$aid;"
+  is "$output" $'in X, user likely wants Y\tconfident\t0.7'
+
+  # Provenance includes every substrate event and every association
+  run db:query "$db" "SELECT kind, count(*) FROM attachment_provenance WHERE attachment_id=$aid GROUP BY kind ORDER BY kind;"
+  is "$output" $'association\t3\nsubstrate\t3'
+}
+
+@test "attachments:mint-cluster skips when minter declines (stubbed agent)" {
+  attachments:record-turn "$PROJECT" "s" "0" "A"
+  attachments:record-turn "$PROJECT" "s" "1" "B"
+  attachments:record-turn "$PROJECT" "s" "2" "C"
+  attachments:associate "$PROJECT" 1 2 "label1" '[1.0,0.0,0.0]' > /dev/null
+  attachments:associate "$PROJECT" 2 3 "label2" '[0.9,0.1,0.0]' > /dev/null
+  attachments:associate "$PROJECT" 1 3 "label3" '[0.95,0.05,0.0]' > /dev/null
+
+  export SCRATCH_ATTACHMENTS_AGENT_CMD="${BATS_TEST_TMPDIR}/stub-agent-decline"
+  cat > "$SCRATCH_ATTACHMENTS_AGENT_CMD" << 'STUB'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '{"confirm":false}\n'
+STUB
+  chmod +x "$SCRATCH_ATTACHMENTS_AGENT_CMD"
+
+  local cluster='{"association_ids":[1,2,3],"total_reinforcement":10,"count":3,"centroid_embedding":[1.0,0.0,0.0],"sample_labels":["label1","label2","label3"]}'
+  run attachments:mint-cluster "$PROJECT" "$cluster" 3 5
+  is "$status" 0
+  is "$output" ""
+
+  local db
+  db="$(attachments:db-path "$PROJECT")"
+  run db:query "$db" "SELECT count(*) FROM attachments;"
+  is "$output" "0"
+}
+
+@test "attachments:mint-cluster is idempotent by signature" {
+  attachments:record-turn "$PROJECT" "s" "0" "A"
+  attachments:record-turn "$PROJECT" "s" "1" "B"
+  attachments:record-turn "$PROJECT" "s" "2" "C"
+  attachments:associate "$PROJECT" 1 2 "l1" '[1.0,0.0,0.0]' > /dev/null
+  attachments:associate "$PROJECT" 2 3 "l2" '[0.9,0.1,0.0]' > /dev/null
+  attachments:associate "$PROJECT" 1 3 "l3" '[0.95,0.05,0.0]' > /dev/null
+
+  export SCRATCH_ATTACHMENTS_AGENT_CMD="${BATS_TEST_TMPDIR}/stub-agent-idem"
+  cat > "$SCRATCH_ATTACHMENTS_AGENT_CMD" << 'STUB'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '{"confirm":true,"prediction":"p","inner_voice":"v","affect":"curious","confidence":0.5}\n'
+STUB
+  chmod +x "$SCRATCH_ATTACHMENTS_AGENT_CMD"
+
+  local cluster='{"association_ids":[1,2,3],"total_reinforcement":10,"count":3,"centroid_embedding":[1.0,0.0,0.0],"sample_labels":["l1","l2","l3"]}'
+
+  # First mint succeeds
+  run attachments:mint-cluster "$PROJECT" "$cluster" 3 5
+  is "$status" 0
+  [[ "$output" =~ ^[0-9]+$ ]]
+
+  # Second call on identical centroid is a no-op (signature collides)
+  run attachments:mint-cluster "$PROJECT" "$cluster" 3 5
+  is "$status" 0
+  is "$output" ""
+
+  local db
+  db="$(attachments:db-path "$PROJECT")"
+  run db:query "$db" "SELECT count(*) FROM attachments;"
+  is "$output" "1"
+}
+
+# ---------------------------------------------------------------------------
+# Phase 3: decay
+# ---------------------------------------------------------------------------
+
+@test "attachments:decay reduces health for never-fired attachments" {
+  attachments:seed "$PROJECT" "p" '[1.0,0.0]' "v" "wary"
+
+  local db
+  db="$(attachments:db-path "$PROJECT")"
+  local before
+  before="$(db:query "$db" "SELECT health FROM attachments WHERE id=1;")"
+  is "$before" "1.0"
+
+  attachments:decay "$PROJECT"
+
+  local after
+  after="$(db:query "$db" "SELECT health FROM attachments WHERE id=1;")"
+  # 1.0 - 0.02 = 0.98
+  is "$after" "0.98"
+}
+
+@test "attachments:decay hits attachments with more disconfirm than confirm" {
+  attachments:seed "$PROJECT" "p" '[1.0,0.0]' "v" "wary"
+  local db
+  db="$(attachments:db-path "$PROJECT")"
+
+  # Simulate disconfirm dominance
+  db:exec "$db" "UPDATE attachments SET disconfirm_count=3, confirm_count=0, last_fired_at=datetime('now') WHERE id=1;"
+
+  attachments:decay "$PROJECT"
+
+  local after
+  after="$(db:query "$db" "SELECT health FROM attachments WHERE id=1;")"
+  # Fresh last_fired_at so no stale decay; disconfirm path: 1.0 - 0.1 = 0.9
+  is "$after" "0.9"
+}
+
+@test "attachments:decay leaves fresh-and-confirmed attachments alone" {
+  attachments:seed "$PROJECT" "p" '[1.0,0.0]' "v" "wary"
+  local db
+  db="$(attachments:db-path "$PROJECT")"
+  db:exec "$db" "UPDATE attachments SET confirm_count=3, disconfirm_count=0, last_fired_at=datetime('now') WHERE id=1;"
+
+  attachments:decay "$PROJECT"
+
+  local after
+  after="$(db:query "$db" "SELECT health FROM attachments WHERE id=1;")"
+  is "$after" "1.0"
+}

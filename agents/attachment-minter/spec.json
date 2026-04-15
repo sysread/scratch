@@ -1,0 +1,5 @@
+{
+  "name": "attachment-minter",
+  "description": "Given a cluster of associations (pairs of substrate events linked by similar relation labels), decide whether there is a coherent tendency worth storing as an attachment, and if so emit the prediction, inner voice, affect tag, and initial confidence. Runs once per candidate cluster in the consolidation pipeline.",
+  "profile": "fast"
+}
