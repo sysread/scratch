@@ -142,6 +142,19 @@ subcommand-name() {
 }
 
 #-------------------------------------------------------------------------------
+# Record one command in _CMD_DEPS, attributing it to NAME. De-dupes per name.
+#-------------------------------------------------------------------------------
+_record-cmd() {
+  local cmd="$1"
+  local name="$2"
+  if [[ -z "${_CMD_DEPS[$cmd]+set}" ]]; then
+    _CMD_DEPS[$cmd]="$name"
+  elif [[ " ${_CMD_DEPS[$cmd]} " != *" $name "* ]]; then
+    _CMD_DEPS[$cmd]+=" $name"
+  fi
+}
+
+#-------------------------------------------------------------------------------
 # Scan a single file for dependency declarations (has-commands calls).
 # Each command found is attributed to the given display name in _CMD_DEPS.
 #-------------------------------------------------------------------------------
@@ -154,13 +167,22 @@ scan-commands() {
   while IFS= read -r line; do
     line="${line#*"${_KW_HAS_CMD}" }"
     for cmd in $line; do
-      if [[ -z "${_CMD_DEPS[$cmd]+set}" ]]; then
-        _CMD_DEPS[$cmd]="$name"
-      elif [[ " ${_CMD_DEPS[$cmd]} " != *" $name "* ]]; then
-        _CMD_DEPS[$cmd]+=" $name"
-      fi
+      _record-cmd "$cmd" "$name"
     done
   done < <(grep -h "${_KW_HAS_CMD} " "$file" 2> /dev/null | grep -v '^[[:space:]]*#')
+}
+
+#-------------------------------------------------------------------------------
+# Record one env var in _CMD_ENVS, attributing it to NAME. De-dupes per name.
+#-------------------------------------------------------------------------------
+_record-env() {
+  local var="$1"
+  local name="$2"
+  if [[ -z "${_CMD_ENVS[$var]+set}" ]]; then
+    _CMD_ENVS[$var]="$name"
+  elif [[ " ${_CMD_ENVS[$var]} " != *" $name "* ]]; then
+    _CMD_ENVS[$var]+=" $name"
+  fi
 }
 
 #-------------------------------------------------------------------------------
@@ -176,13 +198,86 @@ scan-envs() {
   while IFS= read -r line; do
     line="${line#*"${_KW_REQ_ENV}" }"
     for var in $line; do
-      if [[ -z "${_CMD_ENVS[$var]+set}" ]]; then
-        _CMD_ENVS[$var]="$name"
-      elif [[ " ${_CMD_ENVS[$var]} " != *" $name "* ]]; then
-        _CMD_ENVS[$var]+=" $name"
-      fi
+      _record-env "$var" "$name"
     done
   done < <(grep -h "${_KW_REQ_ENV} " "$file" 2> /dev/null | grep -v '^[[:space:]]*#')
+}
+
+#-------------------------------------------------------------------------------
+# scan-via-source FILE NAME
+#
+# Source FILE in a controlled subshell with `has-commands` and
+# `require-env-vars` overridden as recorders. Captures their args via a
+# temp file (subshell can't write back to parent associative arrays
+# directly), then attributes them to NAME in _CMD_DEPS / _CMD_ENVS.
+#
+# Used for is-available files (tools/agents/toolboxes), which by
+# contract are pure-declaration scripts safe to source. This eliminates
+# the textual-grep coupling that would silently miss declarations
+# wrapped, extracted into functions, or interpolated.
+#
+# Bin/lib/helpers stay on grep (scan-commands / scan-envs) — they have
+# side effects beyond declarations and a sourcing approach would risk
+# triggering them.
+#-------------------------------------------------------------------------------
+scan-via-source() {
+  local file="$1"
+  local name="$2"
+
+  local capture
+  capture="$(mktemp)"
+
+  # Source base.sh first (sets _INCLUDED_BASE so the file's own source
+  # is a no-op), then override the recording functions, then source the
+  # target file. We wrap the whole subshell in `|| true` because the
+  # sourced is-available may call `exit 1` (e.g. editing toolbox's
+  # SCRATCH_EDIT_MODE policy gate). `exit` terminates the subshell
+  # before any inner `|| true` can catch it; without the outer one,
+  # scratch-doctor's set -e would trip on the failing subshell and
+  # silently abort the whole doctor run. We just need the declared
+  # deps — the gate's runtime decision is irrelevant here.
+  (
+    # shellcheck source=/dev/null
+    source "$SCRIPTDIR/../lib/base.sh" 2> /dev/null || true
+
+    # SC2329: these are invoked indirectly via the sourced is-available
+    # script. Shellcheck can't see that across the source boundary.
+    # shellcheck disable=SC2329
+    has-commands() {
+      local c
+      for c in "$@"; do
+        printf 'CMD\t%s\n' "$c" >> "$capture"
+      done
+    }
+    export -f has-commands
+
+    # shellcheck disable=SC2329
+    require-env-vars() {
+      local v
+      for v in "$@"; do
+        printf 'ENV\t%s\n' "$v" >> "$capture"
+      done
+    }
+    export -f require-env-vars
+
+    # SCRATCH_HOME is commonly referenced from is-available scripts.
+    # Provide it so they can resolve sibling library paths.
+    export SCRATCH_HOME
+    SCRATCH_HOME="$(cd "$SCRIPTDIR/.." && pwd)"
+
+    # shellcheck source=/dev/null
+    source "$file" 2> /dev/null || true
+  ) || true
+
+  local kind value
+  while IFS=$'\t' read -r kind value; do
+    case "$kind" in
+      CMD) _record-cmd "$value" "$name" ;;
+      ENV) _record-env "$value" "$name" ;;
+    esac
+  done < "$capture"
+
+  rm -f "$capture"
 }
 
 #-------------------------------------------------------------------------------
@@ -235,6 +330,10 @@ _scan-deps-in() {
   local pattern="$1"
   local attr_fn="$2"
   local need_x="$3"
+  # Optional fourth arg "source" → use scan-via-source instead of grep.
+  # Used for is-available files (tools/agents/toolboxes), which by
+  # contract are pure-declaration scripts safe to source.
+  local mode="${4:-grep}"
   local f
   local n
 
@@ -243,8 +342,15 @@ _scan-deps-in() {
     [[ -f "$f" ]] || continue
     [[ "$need_x" != "x" || -x "$f" ]] || continue
     n="$("$attr_fn" "$f")"
-    scan-commands "$f" "$n"
-    scan-envs "$f" "$n"
+    case "$mode" in
+      source)
+        scan-via-source "$f" "$n"
+        ;;
+      *)
+        scan-commands "$f" "$n"
+        scan-envs "$f" "$n"
+        ;;
+    esac
   done
 }
 
@@ -264,9 +370,13 @@ scan-all-deps() {
   _scan-deps-in "$SCRIPTDIR/scratch-*" subcommand-name x
   _scan-deps-in "$SCRIPTDIR/../lib/*.sh" _attr-lib any
   _scan-deps-in "$SCRIPTDIR/../helpers/*" basename x
-  _scan-deps-in "$SCRIPTDIR/../tools/*/is-available" _attr-tool x
-  _scan-deps-in "$SCRIPTDIR/../agents/*/is-available" _attr-agent x
-  _scan-deps-in "$SCRIPTDIR/../toolboxes/*/is-available" _attr-toolbox x
+  # is-available files are pure-declaration scripts (per their contract);
+  # source them with instrumented has-commands / require-env-vars rather
+  # than textual-grep so we can't be fooled by line wrapping, function
+  # extraction, or interpolation.
+  _scan-deps-in "$SCRIPTDIR/../tools/*/is-available" _attr-tool x source
+  _scan-deps-in "$SCRIPTDIR/../agents/*/is-available" _attr-agent x source
+  _scan-deps-in "$SCRIPTDIR/../toolboxes/*/is-available" _attr-toolbox x source
 }
 
 #-------------------------------------------------------------------------------

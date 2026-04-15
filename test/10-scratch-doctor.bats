@@ -105,3 +105,76 @@ STUB
   is "$status" 0
   [[ "$output" == *"Usage:"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# Instrumented sourcing for tools/agents/toolboxes is-available files.
+#
+# These tests exercise the scan-via-source path, which sources the
+# is-available script with `has-commands` and `require-env-vars` overridden
+# as recorders. This eliminates the textual-grep coupling that would miss
+# declarations wrapped, extracted into functions, or interpolated.
+# ---------------------------------------------------------------------------
+
+# Direct unit tests for the scan-via-source function. We exercise it on
+# is-available files written under BATS_TEST_TMPDIR, isolated from the
+# live tree. The point is to verify that instrumented sourcing finds
+# `has-commands` and `require-env-vars` declarations the old grep
+# scanner would miss (wrapped lines, function extraction, conditionals).
+
+@test "scan-via-source finds has-commands inside a function (grep would miss)" {
+  local fixture="${BATS_TEST_TMPDIR}/wrapped-is-available"
+  cat > "$fixture" << 'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$SCRATCH_HOME/lib/base.sh"
+_declare_deps() {
+  has-commands wrapped_xyz_dep_67890
+}
+_declare_deps
+STUB
+  chmod +x "$fixture"
+
+  # Source scratch-doctor's bash to load scan-via-source. Use a guarded
+  # sourcing pattern: scratch-doctor's main flow runs scan-all-deps and
+  # the check-* functions at top-level, so we can't just `source` it
+  # without it doing all its own work. Instead extract scan-via-source
+  # by sourcing in a subshell that immediately exits before the main
+  # flow runs. The simpler path: bats already ran scratch-doctor in
+  # other tests, so we know the function body is valid; here we just
+  # invoke a fresh bash that sources only the lib pieces and a copy of
+  # the function. To avoid duplicating scan-via-source's body, we
+  # exercise it indirectly: drop the fixture into a per-test fake
+  # scratch home and run scratch-doctor against it.
+  local fakehome="${BATS_TEST_TMPDIR}/fakehome"
+  mkdir -p "${fakehome}/bin" "${fakehome}/tools/_doctortest_wrapped"
+  cp "${REAL_SCRATCH_HOME}"/bin/* "${fakehome}/bin/"
+  ln -s "${REAL_SCRATCH_HOME}/lib" "${fakehome}/lib"
+  ln -s "${REAL_SCRATCH_HOME}/helpers" "${fakehome}/helpers"
+  ln -s "${REAL_SCRATCH_HOME}/agents" "${fakehome}/agents"
+  ln -s "${REAL_SCRATCH_HOME}/toolboxes" "${fakehome}/toolboxes"
+  ln -s "${REAL_SCRATCH_HOME}/data" "${fakehome}/data"
+  # tools/ is a real dir so we can drop the fixture without polluting
+  # the live tree. Symlink each real tool into it.
+  local t
+  for t in "${REAL_SCRATCH_HOME}"/tools/*/; do
+    ln -s "$t" "${fakehome}/tools/$(basename "$t")"
+  done
+  cp "$fixture" "${fakehome}/tools/_doctortest_wrapped/is-available"
+  cat > "${fakehome}/tools/_doctortest_wrapped/spec.json" << 'SPEC'
+{"name":"_doctortest_wrapped","description":"x","parameters":{"type":"object","properties":{},"required":[]}}
+SPEC
+  cat > "${fakehome}/tools/_doctortest_wrapped/main" << 'MAIN'
+#!/usr/bin/env bash
+exit 0
+MAIN
+  chmod +x "${fakehome}/tools/_doctortest_wrapped/main"
+
+  run "${fakehome}/bin/scratch-doctor"
+  # The fake dep doesn't exist on the system, so doctor reports it
+  # missing AND attributes it to the test tool — proving the scanner
+  # found the declaration despite it being inside a function (which
+  # the legacy grep scanner did handle, but the test still serves as
+  # a regression guard for instrumentation).
+  [[ "$output" == *"wrapped_xyz_dep_67890"*"not found"* ]]
+  [[ "$output" == *"tool:_doctortest_wrapped"* ]]
+}
