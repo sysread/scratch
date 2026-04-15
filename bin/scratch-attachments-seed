@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch attachments seed - insert an attachment by fiat
+#
+# Bypasses the normal consolidation-based mint path. Intended for test
+# fixtures and Phase 2 dogfooding: seed a few attachments, run a chat
+# session, observe the priming block inject into the coordinator's system
+# prompt.
+#
+# Examples:
+#   scratch attachments seed \
+#     --prediction "user prefers terse replies" \
+#     --inner-voice "don't pad; land on the answer fast" \
+#     --affect wary
+#
+#   # Seed with an embedding derived from a different text than the prediction
+#   scratch attachments seed \
+#     --prediction "ambiguous scope → ask for clarification" \
+#     --inner-voice "stop and ask before guessing" \
+#     --affect curious \
+#     --embed-from "user asked something vague"
+#
+#   # Seed in tests with a pre-computed embedding (skips elixir)
+#   scratch attachments seed ... --embedding-file /tmp/fixture.json
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="Insert an attachment by fiat (for testing and dogfooding)"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/project.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+  source "$SCRIPTDIR/../lib/attachments.sh"
+  source "$SCRIPTDIR/../lib/search.sh"
+}
+
+has-min-bash-version 5
+
+cmd:define "attachments seed" "$_DESC"
+cmd:optional-arg "--project" "-p" "Project name (default: detect from cwd)" "string" ""
+cmd:required-arg "--prediction" "" "Prediction text (\"in situations like X, user likely wants Y\")" "string"
+cmd:required-arg "--inner-voice" "" "What the assistant silently says to itself when this fires" "string"
+cmd:required-arg "--affect" "" "Affect tag (wary|curious|confident|uneasy|resigned|eager|uncertain|surprised)" "string"
+cmd:optional-arg "--confidence" "" "Initial confidence [0..1] (default: 0.5)" "string" "0.5"
+cmd:optional-arg "--embed-from" "" "Text to embed (default: the prediction itself)" "string" ""
+cmd:optional-arg "--embedding-file" "" "Path to a pre-computed JSON embedding (skips elixir; for tests)" "string" ""
+cmd:parse "$@"
+
+main() {
+  local project_name
+  project:resolve-name project_name "$(cmd:get --project)"
+
+  local prediction inner_voice affect confidence embed_from embedding_file
+  prediction="$(cmd:get --prediction)"
+  inner_voice="$(cmd:get --inner-voice)"
+  affect="$(cmd:get --affect)"
+  confidence="$(cmd:get --confidence)"
+  embed_from="$(cmd:get --embed-from)"
+  embedding_file="$(cmd:get --embedding-file)"
+
+  local embedding
+  if [[ -n "$embedding_file" ]]; then
+    if [[ ! -f "$embedding_file" ]]; then
+      die "embedding file not found: $embedding_file"
+    fi
+    embedding="$(cat "$embedding_file")"
+  else
+    local source_text="${embed_from:-$prediction}"
+    embedding="$(search:embed "$source_text")"
+  fi
+
+  local id
+  id="$(attachments:seed "$project_name" "$prediction" "$embedding" "$inner_voice" "$affect" "$confidence")"
+  tui:info "seeded attachment" id "$id" affect "$affect"
+}
+
+main
