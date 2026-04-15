@@ -210,11 +210,11 @@ defmodule Working do
   @rule_max_width 80
 
   def render_separator({label}) do
-    # Cyan rule followed by the green phase label, mimicking
-    # _chat:print-separator's "rule + metadata on the right" style.
-    # Rule width is the cap-or-terminal-width MINUS room for the label
-    # and a single-space gap, so total visible width matches the rule
-    # length it would have had alone.
+    # Cyan rule followed by the cyan phase label (matching the rule's
+    # color), mimicking _chat:print-separator's "rule + metadata on the
+    # right" style. Rule width is the cap-or-terminal-width MINUS room
+    # for the label and a single-space gap, so total visible width
+    # matches the rule length it would have had alone.
     target_width = min(@rule_max_width, terminal_columns())
     label_width = String.length(label) + 1
     rule_width = max(10, target_width - label_width)
@@ -222,9 +222,7 @@ defmodule Working do
 
     [
       "\n",
-      IO.ANSI.format_fragment([:cyan, bar, :reset], true),
-      " ",
-      IO.ANSI.format_fragment([:green, label, :reset], true),
+      IO.ANSI.format_fragment([:cyan, bar, " ", label, :reset], true),
       "\n"
     ]
   end
