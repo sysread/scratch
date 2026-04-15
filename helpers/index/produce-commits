@@ -57,10 +57,22 @@ has-commands jq git
 project="$1"
 root="$2"
 
-# Temp directory for commit text files
-commit_dir="$(mktemp -d /tmp/scratch-commits.XXXXXX)"
-tmp:track "$commit_dir"
-tmp:install-traps
+# Temp directory for commit text files. DO NOT install an EXIT trap to
+# clean this up here — this script finishes (and exits) as soon as it's
+# written its last JSONL line, but the pipeline's summarize stage is
+# still reading those files concurrently. A premature rm -rf here races
+# downstream readers and systematically loses commits. Ownership of the
+# temp dir lifecycle belongs to bin/scratch-index: it exports
+# SCRATCH_INDEX_TMPDIR and cleans it up after the full pipeline finishes.
+if [[ -n "${SCRATCH_INDEX_TMPDIR:-}" ]]; then
+  commit_dir="$(mktemp -d "${SCRATCH_INDEX_TMPDIR}/commits.XXXXXX")"
+else
+  # Standalone run (outside scratch-index) — install a trap; no pipeline
+  # to race against.
+  commit_dir="$(mktemp -d /tmp/scratch-commits.XXXXXX)"
+  tmp:track "$commit_dir"
+  tmp:install-traps
+fi
 
 #-------------------------------------------------------------------------------
 # detect-default-branch ROOT

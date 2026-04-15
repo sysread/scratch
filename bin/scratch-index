@@ -72,6 +72,19 @@ signal:register INT index-pipeline "_index_cleanup"
 signal:register TERM index-pipeline "_index_cleanup"
 tmp:install-traps
 
+# Shared temp dir for the whole indexing pipeline. Producers that emit
+# temp files (produce-commits, produce-conversations) use subdirs under
+# this instead of creating their own /tmp/scratch-*.XXXXXX directories
+# with per-producer EXIT traps. Per-producer traps would fire as soon as
+# each producer finishes writing JSONL — which happens well before the
+# summarize workers have finished reading those files concurrently —
+# racing them into "file not found" failures that lose most entries.
+# Owning the temp dir at the orchestrator layer guarantees it lives for
+# the full pipeline run.
+SCRATCH_INDEX_TMPDIR="$(mktemp -d /tmp/scratch-index.XXXXXX)"
+export SCRATCH_INDEX_TMPDIR
+tmp:track "$SCRATCH_INDEX_TMPDIR"
+
 cmd:define "index" "$_DESC"
 cmd:optional-arg "--project" "-p" "Project name (default: detect from cwd)" "string" ""
 cmd:parse "$@"
