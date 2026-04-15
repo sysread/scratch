@@ -224,7 +224,7 @@ defmodule Working do
     [
       "\n",
       IO.ANSI.format_fragment(
-        [:light_black_background, :light_white, :italic, " ", label, " ", :reset],
+        [:light_black_background, :light_white, " ", label, " ", :reset],
         true
       ),
       " ",

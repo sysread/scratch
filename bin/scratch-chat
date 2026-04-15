@@ -140,10 +140,10 @@ _chat:print-separator() {
   # chat and index share visual identity. Raw ANSI rather than gum so
   # the inverted block + dim rule fit on one line in one shot.
   #
-  #   \033[48;5;8;38;5;252;3m → bg 8, fg 252, italic
-  #   \033[0m                  → reset
-  #   \033[38;5;8m             → fg 8 (dim grey for the rule)
-  printf '\n\033[48;5;8;38;5;252;3m %s \033[0m \033[38;5;8m%s\033[0m\n\n' \
+  #   \033[48;5;8;38;5;252m  → bg 8, fg 252
+  #   \033[0m                → reset
+  #   \033[38;5;8m           → fg 8 (dim grey for the rule)
+  printf '\n\033[48;5;8;38;5;252m %s \033[0m \033[38;5;8m%s\033[0m\n\n' \
     "$timestamp" "$line" >&2
 }
 
