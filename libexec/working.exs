@@ -65,6 +65,19 @@ defmodule Working do
   @frames_per_phrase 25
   @tick_ms 100
 
+  # Palette for coloring rotating phrases. Each phrase gets a different
+  # color picked by its index modulo the palette, so consecutive phrases
+  # look visibly distinct. Bright variants only — the regular ANSI colors
+  # can disappear against common terminal backgrounds.
+  @phrase_colors [
+    :light_red,
+    :light_green,
+    :light_yellow,
+    :light_blue,
+    :light_magenta,
+    :light_cyan
+  ]
+
   # Same sci-fi phrase set as lib/tui.sh. Shuffled per run so each invocation
   # gets a different order.
   @phrases [
@@ -203,13 +216,16 @@ defmodule Working do
   def render_spinner({tick, phrases}) do
     frame = Enum.at(@frames, rem(tick, length(@frames)))
 
-    phrase =
-      case phrases do
-        [] -> ""
-        _ -> Enum.at(phrases, rem(div(tick, @frames_per_phrase), length(phrases)))
-      end
+    case phrases do
+      [] ->
+        frame
 
-    "#{frame} #{phrase}"
+      _ ->
+        phrase_idx = rem(div(tick, @frames_per_phrase), length(phrases))
+        phrase = Enum.at(phrases, phrase_idx)
+        color = Enum.at(@phrase_colors, rem(phrase_idx, length(@phrase_colors)))
+        [frame, " ", IO.ANSI.format_fragment([color, phrase, :reset], true)]
+    end
   end
 
   def render_progress(:hidden), do: ""
