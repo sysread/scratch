@@ -194,7 +194,8 @@ defmodule Working do
     # break between scrolling log output and the pinned status UI.
     # Flanked by blank lines above and below so the rule stands away
     # from the INFO logs above and the spinner/label below.
-    "\n" <> String.duplicate("─", terminal_columns()) <> "\n"
+    bar = String.duplicate("─", terminal_columns())
+    ["\n", IO.ANSI.format_fragment([:cyan, bar, :reset], true), "\n"]
   end
 
   def render_spinner(:hidden), do: ""
@@ -223,7 +224,11 @@ defmodule Working do
     # tokens compose cleanly. `<>` would require both sides be binaries,
     # and IO.ANSI.format_fragment/2 returns a list. Owl accepts iodata
     # from render functions.
-    ["#{label}\n", IO.ANSI.format_fragment([:green, :italic, "  ✓ up to date", :reset], true)]
+    [
+      IO.ANSI.format_fragment([:green, label, :reset], true),
+      "\n",
+      IO.ANSI.format_fragment([:green, :italic, "  ✓ up to date", :reset], true)
+    ]
   end
 
   def render_progress({done, total, _width_unused, label}) do
@@ -249,7 +254,15 @@ defmodule Working do
     padded = bar <> String.duplicate(" ", tail_pad)
     counter = "[#{done}/#{total} - #{pct}%]"
 
-    "#{label}\n[#{padded}]#{counter}"
+    # Label colored green; the bar line itself stays default-colored so
+    # the = / > characters remain visually readable against any theme.
+    [
+      IO.ANSI.format_fragment([:green, label, :reset], true),
+      "\n[",
+      padded,
+      "]",
+      counter
+    ]
   end
 
   def render_recent(:hidden), do: ""
