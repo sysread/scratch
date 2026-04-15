@@ -210,20 +210,25 @@ defmodule Working do
   @rule_max_width 80
 
   def render_separator({label}) do
-    # Phase label on the left, followed by a horizontal rule that fills
-    # to the right. Both rendered bright_black (dim grey) so the section
-    # header sits quietly above the live region without competing with
-    # the spinner/progress UI for attention. Total visible width is
-    # capped at @rule_max_width to dodge Owl's ANSI-confused column
-    # miscount that would otherwise wrap the rule onto a second line.
+    # Phase label on the left as inverted text (light_white on
+    # light_black bg, with a single space of padding either side),
+    # followed by a horizontal rule that fills to the right in dim
+    # bright_black. The inverted block makes the section header pop
+    # while keeping the rule visually quiet.
     target_width = min(@rule_max_width, terminal_columns())
-    label_width = String.length(label) + 1
-    rule_width = max(10, target_width - label_width)
+    # 1 leading space + label + 1 trailing space, then 1 separating space, then bar
+    inverted_block_width = 1 + String.length(label) + 1
+    rule_width = max(10, target_width - inverted_block_width - 1)
     bar = String.duplicate("─", rule_width)
 
     [
       "\n",
-      IO.ANSI.format_fragment([:light_black, label, " ", bar, :reset], true),
+      IO.ANSI.format_fragment(
+        [:light_black_background, :light_white, " ", label, " ", :reset],
+        true
+      ),
+      " ",
+      IO.ANSI.format_fragment([:light_black, bar, :reset], true),
       "\n"
     ]
   end

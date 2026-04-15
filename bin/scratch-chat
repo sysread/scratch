@@ -118,23 +118,33 @@ _chat:print-separator() {
   local width
   width="${COLUMNS:-$(tput cols 2> /dev/null || echo 80)}"
 
-  local sep_width=$((width / 3))
-  ((sep_width < 10)) && sep_width=10
-
-  # Bash-native line construction: pad an empty string to $sep_width columns
-  # with spaces, then substitute all spaces for box-drawing light
-  # horizontals (U+2500). Unlike underscores, these sit vertically
-  # centered in the cell, so the rule floats in the middle of the line.
-  local line
-  printf -v line '%*s' "$sep_width" ''
-  line="${line// /─}"
-
   local timestamp
   timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
 
-  printf '\n' >&2
-  gum style --foreground 8 "${line} ${timestamp}" >&2
-  printf '\n\n' >&2
+  # Visible width of the inverted block: " timestamp " (one space pad
+  # on each side of the label).
+  local block_width=$((${#timestamp} + 2))
+
+  # Rule fills what's left after the inverted block + a single space gap,
+  # capped to a minimum so it stays visible on narrow terminals.
+  local rule_width=$((width - block_width - 1))
+  ((rule_width < 10)) && rule_width=10
+
+  local line
+  printf -v line '%*s' "$rule_width" ''
+  line="${line// /─}"
+
+  # Inverted label on the left (light_white fg on light_black bg, 256-color
+  # palette indices 252 / 8), then a single-space gap, then the dim rule.
+  # Mirrors the layout libexec/working.exs's render_separator uses so
+  # chat and index share visual identity. Raw ANSI rather than gum so
+  # the inverted block + dim rule fit on one line in one shot.
+  #
+  #   \033[48;5;8;38;5;252m  → bg 8, fg 252
+  #   \033[0m                → reset
+  #   \033[38;5;8m           → fg 8 (dim grey for the rule)
+  printf '\n\033[48;5;8;38;5;252m %s \033[0m \033[38;5;8m%s\033[0m\n\n' \
+    "$timestamp" "$line" >&2
 }
 
 #-------------------------------------------------------------------------------
