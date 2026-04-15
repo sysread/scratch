@@ -42,7 +42,13 @@ has-commands sqlite3
 # enforcement everywhere without callers having to remember.
 #-------------------------------------------------------------------------------
 _db:_sql() {
-  printf 'PRAGMA foreign_keys = ON;\n%s' "$1"
+  # foreign_keys is per-connection and must be set on every sqlite3 call.
+  # busy_timeout tells SQLite to spin waiting for a lock rather than
+  # failing immediately with "database is locked". Without it, the
+  # summarize stage's 8 parallel workers racing index:update-summary
+  # writes were dropping entries wholesale — especially for passthrough
+  # (commits) where workers have no LLM call pacing them.
+  printf 'PRAGMA foreign_keys = ON;\nPRAGMA busy_timeout = 10000;\n%s' "$1"
 }
 
 export -f '_db:_sql'
