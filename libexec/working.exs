@@ -211,6 +211,19 @@ defmodule Working do
 
   def render_progress(:hidden), do: ""
 
+  # "Up to date" terminal state: render the label and a green-italic
+  # confirmation in place of the progress bar. Used when the producer
+  # announced `# total=0` so the phase still gets a visible section
+  # header and marker in scrollback — matching the shape of the files
+  # and commits phases — instead of vanishing entirely.
+  def render_progress({:up_to_date, label}) do
+    # Return iodata (a list) instead of a binary so the ANSI format
+    # tokens compose cleanly. `<>` would require both sides be binaries,
+    # and IO.ANSI.format_fragment/2 returns a list. Owl accepts iodata
+    # from render functions.
+    ["#{label}\n", IO.ANSI.format_fragment([:green, :italic, "  ✓ up to date", :reset], true)]
+  end
+
   def render_progress({done, total, _width_unused, label}) do
     pct =
       if total > 0 do
@@ -367,8 +380,12 @@ defmodule Working do
 
     # Animate the spinner on a background ticker. spawn_link ties its
     # lifetime to this process — when run/1 returns and the main flow
-    # exits, the ticker gets an exit signal and dies.
-    spawn_link(fn -> spinner_tick(0, phrases) end)
+    # exits, the ticker gets an exit signal and dies. We also trap
+    # exits + keep the pid so we can stop the ticker BEFORE the final
+    # render, otherwise its next update(:spinner, ...) clobbers the
+    # final :hidden state and smears a stale tick into scrollback.
+    Process.flag(:trap_exit, true)
+    ticker_pid = spawn_link(fn -> spinner_tick(0, phrases) end)
 
     # Read stdin line by line from the saved original GL. IO.stream returns
     # :eof when the writer closes, which terminates the stream.
@@ -379,18 +396,23 @@ defmodule Working do
 
     {done, recent, final_opts} = final_state
 
+    # Stop the spinner ticker first. If it's still running, its next
+    # Owl.LiveScreen.update(:spinner, {tick, phrases}) call will overwrite
+    # whatever final state we set below, smearing a stale frame into the
+    # scrollback snapshot. :shutdown doesn't propagate through links (we
+    # trap exits above anyway) so this is safe.
+    Process.exit(ticker_pid, :shutdown)
+
     if done == 0 and final_opts.total == 0 do
-      # Nothing to do. Hide each live block (rendering as "" removes
-      # the block from Owl's visible region) before printing the static
-      # "up to date" line, so the skeleton progress UI doesn't commit a
-      # useless empty bar to scrollback.
-      Owl.LiveScreen.update(@separator_block, :hidden)
+      # Nothing to do. Keep the separator visible and replace the progress
+      # block with an "up to date" confirmation (so the phase still gets a
+      # visible section header in scrollback, matching files/commits).
+      # Hide the spinner and recent blocks — there's nothing for either
+      # to show.
       Owl.LiveScreen.update(@spinner_block, :hidden)
-      Owl.LiveScreen.update(@progress_block, :hidden)
+      Owl.LiveScreen.update(@progress_block, {:up_to_date, final_opts.label})
       Owl.LiveScreen.update(@recent_block, :hidden)
       Owl.LiveScreen.await_render()
-
-      Owl.IO.puts(Owl.Data.tag(["✓ ", final_opts.label, " up to date"], [:green, :italic]))
     else
       # Force one last synchronous update for the progress + recent blocks
       # so any in-flight state (especially the final "ok" line from the
@@ -398,6 +420,7 @@ defmodule Working do
       # commits the live region to scrollback. Without this, a close race
       # between stdin EOF and Owl's internal render timer can commit a
       # stale snapshot — [N-1/N] instead of [N/N] in scrollback.
+      Owl.LiveScreen.update(@spinner_block, :hidden)
       Owl.LiveScreen.update(@progress_block, {done, final_opts.total, final_opts.width, final_opts.label})
       Owl.LiveScreen.update(@recent_block, recent)
       Owl.LiveScreen.await_render()
