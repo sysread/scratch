@@ -183,11 +183,19 @@ defmodule Working do
     |> max(10)
   end
 
+  # Each render function treats :hidden as "emit nothing", which makes Owl
+  # remove the block from the visible region. Used when we determine the
+  # pipeline had no work to do and want to replace the live UI with a
+  # static "up to date" message.
+  def render_separator(:hidden), do: ""
+
   def render_separator(_state) do
     # Rule spans the full terminal width — visually clean edge-to-edge
     # break between scrolling log output and the pinned status UI.
     String.duplicate("─", terminal_columns())
   end
+
+  def render_spinner(:hidden), do: ""
 
   def render_spinner({tick, phrases}) do
     frame = Enum.at(@frames, rem(tick, length(@frames)))
@@ -200,6 +208,8 @@ defmodule Working do
 
     "#{frame} #{phrase}"
   end
+
+  def render_progress(:hidden), do: ""
 
   def render_progress({done, total, _width_unused, label}) do
     pct =
@@ -226,6 +236,8 @@ defmodule Working do
 
     "#{label}\n[#{padded}]#{counter}"
   end
+
+  def render_recent(:hidden), do: ""
 
   def render_recent(recent) do
     # Owl treats an empty string as "remove the block". Render a single
@@ -367,15 +379,29 @@ defmodule Working do
 
     {done, recent, final_opts} = final_state
 
-    # Force one last synchronous update for the progress + recent blocks
-    # so any in-flight state (especially the final "ok" line from the
-    # pipeline's very last item) is reflected on screen BEFORE Owl
-    # commits the live region to scrollback. Without this, a close race
-    # between stdin EOF and Owl's internal render timer can commit a
-    # stale snapshot — [N-1/N] instead of [N/N] in scrollback.
-    Owl.LiveScreen.update(@progress_block, {done, final_opts.total, final_opts.width, final_opts.label})
-    Owl.LiveScreen.update(@recent_block, recent)
-    Owl.LiveScreen.await_render()
+    if done == 0 and final_opts.total == 0 do
+      # Nothing to do. Hide each live block (rendering as "" removes
+      # the block from Owl's visible region) before printing the static
+      # "up to date" line, so the skeleton progress UI doesn't commit a
+      # useless empty bar to scrollback.
+      Owl.LiveScreen.update(@separator_block, :hidden)
+      Owl.LiveScreen.update(@spinner_block, :hidden)
+      Owl.LiveScreen.update(@progress_block, :hidden)
+      Owl.LiveScreen.update(@recent_block, :hidden)
+      Owl.LiveScreen.await_render()
+
+      Owl.IO.puts(Owl.Data.tag(["✓ ", final_opts.label, " up to date"], [:green, :italic]))
+    else
+      # Force one last synchronous update for the progress + recent blocks
+      # so any in-flight state (especially the final "ok" line from the
+      # pipeline's very last item) is reflected on screen BEFORE Owl
+      # commits the live region to scrollback. Without this, a close race
+      # between stdin EOF and Owl's internal render timer can commit a
+      # stale snapshot — [N-1/N] instead of [N/N] in scrollback.
+      Owl.LiveScreen.update(@progress_block, {done, final_opts.total, final_opts.width, final_opts.label})
+      Owl.LiveScreen.update(@recent_block, recent)
+      Owl.LiveScreen.await_render()
+    end
   end
 end
 
