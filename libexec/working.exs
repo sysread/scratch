@@ -408,7 +408,9 @@ defmodule Working do
       # block with an "up to date" confirmation (so the phase still gets a
       # visible section header in scrollback, matching files/commits).
       # Hide the spinner and recent blocks — there's nothing for either
-      # to show.
+      # to show. Owl leaves a blank line where a hidden block used to be,
+      # which is acceptable here (better than an animating spinner frozen
+      # above an already-complete "up to date" message).
       Owl.LiveScreen.update(@spinner_block, :hidden)
       Owl.LiveScreen.update(@progress_block, {:up_to_date, final_opts.label})
       Owl.LiveScreen.update(@recent_block, :hidden)
@@ -420,7 +422,11 @@ defmodule Working do
       # commits the live region to scrollback. Without this, a close race
       # between stdin EOF and Owl's internal render timer can commit a
       # stale snapshot — [N-1/N] instead of [N/N] in scrollback.
-      Owl.LiveScreen.update(@spinner_block, :hidden)
+      #
+      # Deliberately NOT hiding the spinner block: Owl reserves a blank
+      # line where a hidden block used to be, leaving an ugly gap between
+      # the separator and the label. Letting the spinner freeze on its
+      # final frame (ticker was stopped above) is cleaner in scrollback.
       Owl.LiveScreen.update(@progress_block, {done, final_opts.total, final_opts.width, final_opts.label})
       Owl.LiveScreen.update(@recent_block, recent)
       Owl.LiveScreen.await_render()
