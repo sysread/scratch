@@ -455,6 +455,11 @@ _accumulate:_process-chunk-with-backoff() {
   local fraction="${10}"
   local floor="${11}"
   local step="${12}"
+  # Optional file path that callers (accumulate:run) use to persist the
+  # smallest fraction that worked across sibling outer chunks. If empty,
+  # we just don't write — the function still computes correctly without
+  # the cross-chunk hint.
+  local fraction_file="${13:-}"
 
   local result
   local rc
@@ -483,6 +488,14 @@ _accumulate:_process-chunk-with-backoff() {
 
   tui:warn "accumulator: chunk $(basename "$chunk_file") overflowed context; shaving to fraction ${next_fraction}" chunk "$(basename "$chunk_file")" fraction "$next_fraction"
 
+  # Persist the shaved fraction so the next outer chunk starts here
+  # instead of re-discovering this floor. We update on-overflow rather
+  # than on-success because a successful chunk at fraction F means F
+  # works; if the next chunk has similar shape, F should work again.
+  if [[ -n "$fraction_file" ]]; then
+    printf '%s' "$next_fraction" > "$fraction_file"
+  fi
+
   # Re-split THIS chunk at the smaller budget.
   local sub_max_chars
   sub_max_chars="$(_accumulate:_max-chars "$max_tokens" "$cpt" "$next_fraction")"
@@ -500,7 +513,8 @@ _accumulate:_process-chunk-with-backoff() {
     current_notes="$(_accumulate:_process-chunk-with-backoff \
       "$model" "$user_prompt" "$question" "$current_notes" \
       "$sub_chunk" "$extras" "$line_numbers" \
-      "$max_tokens" "$cpt" "$next_fraction" "$floor" "$step")" || {
+      "$max_tokens" "$cpt" "$next_fraction" "$floor" "$step" \
+      "$fraction_file")" || {
       local sub_rc=$?
       rm -rf "$sub_dir"
       return "$sub_rc"
@@ -585,23 +599,36 @@ accumulate:run() {
   max_chars="$(_accumulate:_max-chars "$max_tokens" "$cpt" "$start_fraction")"
   _accumulate:_split "$working_input" "$max_chars" "$chunks_dir"
 
-  # Reduce. The fraction is reset to start_fraction at every chunk; the
-  # backoff loop only shaves WITHIN a single failing chunk.
+  # Reduce. Persist the smallest fraction that any sub-chunk worked at
+  # across sibling outer chunks: if chunk N had to shave to 0.5, chunk
+  # N+1 starts at 0.5 instead of optimistically retrying 0.7. The
+  # recursion writes successful fractions to a temp file because $()
+  # capture forces a subshell — a regular local can't survive across
+  # the boundary back to this loop. Cleaned up below alongside chunks_dir.
+  local fraction_file
+  fraction_file="$(mktemp -t scratch-acc-fraction-XXXXXX)"
+  printf '%s' "$start_fraction" > "$fraction_file"
+
   local notes=""
   local chunk_file
+  local current_fraction="$start_fraction"
   for chunk_file in "$chunks_dir"/*; do
     [[ -f "$chunk_file" ]] || continue
+    current_fraction="$(< "$fraction_file")"
     notes="$(_accumulate:_process-chunk-with-backoff \
       "$model" "$user_prompt" "$question" "$notes" \
       "$chunk_file" "$extras" "$line_numbers" \
-      "$max_tokens" "$cpt" "$start_fraction" "$floor_fraction" "$backoff_step")" || {
+      "$max_tokens" "$cpt" "$current_fraction" "$floor_fraction" "$backoff_step" \
+      "$fraction_file")" || {
       local rc=$?
       rm -rf "$chunks_dir"
+      rm -f "$fraction_file"
       return "$rc"
     }
   done
 
   rm -rf "$chunks_dir"
+  rm -f "$fraction_file"
 
   # Final cleanup pass.
   _accumulate:_finalize "$model" "$user_prompt" "$question" "$notes" "$extras"
