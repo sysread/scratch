@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch attachments fires - recent attachment fire log
+#
+# Show when attachments fired, what primed, and whether the user's next
+# turn confirmed or disconfirmed the guess. Useful for sanity-checking
+# that firing is actually catching meaningful situations and for
+# spotting attachments that keep firing but never resolve.
+#
+# --since takes an SQLite modifier string: "-1 hour", "-30 minutes",
+# "-1 day". Omit to see the full log.
+#
+# Examples:
+#   scratch attachments fires
+#   scratch attachments fires --since "-1 hour"
+#   scratch attachments fires --since "-2 days" -p myproject
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="Show the recent attachment fire log (what primed, and whether it held)"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/project.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+  source "$SCRIPTDIR/../lib/attachments.sh"
+}
+
+has-min-bash-version 5
+
+cmd:define "attachments fires" "$_DESC"
+cmd:optional-arg "--project" "-p" "Project name (default: detect from cwd)" "string" ""
+cmd:optional-arg "--since" "" "SQLite modifier like '-1 hour', '-30 minutes', '-1 day' (default: all)" "string" ""
+cmd:parse "$@"
+
+main() {
+  local project_name
+  project:resolve-name project_name "$(cmd:get --project)"
+
+  local since
+  since="$(cmd:get --since)"
+
+  local output
+  output="$(attachments:fires "$project_name" "$since")"
+
+  local body_lines
+  body_lines="$(printf '%s\n' "$output" | tail -n +2 | grep -c '.' || true)"
+  if [[ "$body_lines" -eq 0 ]]; then
+    tui:info "no fires" project "$project_name" since "${since:-all}"
+    return 0
+  fi
+
+  printf '%s\n' "$output" | column -t -s $'\t'
+}
+
+main
