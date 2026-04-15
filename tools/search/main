@@ -28,7 +28,103 @@ source "$SCRATCH_HOME/lib/index.sh"
 # shellcheck source=/dev/null
 source "$SCRATCH_HOME/lib/search.sh"
 # shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/db.sh"
+# shellcheck source=/dev/null
 source "$SCRATCH_HOME/lib/tui.sh"
+
+#-------------------------------------------------------------------------------
+# _search:_count-stale PROJECT ROOT IS_GIT EXCLUDE CHATS_DIR LAST_EPOCH
+#
+# Emit three integers on stdout, space-separated: files_stale commits_new chats_stale.
+#
+# - files_stale: files whose mtime is newer than LAST_EPOCH (the index's
+#   last_indexed_at). Uses stat which is fast; doesn't do SHA comparison,
+#   so touched-but-unchanged files register as stale. Acceptable for a
+#   heuristic.
+# - commits_new: commits on HEAD that are not in the commit index.
+# - chats_stale: conversations whose messages.jsonl mtime is newer than
+#   LAST_EPOCH.
+#
+# Returns "0 0 0" if LAST_EPOCH is empty (i.e. index has never been built).
+#-------------------------------------------------------------------------------
+_search:_count-stale() {
+  local project="$1"
+  local root="$2"
+  local is_git="$3"
+  local exclude="$4"
+  local chats_dir="$5"
+  local last_epoch="$6"
+
+  local db
+  db="$(index:db-path "$project")"
+
+  if [[ -z "$last_epoch" ]]; then
+    printf '0 0 0\n'
+    return 0
+  fi
+
+  local files_stale=0
+  local rel fpath mtime
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    fpath="${root}/${rel}"
+    [[ -f "$fpath" ]] || continue
+    mtime="$(stat -f %m "$fpath" 2> /dev/null || stat -c %Y "$fpath" 2> /dev/null || echo 0)"
+    if ((mtime > last_epoch)); then
+      files_stale=$((files_stale + 1))
+    fi
+  done < <(project:list-files "$root" "$is_git" "$exclude")
+
+  # Commits: diff rev-list HEAD against indexed commit identifiers.
+  local commits_new=0
+  if [[ "$is_git" == "true" ]]; then
+    local indexed_commits
+    indexed_commits="$(db:query "$db" "SELECT identifier FROM entries WHERE type = 'commit';" 2> /dev/null | sort)"
+    local all_commits
+    all_commits="$(git -C "$root" rev-list HEAD 2> /dev/null | sort)"
+    if [[ -n "$all_commits" ]]; then
+      commits_new="$(comm -23 <(printf '%s\n' "$all_commits") <(printf '%s\n' "$indexed_commits") | grep -c .)" || commits_new=0
+    fi
+  fi
+
+  # Chats: mtime of each chat's messages.jsonl vs last_epoch.
+  local chats_stale=0
+  if [[ -d "$chats_dir" ]]; then
+    local chat_msgs
+    for chat_msgs in "$chats_dir"/*/messages.jsonl; do
+      [[ -f "$chat_msgs" ]] || continue
+      mtime="$(stat -f %m "$chat_msgs" 2> /dev/null || stat -c %Y "$chat_msgs" 2> /dev/null || echo 0)"
+      if ((mtime > last_epoch)); then
+        chats_stale=$((chats_stale + 1))
+      fi
+    done
+  fi
+
+  printf '%d %d %d\n' "$files_stale" "$commits_new" "$chats_stale"
+}
+
+#-------------------------------------------------------------------------------
+# _search:_age-human EPOCH_SECONDS
+#
+# Render an age like "3h 12m" or "5d 2h" or "just now". Cheap integer math,
+# no GNU date features required.
+#-------------------------------------------------------------------------------
+_search:_age-human() {
+  local then_epoch="$1"
+  local now
+  now="$(date +%s)"
+  local diff=$((now - then_epoch))
+
+  if ((diff < 60)); then
+    printf 'just now'
+  elif ((diff < 3600)); then
+    printf '%dm' "$((diff / 60))"
+  elif ((diff < 86400)); then
+    printf '%dh %dm' "$((diff / 3600))" "$(((diff % 3600) / 60))"
+  else
+    printf '%dd %dh' "$((diff / 86400))" "$(((diff % 86400) / 3600))"
+  fi
+}
 
 # --- Parse arguments ---
 
@@ -63,6 +159,18 @@ fi
 # An empty index returns zero results rather than erroring.
 index:ensure "$SCRATCH_PROJECT"
 
+# --- Project config for staleness computation ---
+
+proj_root=""
+proj_is_git=""
+proj_exclude=""
+if ! project:load "$SCRATCH_PROJECT" proj_root proj_is_git proj_exclude; then
+  tui:error "search: failed to load project" project "$SCRATCH_PROJECT"
+  echo "search: failed to load project: $SCRATCH_PROJECT" >&2
+  exit 1
+fi
+chats_dir="${SCRATCH_PROJECTS_DIR}/${SCRATCH_PROJECT}/chats"
+
 # --- Run the search ---
 
 results="$(search:query "$SCRATCH_PROJECT" "$entry_type" "$query" "$limit")"
@@ -73,11 +181,40 @@ fi
 
 tui:info "search" project "$SCRATCH_PROJECT" type "$entry_type" results "$result_count" query "$query"
 
-# Hint when the index is stale — helpful for agents deciding whether to
-# trust the results. Non-fatal; results print either way.
-if search:is-stale "$SCRATCH_PROJECT"; then
-  last="$(index:get-meta "$SCRATCH_PROJECT" "last_indexed_at" 2> /dev/null || echo "never")"
-  tui:warn "search: index is stale" last_indexed "$last"
+# --- Staleness metadata header ---
+#
+# The LLM reads stdout, so the staleness hints have to go there (tui:warn
+# goes to stderr and is invisible to the agent). Format as `# ...` comment
+# lines so they're visually distinct from the tab-delimited results.
+
+last_indexed="$(index:get-meta "$SCRATCH_PROJECT" "last_indexed_at" 2> /dev/null || true)"
+
+if [[ -z "$last_indexed" ]]; then
+  printf '# index: never built — results will be empty until user runs `scratch index`\n'
+else
+  # Convert last_indexed_at (UTC ISO-ish "YYYY-MM-DDTHH:MM:SS") to epoch
+  # for mtime comparisons. BSD date on macOS needs explicit format.
+  last_epoch="$(date -j -u -f "%Y-%m-%dT%H:%M:%S" "$last_indexed" +%s 2> /dev/null \
+    || date -u -d "$last_indexed" +%s 2> /dev/null \
+    || echo "")"
+
+  age_human="$(_search:_age-human "$last_epoch")"
+
+  read -r files_stale commits_new chats_stale \
+    < <(_search:_count-stale "$SCRATCH_PROJECT" "$proj_root" "$proj_is_git" "$proj_exclude" "$chats_dir" "$last_epoch")
+
+  total_stale=$((files_stale + commits_new + chats_stale))
+  stale_flag=""
+  if search:is-stale "$SCRATCH_PROJECT"; then
+    stale_flag=" STALE"
+  fi
+
+  printf '# index: last updated %s ago%s; %d entries newer than index (files:%d commits:%d chats:%d)\n' \
+    "$age_human" "$stale_flag" "$total_stale" "$files_stale" "$commits_new" "$chats_stale"
+
+  if ((total_stale > 0)) || [[ -n "$stale_flag" ]]; then
+    printf '# hint: if the results above do not answer the question, ask the user to run `scratch index` to refresh\n'
+  fi
 fi
 
 # Empty results are not an error. The agent can decide whether to prompt

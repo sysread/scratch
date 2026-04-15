@@ -1,6 +1,6 @@
 {
   "name": "search",
-  "description": "Semantic search over the project index. Embeds the query and ranks indexed entries by cosine similarity. Defaults to searching file summaries; can also search indexed conversations or commits, or all types combined. Returns top-K results as `score<TAB>identifier` lines (and for type=all, identifier is prefixed with the entry type). Requires the project to have been indexed — run `scratch index` first if the results come back empty.",
+  "description": "Semantic search over the CURRENT PROJECT'S index (cross-project search is not supported). Embeds the query and ranks indexed entries by cosine similarity. Defaults to searching file summaries; can also search indexed conversations or commits, or all types combined. Output: optional `# index:` metadata lines (age + number of entries newer than last index) followed by `score<TAB>identifier` lines. For type=all, identifier is prefixed with the entry type. If the metadata line reports many stale entries OR the index is flagged STALE, AND the results don't answer the user's question, instruct the user to run `scratch index` to refresh the index.",
   "parameters": {
     "type": "object",
     "properties": {
