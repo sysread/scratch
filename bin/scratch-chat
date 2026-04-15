@@ -462,6 +462,17 @@ main() {
     _chat:display-history "$project_name" "$slug"
   fi
 
+  # Warm the availability memo once per session. Chat rounds call
+  # tool:specs-json and tool:invoke repeatedly; preloading shifts the
+  # fork cost of is-available off the first user turn. Scratch sessions
+  # don't change shells or direnv domains mid-session, so only
+  # previously-failed entries are rechecked per turn (see recheck call
+  # below).
+  # shellcheck disable=SC2119 # no-arg form means "every tool/agent"
+  tool:preload-avail-memo
+  # shellcheck disable=SC2119
+  agent:preload-avail-memo
+
   # Session-start separator with timestamp
   _chat:print-separator
 
@@ -507,6 +518,13 @@ main() {
     # Begin round tracking
     conversation:begin-round "$project_name" "$slug"
     _chat:debug "round begin" slug "$slug"
+
+    # Re-check only tools/agents whose is-available previously failed.
+    # A user may have installed a missing dep (brew install gum) between
+    # turns and expects the next turn to pick it up. Successful entries
+    # stay cached - scratch sessions don't shift envs mid-flight.
+    tool:recheck-failed-avail-memo
+    agent:recheck-failed-avail-memo
 
     # Save and display user message
     local user_msg

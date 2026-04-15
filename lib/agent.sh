@@ -73,6 +73,19 @@ has-commands jq
 # shellcheck disable=SC2034
 _AGENT_AVAILABILITY_ERR=""
 
+#-------------------------------------------------------------------------------
+# Availability memoization
+#
+# agent:available is called once per agent:run and again from agent:list-
+# level walks. Each call forks a bash shell to run is-available. Session-
+# scoped memo elides the fork on repeated calls.
+#
+# Same contract as lib/tool.sh: task-boundary callers invoke
+# agent:reset-avail-memo to force a re-check. SCRATCH_AVAIL_MEMO=0
+# disables memoization entirely.
+declare -gA _AGENT_AVAIL_MEMO=()
+declare -gA _AGENT_AVAIL_ERR_MEMO=()
+
 # Default recursion cap. Override via SCRATCH_AGENT_MAX_DEPTH in the env.
 _AGENT_DEFAULT_MAX_DEPTH=8
 
@@ -199,28 +212,106 @@ agent:available() {
     return 1
   fi
 
+  # Memo hit: restore the captured error and return the cached rc without
+  # forking. See the memo header comment for the invalidation contract.
+  if [[ "${SCRATCH_AVAIL_MEMO:-1}" != "0" && -n "${_AGENT_AVAIL_MEMO[$name]:-}" ]]; then
+    _AGENT_AVAILABILITY_ERR="${_AGENT_AVAIL_ERR_MEMO[$name]:-}"
+    return "${_AGENT_AVAIL_MEMO[$name]}"
+  fi
+
   script="$(agent:agents-dir)/$name/is-available"
 
   err_file="$(mktemp -t scratch-agent-avail-err.XXXXXX)"
 
   # Subshell so SCRATCH_HOME export does not leak into the caller, and
-  # so a die() inside the script (via has-commands) propagates as a real
-  # exit code rather than aborting the calling test or function.
+  # so a die() or set -e abort inside the script stays contained. Source
+  # rather than exec to skip bash startup on every call - see the
+  # matching note in lib/tool.sh tool:available for the rationale.
   # SC2030/SC2031: subshell-local modification is intentional here.
   # shellcheck disable=SC2030,SC2031
   (
     export SCRATCH_HOME
     SCRATCH_HOME="$(cd "$_AGENT_SCRIPTDIR/.." && pwd -P)"
-    "$script"
+    # shellcheck source=/dev/null
+    source "$script"
   ) 2> "$err_file"
   rc=$?
 
   _AGENT_AVAILABILITY_ERR="$(cat "$err_file")"
   rm -f "$err_file"
+
+  if [[ "${SCRATCH_AVAIL_MEMO:-1}" != "0" ]]; then
+    _AGENT_AVAIL_MEMO[$name]="$rc"
+    _AGENT_AVAIL_ERR_MEMO[$name]="$_AGENT_AVAILABILITY_ERR"
+  fi
   return "$rc"
 }
 
 export -f agent:available
+
+#-------------------------------------------------------------------------------
+# agent:reset-avail-memo
+#
+# Clear the availability memo and the captured error. Call this at task
+# boundaries (start of a new user turn, before a test that pins rc
+# sequences) to force the next agent:available call to re-run is-available.
+#-------------------------------------------------------------------------------
+agent:reset-avail-memo() {
+  _AGENT_AVAIL_MEMO=()
+  _AGENT_AVAIL_ERR_MEMO=()
+  _AGENT_AVAILABILITY_ERR=""
+}
+
+export -f agent:reset-avail-memo
+
+#-------------------------------------------------------------------------------
+# agent:recheck-failed-avail-memo
+#
+# Walk the memo and re-run is-available for every entry whose cached rc
+# is non-zero. Successful entries stay cached. See the matching note on
+# tool:recheck-failed-avail-memo for the call-site rationale.
+#-------------------------------------------------------------------------------
+agent:recheck-failed-avail-memo() {
+  local name
+  local -a failed=()
+  for name in "${!_AGENT_AVAIL_MEMO[@]}"; do
+    [[ "${_AGENT_AVAIL_MEMO[$name]}" != "0" ]] && failed+=("$name")
+  done
+  for name in "${failed[@]}"; do
+    unset '_AGENT_AVAIL_MEMO[$name]'
+    unset '_AGENT_AVAIL_ERR_MEMO[$name]'
+    agent:available "$name" || true
+  done
+}
+
+export -f agent:recheck-failed-avail-memo
+
+#-------------------------------------------------------------------------------
+# agent:preload-avail-memo
+#
+# Eagerly run is-available for every agent (or just the named agents) and
+# populate the memo. Individual failures are recorded in the memo. Use
+# from scratch-dispatch at startup to shift the fork cost off the first
+# agent-using request.
+#-------------------------------------------------------------------------------
+# Named-arg form exists for scoped warm-ups; see the matching note on
+# tool:preload-avail-memo.
+# shellcheck disable=SC2120
+agent:preload-avail-memo() {
+  local -a names
+  local name
+  if (($# == 0)); then
+    mapfile -t names < <(agent:list)
+  else
+    names=("$@")
+  fi
+  for name in "${names[@]}"; do
+    [[ -z "$name" ]] && continue
+    agent:available "$name" || true
+  done
+}
+
+export -f agent:preload-avail-memo
 
 #-------------------------------------------------------------------------------
 # agent:run NAME
@@ -282,20 +373,27 @@ agent:run() {
     # Populate project env vars only when project:detect succeeds. Same
     # plain-assignment trick as tool:invoke - `local` inside a subshell
     # under set -u trips on the nameref before it gets assigned.
-    _scratch_proj_name=""
-    _scratch_proj_worktree=""
-    if project:detect _scratch_proj_name _scratch_proj_worktree 2> /dev/null; then
-      export SCRATCH_PROJECT="$_scratch_proj_name"
-      # Resolve the configured root via project:load rather than pwd.
-      # pwd would be wrong if invoked from a subdirectory. If load fails
-      # or returns an empty root, SCRATCH_PROJECT_ROOT stays unset —
-      # downstream code checks [[ -n ${SCRATCH_PROJECT_ROOT:-} ]].
-      _scratch_proj_root=""
-      _scratch_proj_is_git=""
-      _scratch_proj_exclude=""
-      if project:load "$_scratch_proj_name" _scratch_proj_root _scratch_proj_is_git _scratch_proj_exclude 2> /dev/null \
-        && [[ -n "$_scratch_proj_root" ]]; then
-        export SCRATCH_PROJECT_ROOT="$_scratch_proj_root"
+    #
+    # Fast path: if the caller already exported SCRATCH_PROJECT and
+    # SCRATCH_PROJECT_ROOT, trust them and skip the detect. Avoids three
+    # git subprocess calls and a jq pass on the project settings per
+    # agent invocation.
+    if [[ -z "${SCRATCH_PROJECT:-}" || -z "${SCRATCH_PROJECT_ROOT:-}" ]]; then
+      _scratch_proj_name=""
+      _scratch_proj_worktree=""
+      if project:detect _scratch_proj_name _scratch_proj_worktree 2> /dev/null; then
+        export SCRATCH_PROJECT="$_scratch_proj_name"
+        # Resolve the configured root via project:load rather than pwd.
+        # pwd would be wrong if invoked from a subdirectory. If load fails
+        # or returns an empty root, SCRATCH_PROJECT_ROOT stays unset —
+        # downstream code checks [[ -n ${SCRATCH_PROJECT_ROOT:-} ]].
+        _scratch_proj_root=""
+        _scratch_proj_is_git=""
+        _scratch_proj_exclude=""
+        if project:load "$_scratch_proj_name" _scratch_proj_root _scratch_proj_is_git _scratch_proj_exclude 2> /dev/null \
+          && [[ -n "$_scratch_proj_root" ]]; then
+          export SCRATCH_PROJECT_ROOT="$_scratch_proj_root"
+        fi
       fi
     fi
 

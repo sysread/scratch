@@ -87,6 +87,29 @@ declare -gA _TOOL_SPECS_WARNED=()
 declare -gA _TOOLBOX_WARNED=()
 
 #-------------------------------------------------------------------------------
+# Availability memoization
+#
+# tool:available is hot: tool:specs-json walks every tool on every call,
+# and tool:invoke gates every invocation. Each call forks a bash shell
+# running the is-available script. On macOS that's ~20-30ms per tool.
+#
+# _TOOL_AVAIL_MEMO stores the numeric rc keyed by tool name. A separate
+# _TOOL_AVAIL_ERR_MEMO holds the captured stderr so we can restore
+# _TOOL_AVAILABILITY_ERR on a memo hit (same contract as a fresh call).
+#
+# The memo is intentionally session-scoped, not file-mtime-indexed. If an
+# operator mutates is-available mid-session or uninstalls a dependency,
+# the cached answer goes stale. The reset contract covers this: callers
+# at task boundaries (e.g. start of a new user turn in agent:complete)
+# call tool:reset-avail-memo, which clears both maps.
+#
+# SCRATCH_AVAIL_MEMO=0 disables memoization entirely. Useful for
+# long-lived processes that want is-available to re-run every call, and
+# for tests that pin specific rc sequences.
+declare -gA _TOOL_AVAIL_MEMO=()
+declare -gA _TOOL_AVAIL_ERR_MEMO=()
+
+#-------------------------------------------------------------------------------
 # _tool:approval-class NAME
 #
 # (Private) Read the approval_class field from a tool's spec.json.
@@ -222,29 +245,123 @@ tool:available() {
     return 1
   fi
 
+  # Memo hit: restore the captured error and return the cached rc without
+  # forking. Disabled entirely when SCRATCH_AVAIL_MEMO=0. Callers at task
+  # boundaries use tool:reset-avail-memo to invalidate.
+  if [[ "${SCRATCH_AVAIL_MEMO:-1}" != "0" && -n "${_TOOL_AVAIL_MEMO[$name]:-}" ]]; then
+    _TOOL_AVAILABILITY_ERR="${_TOOL_AVAIL_ERR_MEMO[$name]:-}"
+    return "${_TOOL_AVAIL_MEMO[$name]}"
+  fi
+
   script="$(tool:tools-dir)/$name/is-available"
 
   tmp:make err_file /tmp/scratch-tool-avail-err.XXXXXX
   tmp:install-traps
 
   # Subshell so SCRATCH_HOME export does not leak into the caller, and
-  # so a die() inside the script (via has-commands) propagates as a real
-  # exit code rather than aborting the calling test or function.
+  # so a die() or set -e abort inside the script stays contained. Source
+  # rather than exec: is-available scripts are tiny - mostly
+  # `source base.sh; has-commands ...` - and paying for bash startup +
+  # exec on every call is pure overhead. Sourcing skips the interpreter
+  # launch and uses just a fork (~1-2ms vs ~20ms per call on macOS).
   # SC2030/SC2031: subshell-local modification is intentional here.
   # shellcheck disable=SC2030,SC2031
   (
     export SCRATCH_HOME
     SCRATCH_HOME="$(cd "$_TOOL_SCRIPTDIR/.." && pwd -P)"
-    "$script"
+    # shellcheck source=/dev/null
+    source "$script"
   ) 2> "$err_file"
   rc=$?
 
   _TOOL_AVAILABILITY_ERR="$(cat "$err_file")"
   rm -f "$err_file"
+
+  # Populate the memo so the next call for this tool skips the fork.
+  # Memo values are strings; rc=0 stores "0" which is truthy-present.
+  if [[ "${SCRATCH_AVAIL_MEMO:-1}" != "0" ]]; then
+    _TOOL_AVAIL_MEMO[$name]="$rc"
+    _TOOL_AVAIL_ERR_MEMO[$name]="$_TOOL_AVAILABILITY_ERR"
+  fi
   return "$rc"
 }
 
 export -f tool:available
+
+#-------------------------------------------------------------------------------
+# tool:reset-avail-memo
+#
+# Clear the availability memo and the captured error. Call this at task
+# boundaries (start of a new user turn, start of a chat round where tool
+# set may have changed, before a test that pins rc sequences) to force
+# the next tool:available call to re-run is-available.
+#-------------------------------------------------------------------------------
+tool:reset-avail-memo() {
+  _TOOL_AVAIL_MEMO=()
+  _TOOL_AVAIL_ERR_MEMO=()
+  _TOOL_AVAILABILITY_ERR=""
+}
+
+export -f tool:reset-avail-memo
+
+#-------------------------------------------------------------------------------
+# tool:recheck-failed-avail-memo
+#
+# Walk the memo and re-run is-available for every entry whose cached rc
+# is non-zero. Successful entries stay cached. The intended call site is
+# the top of each persistent-session round (scratch-chat): most env
+# conditions don't change within a session, but a user can install a
+# missing dep (e.g. brew install gum) between turns and expect the next
+# turn to pick it up.
+#
+# Implemented by clearing the failed entries and letting tool:available
+# re-run and repopulate them naturally. Return is always 0; new failures
+# stay recorded in the memo.
+#-------------------------------------------------------------------------------
+tool:recheck-failed-avail-memo() {
+  local name
+  local -a failed=()
+  for name in "${!_TOOL_AVAIL_MEMO[@]}"; do
+    [[ "${_TOOL_AVAIL_MEMO[$name]}" != "0" ]] && failed+=("$name")
+  done
+  for name in "${failed[@]}"; do
+    unset '_TOOL_AVAIL_MEMO[$name]'
+    unset '_TOOL_AVAIL_ERR_MEMO[$name]'
+    tool:available "$name" || true
+  done
+}
+
+export -f tool:recheck-failed-avail-memo
+
+#-------------------------------------------------------------------------------
+# tool:preload-avail-memo
+#
+# Eagerly run is-available for every tool (or just the named tools) and
+# populate the memo. The return value is always 0; individual failures
+# are reflected in the memo and picked up by subsequent tool:available
+# calls. Use from scratch-dispatch at startup to shift the fork cost off
+# the critical path of the first tool-using request.
+#-------------------------------------------------------------------------------
+# No-arg call is the common path (preload every tool). Named-arg form
+# exists for scoped warm-ups (preload only the tools a given agent
+# declares). SC2120 warns about the arg path being unused at some
+# callers; suppress because the no-arg path is intentional.
+# shellcheck disable=SC2120
+tool:preload-avail-memo() {
+  local -a names
+  local name
+  if (($# == 0)); then
+    mapfile -t names < <(tool:list)
+  else
+    names=("$@")
+  fi
+  for name in "${names[@]}"; do
+    [[ -z "$name" ]] && continue
+    tool:available "$name" || true
+  done
+}
+
+export -f tool:preload-avail-memo
 
 #-------------------------------------------------------------------------------
 # tool:specs-json [NAMES...]
@@ -401,25 +518,32 @@ tool:invoke() {
     # Populate project env vars only when project:detect succeeds. Tools
     # can then use [[ -n ${SCRATCH_PROJECT:-} ]] to test for "in a project".
     #
+    # Fast path: if the caller already exported SCRATCH_PROJECT and
+    # SCRATCH_PROJECT_ROOT (scratch-dispatch does this at startup), trust
+    # them and skip the detect. Avoids three git subprocess calls and a
+    # jq pass on the project settings per tool invocation.
+    #
     # We use plain assignment (not `local`) here because we're in a subshell
     # ( ... ), and subshell-scoped vars are discarded when the subshell
     # exits regardless of declaration. Avoiding `local` also dodges a
     # set -u edge case where `local foo` inside a subshell can trigger
     # an "unbound variable" error before the nameref-based assignment runs.
-    _scratch_proj_name=""
-    _scratch_proj_worktree=""
-    if project:detect _scratch_proj_name _scratch_proj_worktree 2> /dev/null; then
-      export SCRATCH_PROJECT="$_scratch_proj_name"
-      # Resolve the configured root via project:load rather than pwd.
-      # pwd would be wrong if invoked from a subdirectory. If load fails
-      # or returns an empty root, SCRATCH_PROJECT_ROOT stays unset —
-      # downstream code checks [[ -n ${SCRATCH_PROJECT_ROOT:-} ]].
-      _scratch_proj_root=""
-      _scratch_proj_is_git=""
-      _scratch_proj_exclude=""
-      if project:load "$_scratch_proj_name" _scratch_proj_root _scratch_proj_is_git _scratch_proj_exclude 2> /dev/null \
-        && [[ -n "$_scratch_proj_root" ]]; then
-        export SCRATCH_PROJECT_ROOT="$_scratch_proj_root"
+    if [[ -z "${SCRATCH_PROJECT:-}" || -z "${SCRATCH_PROJECT_ROOT:-}" ]]; then
+      _scratch_proj_name=""
+      _scratch_proj_worktree=""
+      if project:detect _scratch_proj_name _scratch_proj_worktree 2> /dev/null; then
+        export SCRATCH_PROJECT="$_scratch_proj_name"
+        # Resolve the configured root via project:load rather than pwd.
+        # pwd would be wrong if invoked from a subdirectory. If load fails
+        # or returns an empty root, SCRATCH_PROJECT_ROOT stays unset —
+        # downstream code checks [[ -n ${SCRATCH_PROJECT_ROOT:-} ]].
+        _scratch_proj_root=""
+        _scratch_proj_is_git=""
+        _scratch_proj_exclude=""
+        if project:load "$_scratch_proj_name" _scratch_proj_root _scratch_proj_is_git _scratch_proj_exclude 2> /dev/null \
+          && [[ -n "$_scratch_proj_root" ]]; then
+          export SCRATCH_PROJECT_ROOT="$_scratch_proj_root"
+        fi
       fi
     fi
 

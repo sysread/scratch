@@ -38,6 +38,11 @@ setup() {
 
   # Reset the toolbox warn dedup so each test starts from a clean slate.
   _TOOLBOX_WARNED=()
+
+  # Run from a non-git tmpdir so tool:invoke's project:detect short-circuits
+  # on `git rev-parse --is-inside-work-tree` instead of making three more
+  # git calls from inside the scratch repo. Saves ~100ms per invoke.
+  cd "$BATS_TEST_TMPDIR"
 }
 
 #-------------------------------------------------------------------------------
@@ -262,6 +267,93 @@ make_fake_toolbox() {
   is "$status" 0
 }
 
+@test "tool:available memoizes the result across calls" {
+  # First call: is-available exits 0, memo stores 0.
+  # Replace is-available with a script that would exit 99 if re-run.
+  # If the memo is honored, the second call still returns 0.
+  make_fake_tool alpha "echo OK" 0
+  tool:available alpha
+  is "$?" "0"
+
+  # Rewrite is-available so a fresh run would fail loudly
+  printf '#!/usr/bin/env bash\nexit 99\n' > "${SCRATCH_TOOLS_DIR}/alpha/is-available"
+  chmod +x "${SCRATCH_TOOLS_DIR}/alpha/is-available"
+
+  tool:available alpha
+  is "$?" "0"
+}
+
+@test "tool:reset-avail-memo forces the next call to re-run is-available" {
+  make_fake_tool alpha "echo OK" 0
+  tool:available alpha
+  is "$?" "0"
+
+  # Flip is-available to exit 99
+  printf '#!/usr/bin/env bash\nexit 99\n' > "${SCRATCH_TOOLS_DIR}/alpha/is-available"
+  chmod +x "${SCRATCH_TOOLS_DIR}/alpha/is-available"
+
+  # After reset, the next call must re-run and see the new exit code
+  tool:reset-avail-memo
+  run tool:available alpha
+  is "$status" 99
+}
+
+@test "tool:available memo can be disabled with SCRATCH_AVAIL_MEMO=0" {
+  make_fake_tool alpha "echo OK" 0
+  export SCRATCH_AVAIL_MEMO=0
+
+  tool:available alpha
+  is "$?" "0"
+
+  # Flip is-available and re-call. Without memo, this must return the new rc.
+  printf '#!/usr/bin/env bash\nexit 99\n' > "${SCRATCH_TOOLS_DIR}/alpha/is-available"
+  chmod +x "${SCRATCH_TOOLS_DIR}/alpha/is-available"
+
+  run tool:available alpha
+  is "$status" 99
+}
+
+@test "tool:recheck-failed-avail-memo re-runs only previously-failed entries" {
+  make_fake_tool good "echo OK" 0
+  make_fake_tool bad "echo OK" 1
+
+  tool:preload-avail-memo
+
+  # Flip both scripts: good would now fail, bad would now succeed.
+  # recheck should only re-run bad (which was previously failed), so
+  # good stays cached as 0 and bad picks up the new success.
+  printf '#!/usr/bin/env bash\nexit 99\n' > "${SCRATCH_TOOLS_DIR}/good/is-available"
+  chmod +x "${SCRATCH_TOOLS_DIR}/good/is-available"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${SCRATCH_TOOLS_DIR}/bad/is-available"
+  chmod +x "${SCRATCH_TOOLS_DIR}/bad/is-available"
+
+  tool:recheck-failed-avail-memo
+
+  run tool:available good
+  is "$status" 0
+  run tool:available bad
+  is "$status" 0
+}
+
+@test "tool:preload-avail-memo populates the memo for every tool" {
+  make_fake_tool alpha "echo OK" 0
+  make_fake_tool beta "echo OK" 1
+
+  tool:preload-avail-memo
+
+  # Both entries should be cached now. Swap the scripts so a fresh call
+  # would flip rc; the memo should still return the original.
+  printf '#!/usr/bin/env bash\nexit 99\n' > "${SCRATCH_TOOLS_DIR}/alpha/is-available"
+  chmod +x "${SCRATCH_TOOLS_DIR}/alpha/is-available"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${SCRATCH_TOOLS_DIR}/beta/is-available"
+  chmod +x "${SCRATCH_TOOLS_DIR}/beta/is-available"
+
+  run tool:available alpha
+  is "$status" 0
+  run tool:available beta
+  is "$status" 1
+}
+
 # ---------------------------------------------------------------------------
 # tool:specs-json
 # ---------------------------------------------------------------------------
@@ -430,6 +522,21 @@ make_fake_toolbox() {
   is "$_TOOL_INVOKE_STDOUT" "${SCRATCH_HOME}"
 }
 
+@test "tool:invoke trusts pre-set SCRATCH_PROJECT and SCRATCH_PROJECT_ROOT" {
+  # When dispatch has already resolved the project, tool:invoke must not
+  # re-run project:detect - it's slow (3x git subprocesses) and already
+  # done. Sentinel values that no real detect could produce prove the
+  # env vars pass through the subshell unchanged.
+  make_fake_tool alpha 'printf "%s\n%s\n" "$SCRATCH_PROJECT" "$SCRATCH_PROJECT_ROOT"'
+  export SCRATCH_TOOL_SKIP_AVAILABILITY=1
+  export SCRATCH_PROJECT="sentinel-project"
+  export SCRATCH_PROJECT_ROOT="/nonexistent/sentinel/root"
+
+  tool:invoke alpha '{}'
+  is "$_TOOL_INVOKE_STDOUT" "sentinel-project
+/nonexistent/sentinel/root"
+}
+
 @test "tool:invoke returns 127 when tool is unavailable" {
   make_fake_tool alpha "echo OK" 1
   unset SCRATCH_TOOL_SKIP_AVAILABILITY
@@ -482,8 +589,8 @@ make_fake_toolbox() {
 @test "tool:invoke-parallel preserves input order regardless of completion order" {
   # Create three tools where the FIRST sleeps the longest. If output
   # respected wait order, slow would come last; we want input order.
-  make_fake_tool slow 'sleep 0.3; echo "from slow"'
-  make_fake_tool medium 'sleep 0.1; echo "from medium"'
+  make_fake_tool slow 'sleep 0.15; echo "from slow"'
+  make_fake_tool medium 'sleep 0.05; echo "from medium"'
   make_fake_tool fast 'echo "from fast"'
   export SCRATCH_TOOL_SKIP_AVAILABILITY=1
 
@@ -509,10 +616,11 @@ make_fake_toolbox() {
 }
 
 @test "tool:invoke-parallel honors SCRATCH_TOOL_PARALLEL_JOBS concurrency cap" {
-  # Each tool sleeps for a fixed duration. With 6 tools and a cap of 2,
-  # the wall-clock floor is roughly 3 * sleep_duration. We use a
-  # margin to keep the assertion stable on slow CI machines.
-  make_fake_tool slowtool 'sleep 0.3; echo done'
+  # Each tool sleeps for a fixed duration. With 4 tools and a cap of 2,
+  # the wall-clock floor is roughly 2 * sleep_duration. Threshold is
+  # set below the capped floor but above the uncapped wall clock so the
+  # assertion is stable even under fork overhead on slow CI.
+  make_fake_tool slowtool 'sleep 0.15; echo done'
   export SCRATCH_TOOL_SKIP_AVAILABILITY=1
   export SCRATCH_TOOL_PARALLEL_JOBS=2
 
@@ -520,9 +628,7 @@ make_fake_toolbox() {
     {"id":"a","name":"slowtool","args":{}},
     {"id":"b","name":"slowtool","args":{}},
     {"id":"c","name":"slowtool","args":{}},
-    {"id":"d","name":"slowtool","args":{}},
-    {"id":"e","name":"slowtool","args":{}},
-    {"id":"f","name":"slowtool","args":{}}
+    {"id":"d","name":"slowtool","args":{}}
   ]'
 
   local start
@@ -532,10 +638,10 @@ make_fake_toolbox() {
   end="$(date +%s%N)"
   local elapsed_ms=$(((end - start) / 1000000))
 
-  # 6 calls / 2 concurrent = 3 batches, each ~300ms = 900ms floor.
-  # Cap below the no-throttle wall clock (~600ms with all 6 in parallel).
+  # 4 calls / 2 concurrent = 2 batches, each ~150ms = 300ms floor.
+  # Uncapped (4 in parallel) is ~150ms plus fork overhead.
   diag "elapsed_ms=$elapsed_ms"
-  ((elapsed_ms >= 700))
+  ((elapsed_ms >= 250))
 }
 
 @test "tool:invoke-parallel handles mixed success and failure" {

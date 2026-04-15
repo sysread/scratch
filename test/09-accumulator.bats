@@ -499,15 +499,15 @@ second" '{"line_numbers":true}'
 
 @test "accumulate:run: walking the floor dies with a clear message" {
   setup_chat_stub
-  # Every attempt overflows. With start=0.7 step=0.1 floor=0.3:
-  # tries 0.7, 0.6, 0.5, 0.4, then next would be 0.3 which is NOT < 0.3,
-  # so it tries 0.3, then next would be 0.2 < 0.3 -> die.
-  local _i
-  for _i in 1 2 3 4 5 6; do
-    queue_exit_code 9
-  done
+  # Every attempt overflows. With start=0.5 step=0.1 floor=0.4:
+  # tries 0.5, then next would be 0.4 which is NOT < 0.4, so it tries
+  # 0.4, then next would be 0.3 < 0.4 -> die. Two overflows cover the
+  # walk-the-floor path without the default 6-round sweep.
+  queue_exit_code 9
+  queue_exit_code 9
 
-  run accumulate:run llama-3-large "x" "small input"
+  run accumulate:run llama-3-large "x" "small input" \
+    '{"start_fraction":0.5,"floor_fraction":0.4,"backoff_step":0.1}'
   is "$status" 1
   [[ "$output" == *"too dense"* ]]
 }

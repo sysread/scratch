@@ -31,6 +31,12 @@ setup() {
   # Per-test agents directory. lib/agent.sh's agent:agents-dir honors this.
   export SCRATCH_AGENTS_DIR="${BATS_TEST_TMPDIR}/agents"
   mkdir -p "$SCRATCH_AGENTS_DIR"
+
+  # Run from a non-git tmpdir so agent:run's project:detect short-circuits
+  # on the initial `git rev-parse --is-inside-work-tree` instead of making
+  # three more git calls from inside the scratch repo. Saves ~100ms per
+  # agent:run invocation across the suite.
+  cd "$BATS_TEST_TMPDIR"
 }
 
 #-------------------------------------------------------------------------------
@@ -233,6 +239,85 @@ zebra"
   is "$status" 0
 }
 
+@test "agent:available memoizes the result across calls" {
+  make_fake_agent ready "cat" 0
+  agent:available ready
+  is "$?" "0"
+
+  # Rewrite is-available so a fresh run would exit 99. Memo should win.
+  printf '#!/usr/bin/env bash\nexit 99\n' > "${SCRATCH_AGENTS_DIR}/ready/is-available"
+  chmod +x "${SCRATCH_AGENTS_DIR}/ready/is-available"
+
+  agent:available ready
+  is "$?" "0"
+}
+
+@test "agent:reset-avail-memo forces the next call to re-run is-available" {
+  make_fake_agent ready "cat" 0
+  agent:available ready
+  is "$?" "0"
+
+  printf '#!/usr/bin/env bash\nexit 99\n' > "${SCRATCH_AGENTS_DIR}/ready/is-available"
+  chmod +x "${SCRATCH_AGENTS_DIR}/ready/is-available"
+
+  agent:reset-avail-memo
+  run agent:available ready
+  is "$status" 99
+}
+
+@test "agent:available memo can be disabled with SCRATCH_AVAIL_MEMO=0" {
+  make_fake_agent ready "cat" 0
+  export SCRATCH_AVAIL_MEMO=0
+
+  agent:available ready
+  is "$?" "0"
+
+  printf '#!/usr/bin/env bash\nexit 99\n' > "${SCRATCH_AGENTS_DIR}/ready/is-available"
+  chmod +x "${SCRATCH_AGENTS_DIR}/ready/is-available"
+
+  run agent:available ready
+  is "$status" 99
+}
+
+@test "agent:recheck-failed-avail-memo re-runs only previously-failed entries" {
+  make_fake_agent ready "cat" 0
+  make_fake_agent broken "cat" 1
+
+  agent:preload-avail-memo
+
+  # Flip both scripts: ready would now fail, broken would now succeed.
+  # recheck should only re-run broken, so ready stays cached as 0.
+  printf '#!/usr/bin/env bash\nexit 99\n' > "${SCRATCH_AGENTS_DIR}/ready/is-available"
+  chmod +x "${SCRATCH_AGENTS_DIR}/ready/is-available"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${SCRATCH_AGENTS_DIR}/broken/is-available"
+  chmod +x "${SCRATCH_AGENTS_DIR}/broken/is-available"
+
+  agent:recheck-failed-avail-memo
+
+  run agent:available ready
+  is "$status" 0
+  run agent:available broken
+  is "$status" 0
+}
+
+@test "agent:preload-avail-memo populates the memo for every agent" {
+  make_fake_agent ready "cat" 0
+  make_fake_agent broken "cat" 1
+
+  agent:preload-avail-memo
+
+  # Swap the scripts. Memo should still return the original rc.
+  printf '#!/usr/bin/env bash\nexit 99\n' > "${SCRATCH_AGENTS_DIR}/ready/is-available"
+  chmod +x "${SCRATCH_AGENTS_DIR}/ready/is-available"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${SCRATCH_AGENTS_DIR}/broken/is-available"
+  chmod +x "${SCRATCH_AGENTS_DIR}/broken/is-available"
+
+  run agent:available ready
+  is "$status" 0
+  run agent:available broken
+  is "$status" 1
+}
+
 # ---------------------------------------------------------------------------
 # agent:run - basic invocation
 # ---------------------------------------------------------------------------
@@ -271,6 +356,22 @@ zebra"
   run agent:run introspect < /dev/null
   is "$status" 0
   [[ "$output" == */dev/scratch || "$output" == "$SCRATCH_HOME" ]]
+}
+
+@test "agent:run trusts pre-set SCRATCH_PROJECT and SCRATCH_PROJECT_ROOT" {
+  # When dispatch has already resolved the project, agent:run must not
+  # re-run project:detect - it's slow (3x git subprocesses) and already
+  # done. We verify by setting both env vars to sentinel values that no
+  # real project:detect could produce, then confirming they pass through
+  # the subshell unchanged.
+  make_fake_agent introspect 'printf "%s\n%s\n" "$SCRATCH_PROJECT" "$SCRATCH_PROJECT_ROOT"'
+  export SCRATCH_PROJECT="sentinel-project"
+  export SCRATCH_PROJECT_ROOT="/nonexistent/sentinel/root"
+
+  run agent:run introspect < /dev/null
+  is "$status" 0
+  is "$output" "sentinel-project
+/nonexistent/sentinel/root"
 }
 
 # ---------------------------------------------------------------------------
