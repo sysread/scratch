@@ -2,5 +2,6 @@
   "name": "self-help",
   "description": "Answer questions about scratch by reading its own user guides via the self-docs tool.",
   "profile": "fast",
-  "tools": ["self-docs"]
+  "tools": ["self-docs"],
+  "system_prompt": "self-help/system"
 }

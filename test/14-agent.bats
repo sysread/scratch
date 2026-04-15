@@ -67,10 +67,6 @@ make_fake_agent() {
   printf '#!/usr/bin/env bash\nset -euo pipefail\n%s\n' "$run_body" > "${dir}/run"
   chmod +x "${dir}/run"
 
-  # Default pre-fill is passthrough
-  printf '#!/usr/bin/env bash\ncat\n' > "${dir}/pre-fill"
-  chmod +x "${dir}/pre-fill"
-
   printf '#!/usr/bin/env bash\nexit %s\n' "$avail_exit" > "${dir}/is-available"
   chmod +x "${dir}/is-available"
 
@@ -145,23 +141,10 @@ zebra"
   is "$status" 1
 }
 
-@test "agent:exists returns 1 for a dir missing pre-fill" {
-  local dir="${SCRATCH_AGENTS_DIR}/noprefill"
-  mkdir -p "$dir"
-  printf '{}' > "${dir}/spec.json"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "${dir}/is-available"
-  chmod +x "${dir}/is-available"
-
-  run agent:exists noprefill
-  is "$status" 1
-}
-
 @test "agent:exists returns 1 for a dir missing is-available" {
   local dir="${SCRATCH_AGENTS_DIR}/noavail"
   mkdir -p "$dir"
   printf '{}' > "${dir}/spec.json"
-  printf '#!/usr/bin/env bash\ncat\n' > "${dir}/pre-fill"
-  chmod +x "${dir}/pre-fill"
 
   run agent:exists noavail
   is "$status" 1
@@ -223,8 +206,6 @@ zebra"
   printf '{}' > "${dir}/spec.json"
   printf '#!/usr/bin/env bash\ncat\n' > "${dir}/run"
   chmod +x "${dir}/run"
-  printf '#!/usr/bin/env bash\ncat\n' > "${dir}/pre-fill"
-  chmod +x "${dir}/pre-fill"
   printf '#!/usr/bin/env bash\necho "missing precondition foo" >&2\nexit 1\n' > "${dir}/is-available"
   chmod +x "${dir}/is-available"
 
@@ -390,8 +371,6 @@ zebra"
   printf '{}' > "${dir}/spec.json"
   printf '#!/usr/bin/env bash\necho "should not run"\n' > "${dir}/run"
   chmod +x "${dir}/run"
-  printf '#!/usr/bin/env bash\ncat\n' > "${dir}/pre-fill"
-  chmod +x "${dir}/pre-fill"
   printf '#!/usr/bin/env bash\necho "edit mode required" >&2\nexit 1\n' > "${dir}/is-available"
   chmod +x "${dir}/is-available"
 
@@ -471,7 +450,7 @@ agent:run recursive 2>&1 || true
 #
 # Each test stubs chat:completion and the model profile lookups directly
 # in the test process. Fake agents are created with spec.json (including
-# profile) and pre-fill scripts so the new agent:complete flow is
+# profile) and system_prompt declarations so the new agent:complete flow is
 # exercised end to end (minus real API calls).
 # ===========================================================================
 
@@ -516,7 +495,8 @@ setup_complete_stubs() {
   export -f tool:box
 }
 
-# Create a fake agent with a pre-fill that prepends a system prompt
+# Create a fake agent that declares a system_prompt via spec.json (the
+# new declarative form replacing per-agent pre-fill scripts).
 _make_prefill_agent() {
   local name="$1"
   local profile="${2:-balanced}"
@@ -525,21 +505,9 @@ _make_prefill_agent() {
 
   mkdir -p "$dir"
 
-  jq -n --arg n "$name" --arg p "$profile" \
-    '{name: $n, description: "test", profile: $p}' \
+  jq -n --arg n "$name" --arg p "$profile" --arg sp "$prompt_file" \
+    '{name: $n, description: "test", profile: $p, system_prompt: $sp}' \
     > "${dir}/spec.json"
-
-  # Pre-fill that prepends the named prompt
-  cat > "${dir}/pre-fill" << SCRIPT
-#!/usr/bin/env bash
-set -euo pipefail
-source "\$SCRATCH_HOME/lib/base.sh"
-source "\$SCRATCH_HOME/lib/prompt.sh"
-messages="\$(cat)"
-sys="\$(prompt:load "$prompt_file")"
-jq -c --arg sys "\$sys" '[{role:"system",content:\$sys}] + .' <<< "\$messages"
-SCRIPT
-  chmod +x "${dir}/pre-fill"
 
   printf '#!/usr/bin/env bash\ncat\n' > "${dir}/run"
   chmod +x "${dir}/run"
@@ -557,7 +525,7 @@ SCRIPT
   is "$output" "hello world"
 }
 
-@test "agent:simple-completion: pre-fill prepends system prompt" {
+@test "agent:simple-completion: system_prompt is prepended to messages" {
   setup_complete_stubs
   printf 'MARKER_SYSTEM_PROMPT\n' > "${SCRATCH_PROMPTS_DIR}/marked.md"
   _make_prefill_agent markedbot balanced marked

@@ -3,19 +3,15 @@
 #-------------------------------------------------------------------------------
 # Agent layer
 #
-# An agent in scratch is a self-contained directory under agents/ with four
-# required files:
+# An agent in scratch is a self-contained directory under agents/ with:
 #
-#   agents/<name>/spec.json    - metadata: name, description. Optional fields:
-#                                profile (model profile name), toolbox or
-#                                tools (tool access), extras (additional
-#                                completion params).
-#   agents/<name>/pre-fill     - executable; transforms the messages array
-#                                before completion. Reads a JSON messages
-#                                array from stdin, prints the transformed
-#                                array to stdout. Common use: prepend a
-#                                system prompt. Passthrough (cat) for agents
-#                                that manage prompts internally.
+#   agents/<name>/spec.json    - metadata + config. Required: name,
+#                                description. Optional: profile (model
+#                                profile name), toolbox or tools (tool
+#                                access), extras (completion params),
+#                                system_prompt (path under data/prompts/
+#                                — agent:complete prepends it as the
+#                                first system message).
 #   agents/<name>/run          - executable entrypoint for standalone mode;
 #                                any language. Reads user input on stdin,
 #                                prints final response to stdout. Optional
@@ -26,10 +22,11 @@
 # Two invocation modes:
 #
 #   agent:complete NAME MESSAGES_VAR
-#     Multi-turn entry point. Pipes messages through pre-fill, resolves
-#     model/tools from spec.json, runs the completion+tool-call loop,
-#     appends intermediate messages to MESSAGES_VAR, prints final text
-#     to stdout. The caller owns display and persistence.
+#     Multi-turn entry point. Loads the system_prompt from spec.json (if
+#     declared) and prepends it, resolves model/tools from spec.json, runs
+#     the completion+tool-call loop, appends intermediate messages to
+#     MESSAGES_VAR, prints final text to stdout. The caller owns display
+#     and persistence.
 #
 #   agent:run NAME
 #     Standalone mode. Execs the run script with stdin/stdout piped
@@ -37,7 +34,7 @@
 #     multi-phase agents (intuition, summary) that manage their own
 #     completion lifecycle.
 #
-# Environment contract for run/pre-fill scripts:
+# Environment contract for run scripts:
 #
 #   SCRATCH_AGENT_DIR    absolute path to agents/<name>/
 #   SCRATCH_HOME         absolute path to the scratch repo root
@@ -134,10 +131,13 @@ export -f agent:list
 #-------------------------------------------------------------------------------
 # agent:exists NAME
 #
-# Return 0 if agents/NAME/ has all required files (spec.json, pre-fill,
+# Return 0 if agents/NAME/ has the required files (spec.json,
 # is-available). The run script is optional (agents that only use
-# agent:complete don't need it). Does NOT check executable bits; that's
-# the contract test's job at structural-validation time.
+# agent:complete don't need it). pre-fill is also optional now: if
+# present it's still respected for backward compatibility, but the
+# canonical way to inject a system prompt is the `system_prompt` field
+# in spec.json. Does NOT check executable bits; that's the contract
+# test's job at structural-validation time.
 #-------------------------------------------------------------------------------
 agent:exists() {
   local name="$1"
@@ -145,7 +145,6 @@ agent:exists() {
   agents_dir="$(agent:agents-dir)"
 
   [[ -f "${agents_dir}/${name}/spec.json" ]] || return 1
-  [[ -f "${agents_dir}/${name}/pre-fill" ]] || return 1
   [[ -f "${agents_dir}/${name}/is-available" ]] || return 1
   return 0
 }
@@ -161,7 +160,7 @@ export -f agent:exists
 agent:dir() {
   local name="$1"
   if ! agent:exists "$name"; then
-    die "agent: not found: $name (expected agents/$name/ with spec.json + pre-fill + is-available)"
+    die "agent: not found: $name (expected agents/$name/ with spec.json + is-available)"
     return 1
   fi
   printf '%s\n' "$(agent:agents-dir)/$name"
@@ -456,37 +455,43 @@ export -f agent:tools
 #-------------------------------------------------------------------------------
 # agent:pre-fill NAME MESSAGES_VAR
 #
-# Pipe the messages array through the agent's pre-fill script and assign
-# the result back to MESSAGES_VAR. The pre-fill script receives the JSON
-# messages array on stdin and prints the transformed array to stdout.
+# Inject the agent's system prompt (declared via spec.json's optional
+# `system_prompt` field) into the messages array, assigning the result
+# back to MESSAGES_VAR.
 #
-# Runs in a subshell with the agent env contract so pre-fill can source
-# scratch libraries via SCRATCH_HOME.
+# Skip the injection if a system message is already first in the array
+# (caller may be resuming a conversation that was already pre-filled in
+# a prior round). No-op if the agent has no system_prompt declared.
+#
+# Replaces the per-agent pre-fill script. The 99% case (each agent
+# wanted to prepend its own system prompt with a "skip if already
+# present" guard) is now declarative — see agents/*/spec.json.
 #-------------------------------------------------------------------------------
 agent:pre-fill() {
   local name="$1"
   local -n _apf_messages="$2"
 
-  local pre_fill_script
-  pre_fill_script="$(agent:agents-dir)/$name/pre-fill"
+  local prompt_path
+  prompt_path="$(agent:spec "$name" | jq -r '.system_prompt // empty')"
 
-  if [[ ! -x "$pre_fill_script" ]]; then
-    die "agent: '$name' has no executable pre-fill script"
-    return 1
+  # No system_prompt declared — agent uses messages as-is.
+  if [[ -z "$prompt_path" ]]; then
+    return 0
   fi
 
+  # Already-present system message wins; don't shadow it.
+  local has_system
+  has_system="$(jq '.[0].role == "system"' <<< "$_apf_messages" 2> /dev/null || echo false)"
+  if [[ "$has_system" == "true" ]]; then
+    return 0
+  fi
+
+  local system_prompt
+  system_prompt="$(prompt:load "$prompt_path")"
+
   # shellcheck disable=SC2034
-  # SC2030/SC2031: env modifications are intentionally subshell-local.
-  # shellcheck disable=SC2030,SC2031
-  _apf_messages="$(
-    (
-      export SCRATCH_AGENT_DIR
-      SCRATCH_AGENT_DIR="$(agent:agents-dir)/$name"
-      export SCRATCH_HOME
-      SCRATCH_HOME="$(cd "$_AGENT_SCRIPTDIR/.." && pwd -P)"
-      printf '%s' "$_apf_messages" | "$pre_fill_script"
-    )
-  )"
+  _apf_messages="$(jq -c --arg sys "$system_prompt" \
+    '[{role: "system", content: $sys}] + .' <<< "$_apf_messages")"
 }
 
 export -f agent:pre-fill

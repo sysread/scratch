@@ -12,7 +12,8 @@ set -euo pipefail
 #   1. spec.json exists, parses as JSON, has .name and .description fields,
 #      and the .name field matches the directory basename.
 #   2. .name follows the [a-z][a-z0-9_-]* convention (shell-safe identifiers).
-#   3. pre-fill exists, is +x, has a bash shebang.
+#   3. If spec.json declares a `system_prompt` field, the referenced
+#      prompt file (data/prompts/<path>.md) exists.
 #   4. run exists and is +x (if present; run is optional for agents that
 #      only use agent:complete).
 #   5. is-available exists, is +x, has a bash shebang, AND sources lib/base.sh.
@@ -125,33 +126,25 @@ _each_agent() {
   fi
 }
 
-@test "every agent has pre-fill, executable, with bash shebang" {
+@test "if spec.json declares system_prompt, the prompt file exists" {
   local name
   local dir
-  local shebang
+  local prompt_path
+  local prompt_file
   local -a errs=()
 
   while IFS= read -r name; do
     [[ -z "$name" ]] && continue
     dir="${SCRATCH_HOME}/agents/${name}"
 
-    if [[ ! -f "${dir}/pre-fill" ]]; then
-      errs+=("${name}: missing pre-fill")
-      continue
-    fi
+    prompt_path="$(jq -r '.system_prompt // empty' "${dir}/spec.json")"
+    [[ -z "$prompt_path" ]] && continue
 
-    if [[ ! -x "${dir}/pre-fill" ]]; then
-      errs+=("${name}: pre-fill is not executable")
-      continue
+    # prompt:load resolves <path> relative to data/prompts/, with .md
+    prompt_file="${SCRATCH_HOME}/data/prompts/${prompt_path}.md"
+    if [[ ! -f "$prompt_file" ]]; then
+      errs+=("${name}: spec.json declares system_prompt='${prompt_path}' but ${prompt_file} does not exist")
     fi
-
-    shebang="$(head -n1 "${dir}/pre-fill")"
-    case "$shebang" in
-      "#!/usr/bin/env bash" | "#!/bin/bash" | "#!/usr/bin/bash") ;;
-      *)
-        errs+=("${name}: pre-fill must be bash (shebang was: ${shebang})")
-        ;;
-    esac
   done < <(_each_agent)
 
   if ((${#errs[@]} > 0)); then
