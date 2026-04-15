@@ -49,6 +49,7 @@ SCRATCH_HOME="$(cd "$SCRIPTDIR/../.." && pwd)"
 {
   source "$SCRATCH_HOME/lib/base.sh"
   source "$SCRATCH_HOME/lib/index.sh"
+  source "$SCRATCH_HOME/lib/project.sh"
   source "$SCRATCH_HOME/lib/tui.sh"
 }
 
@@ -73,24 +74,6 @@ unset 'fs_seen[_sentinel_]'
 emit_count=0
 skip_count=0
 
-walk_files() {
-  if [[ "$is_git" == "true" ]]; then
-    git -C "$root" ls-files --cached --others --exclude-standard
-  else
-    local -a find_args=("$root" -type f)
-    local pattern
-    while IFS= read -r pattern; do
-      [[ -n "$pattern" ]] || continue
-      find_args+=(-not -path "$root/$pattern")
-    done <<< "$exclude"
-
-    find "${find_args[@]}" -print0 \
-      | while IFS= read -r -d '' path; do
-        printf '%s\n' "${path#"$root"/}"
-      done
-  fi
-}
-
 while IFS= read -r ident; do
   [[ -n "$ident" ]] || continue
   fs_seen["$ident"]=1
@@ -111,7 +94,7 @@ while IFS= read -r ident; do
   else
     skip_count=$((skip_count + 1))
   fi
-done < <(walk_files)
+done < <(project:list-files "$root" "$is_git" "$exclude")
 
 # Remove orphaned entries
 orphan_count=0

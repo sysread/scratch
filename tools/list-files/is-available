@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# list-files - availability gate
+#
+# Sources lib/base.sh to declare runtime dependencies. scratch-doctor's
+# scanner picks up `has-commands ` lines from this script.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"
+
+# jq parses SCRATCH_TOOL_ARGS_JSON. git and find are the underlying
+# filesystem walkers used by project:list-files — declared here so
+# scratch-doctor flags missing deps under tool:list-files.
+has-commands jq git find

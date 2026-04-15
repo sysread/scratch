@@ -1,0 +1,14 @@
+{
+  "name": "list-files",
+  "description": "List files in the project using the same filtering rules as the indexer. For git projects, respects .gitignore via `git ls-files --cached --others --exclude-standard`. For non-git projects, applies the project's configured exclude globs. Returns newline-separated paths relative to the project root. Optional glob pattern narrows the result.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "pattern": {
+        "type": "string",
+        "description": "Optional glob pattern to filter results. Matched against paths relative to the project root using bash pattern matching (globstar + extglob enabled). NOTE: unlike shell glob expansion, `*` matches across `/` boundaries, so `lib/*.sh` matches any .sh file under lib/ at any depth. Examples: `lib/*.sh` (all shell files anywhere under lib/), `*.md` (markdown anywhere), `helpers/**` (everything under helpers/). Omit to list all files."
+      }
+    },
+    "required": []
+  }
+}

@@ -334,3 +334,47 @@ project:is-git() {
 }
 
 export -f project:is-git
+
+#-------------------------------------------------------------------------------
+# project:list-files ROOT IS_GIT [EXCLUDE]
+#
+# Emit one relative-to-ROOT path per line for each file in the project
+# that passes the indexer's filtering rules.
+#
+# For git projects (IS_GIT="true"), uses
+#   git ls-files --cached --others --exclude-standard
+# so .gitignore is honored and untracked-but-not-ignored files show up.
+#
+# For non-git projects, uses `find -type f` with EXCLUDE patterns
+# excluded. EXCLUDE is a newline-separated list of path globs relative
+# to ROOT (e.g. "node_modules/*").
+#
+# This is the single source of truth for "which files count as part of
+# the project" — helpers/index/produce and tools/list-files both call
+# through here. Any filtering divergence between the indexer and the
+# list-files tool would be a bug in one of the callers, not a missing
+# feature here.
+#-------------------------------------------------------------------------------
+project:list-files() {
+  local root="$1"
+  local is_git="$2"
+  local exclude="${3:-}"
+
+  if [[ "$is_git" == "true" ]]; then
+    git -C "$root" ls-files --cached --others --exclude-standard
+  else
+    local -a find_args=("$root" -type f)
+    local pattern
+    while IFS= read -r pattern; do
+      [[ -n "$pattern" ]] || continue
+      find_args+=(-not -path "$root/$pattern")
+    done <<< "$exclude"
+
+    find "${find_args[@]}" -print0 \
+      | while IFS= read -r -d '' path; do
+        printf '%s\n' "${path#"$root"/}"
+      done
+  fi
+}
+
+export -f project:list-files

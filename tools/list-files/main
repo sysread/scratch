@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# list-files - list project files using the indexer's filtering rules
+#
+# Delegates file enumeration to project:list-files, so the tool and the
+# indexer always see the same set of files. For git projects, that means
+# .gitignore is respected. For non-git projects, the project's configured
+# exclude globs are applied.
+#
+# Reads its arguments from $SCRATCH_TOOL_ARGS_JSON (set by tool:invoke):
+#
+#   {"pattern": "lib/*.sh"}    # optional glob filter
+#   {}                         # list everything
+#
+# Output: newline-separated paths relative to the project root.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/project.sh"
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/tui.sh"
+
+# globstar enables `**` recursive matching in bash [[ == glob ]] tests
+# so agents can filter with patterns like "helpers/**" or "lib/**/*.sh".
+# extglob unlocks ?(), +(), etc. — harmless extras in case they're used.
+shopt -s globstar extglob
+
+# --- Parse arguments ---
+
+pattern="$(jq -r '.pattern // empty' <<< "$SCRATCH_TOOL_ARGS_JSON")"
+
+# --- Resolve project ---
+
+if [[ -z "${SCRATCH_PROJECT:-}" ]]; then
+  tui:error "list-files: SCRATCH_PROJECT is not set"
+  echo "list-files: SCRATCH_PROJECT is not set" >&2
+  exit 1
+fi
+
+proj_root=""
+proj_is_git=""
+proj_exclude=""
+if ! project:load "$SCRATCH_PROJECT" proj_root proj_is_git proj_exclude; then
+  tui:error "list-files: failed to load project" project "$SCRATCH_PROJECT"
+  echo "list-files: failed to load project: $SCRATCH_PROJECT" >&2
+  exit 1
+fi
+
+# --- Walk and filter ---
+
+count=0
+while IFS= read -r path; do
+  [[ -n "$path" ]] || continue
+  if [[ -n "$pattern" ]]; then
+    # `[[ $path == $pattern ]]` is a bash glob match (NOT regex).
+    # Don't quote $pattern — that disables globbing.
+    # shellcheck disable=SC2053
+    [[ "$path" == $pattern ]] || continue
+  fi
+  printf '%s\n' "$path"
+  count=$((count + 1))
+done < <(project:list-files "$proj_root" "$proj_is_git" "$proj_exclude")
+
+tui:info "list-files" project "$SCRATCH_PROJECT" count "$count" pattern "${pattern:-(all)}"
