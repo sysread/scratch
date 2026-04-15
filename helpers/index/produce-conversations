@@ -143,9 +143,10 @@ while IFS=$'\t' read -r ident sha; do
   idx_sha["$ident"]="$sha"
 done < <(index:list "$project" conversation)
 
-# Walk conversations, diff, and emit
+# Walk conversations, diff, buffer emissions.
 declare -A fs_seen=([_sentinel_]=1)
 unset 'fs_seen[_sentinel_]'
+declare -a to_emit=()
 emit_count=0
 skip_count=0
 
@@ -181,8 +182,8 @@ for dir in "$chats_dir"/*/; do
     continue
   fi
 
-  jq -c -n --arg id "$slug" --arg sha "$file_sha" --arg file "$transcript_path" \
-    '{id: $id, sha: $sha, file: $file, type: "conversation"}'
+  to_emit+=("$(jq -c -n --arg id "$slug" --arg sha "$file_sha" --arg file "$transcript_path" \
+    '{id: $id, sha: $sha, file: $file, type: "conversation"}')")
   emit_count=$((emit_count + 1))
 done
 
@@ -201,4 +202,11 @@ if [[ -n "${TUI_PROGRESS_FILE:-}" ]]; then
   printf '0 %d\n' "$emit_count" > "$TUI_PROGRESS_FILE"
 fi
 
+# Announce exact work count to working.exs via stderr.
+printf '# total=%d\n' "$emit_count" >&2
+
 tui:debug "conversation diff" to_process "$emit_count" orphans_removed "$orphan_count" current "$skip_count"
+
+for item in "${to_emit[@]}"; do
+  printf '%s\n' "$item"
+done

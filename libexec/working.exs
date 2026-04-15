@@ -241,6 +241,12 @@ defmodule Working do
   # Line handling
   #---------------------------------------------------------------------------
 
+  # Producers emit this sentinel on stderr once they know the exact work
+  # count. Everything upstream gets merged to stdin via 2>&1, so we see
+  # it here and use it to correct the bar's denominator. The sentinel
+  # itself is consumed (not shown as a log line).
+  @total_pattern ~r/^# total=(\d+)$/
+
   def extract_item(line, nil), do: line
 
   def extract_item(line, regex) do
@@ -252,25 +258,42 @@ defmodule Working do
   end
 
   def process_line(line, {done, recent, opts}) do
-    if Regex.match?(opts.match, line) do
-      item = extract_item(line, opts.extract)
-      new_done = done + 1
-      # Newest first; keep only the last N
-      new_recent = [item | recent] |> Enum.take(opts.recent_max)
+    case Regex.run(@total_pattern, line) do
+      [_, total_str] ->
+        # Dynamic-total update. The initial --total passed by the caller
+        # is only an upper-bound estimate; producers announce the exact
+        # count once they've walked their source. Re-render the progress
+        # block so the denominator and percentage update immediately.
+        new_total = String.to_integer(total_str)
+        new_opts = %{opts | total: new_total}
 
-      Owl.LiveScreen.update(
-        @progress_block,
-        {new_done, opts.total, opts.width, opts.label}
-      )
+        Owl.LiveScreen.update(
+          @progress_block,
+          {done, new_total, opts.width, opts.label}
+        )
 
-      Owl.LiveScreen.update(@recent_block, new_recent)
+        {done, recent, new_opts}
 
-      {new_done, new_recent, opts}
-    else
-      # Non-matching line scrolls above the live region.
-      # IO.puts routes through Owl which handles the clear/reprint dance.
-      IO.puts(line)
-      {done, recent, opts}
+      nil ->
+        if Regex.match?(opts.match, line) do
+          item = extract_item(line, opts.extract)
+          new_done = done + 1
+          new_recent = [item | recent] |> Enum.take(opts.recent_max)
+
+          Owl.LiveScreen.update(
+            @progress_block,
+            {new_done, opts.total, opts.width, opts.label}
+          )
+
+          Owl.LiveScreen.update(@recent_block, new_recent)
+
+          {new_done, new_recent, opts}
+        else
+          # Non-matching line scrolls above the live region.
+          # IO.puts routes through Owl which handles the clear/reprint dance.
+          IO.puts(line)
+          {done, recent, opts}
+        end
     end
   end
 

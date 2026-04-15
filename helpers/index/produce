@@ -68,9 +68,12 @@ while IFS=$'\t' read -r ident sha; do
   idx_sha["$ident"]="$sha"
 done < <(index:list "$project" file)
 
-# Walk filesystem, diff, and emit
+# Walk filesystem, diff, buffer work items. Buffering (rather than
+# emitting as we go) lets us announce an exact total before any items
+# reach the pipeline's progress UI.
 declare -A fs_seen=([_sentinel_]=1)
 unset 'fs_seen[_sentinel_]'
+declare -a to_emit=()
 emit_count=0
 skip_count=0
 
@@ -83,20 +86,21 @@ while IFS= read -r ident; do
 
   file_sha="$(shasum -a 256 "$file_path" | cut -d' ' -f1)"
 
-  if [[ -z "${idx_sha[$ident]:-}" ]]; then
-    jq -c -n --arg id "$ident" --arg sha "$file_sha" --arg file "$file_path" \
-      '{id: $id, sha: $sha, file: $file, type: "file"}'
-    emit_count=$((emit_count + 1))
-  elif [[ "${idx_sha[$ident]}" != "$file_sha" ]]; then
-    jq -c -n --arg id "$ident" --arg sha "$file_sha" --arg file "$file_path" \
-      '{id: $id, sha: $sha, file: $file, type: "file"}'
+  # Buffer work items. We can't emit them yet — working.exs needs an
+  # accurate total first to draw a meaningful progress bar. Emitting as
+  # we walk would force working.exs to use scratch-index's upper-bound
+  # estimate (e.g. "all files in project"), and the bar would max out at
+  # a few percent when most files are already indexed.
+  if [[ -z "${idx_sha[$ident]:-}" || "${idx_sha[$ident]}" != "$file_sha" ]]; then
+    to_emit+=("$(jq -c -n --arg id "$ident" --arg sha "$file_sha" --arg file "$file_path" \
+      '{id: $id, sha: $sha, file: $file, type: "file"}')")
     emit_count=$((emit_count + 1))
   else
     skip_count=$((skip_count + 1))
   fi
 done < <(project:list-files "$root" "$is_git" "$exclude")
 
-# Remove orphaned entries
+# Remove orphaned entries (indexed files that no longer exist on disk).
 orphan_count=0
 for ident in "${!idx_sha[@]}"; do
   if [[ -z "${fs_seen[$ident]:-}" ]]; then
@@ -106,9 +110,21 @@ for ident in "${!idx_sha[@]}"; do
 done
 
 # Publish the total to the spinner progress file so downstream stages
-# can report completion as [done/total].
+# can report completion as [done/total] for the legacy tui:with-spinner
+# callers that don't pipe through working.exs.
 if [[ -n "${TUI_PROGRESS_FILE:-}" ]]; then
   printf '0 %d\n' "$emit_count" > "$TUI_PROGRESS_FILE"
 fi
 
+# Announce the exact work count to working.exs via stderr (reaches its
+# stdin through the 2>&1 merge in bin/scratch-index). working.exs
+# consumes this sentinel to update the progress bar's denominator —
+# it doesn't appear as log output.
+printf '# total=%d\n' "$emit_count" >&2
+
 tui:debug "index diff" to_process "$emit_count" orphans_removed "$orphan_count" current "$skip_count"
+
+# Now emit the buffered work items for the rest of the pipeline.
+for item in "${to_emit[@]}"; do
+  printf '%s\n' "$item"
+done

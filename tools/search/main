@@ -37,15 +37,22 @@ source "$SCRATCH_HOME/lib/tui.sh"
 #
 # Emit three integers on stdout, space-separated: files_stale commits_new chats_stale.
 #
-# - files_stale: files whose mtime is newer than LAST_EPOCH (the index's
-#   last_indexed_at). Uses stat which is fast; doesn't do SHA comparison,
-#   so touched-but-unchanged files register as stale. Acceptable for a
-#   heuristic.
-# - commits_new: commits on HEAD that are not in the commit index.
-# - chats_stale: conversations whose messages.jsonl mtime is newer than
-#   LAST_EPOCH.
+# Per-type heuristics, chosen for cheap and accurate-ish:
 #
-# Returns "0 0 0" if LAST_EPOCH is empty (i.e. index has never been built).
+# - files_stale:
+#     git projects: `git status --porcelain` counts modified+added+deleted+
+#     untracked files. Reflects real working-tree changes (not mtime
+#     touches from checkouts / rebases).
+#     non-git:      fallback to mtime > LAST_EPOCH per file.
+#
+# - commits_new: git rev-list HEAD minus the set of commit identifiers
+#   already in the index. Exact.
+#
+# - chats_stale: conversations whose messages.jsonl mtime > LAST_EPOCH.
+#   Chats aren't touched by other tools, so mtime is reliable here.
+#
+# Returns "0 0 0" if LAST_EPOCH is empty (index has never been built),
+# though the caller also gates on that.
 #-------------------------------------------------------------------------------
 _search:_count-stale() {
   local project="$1"
@@ -64,16 +71,24 @@ _search:_count-stale() {
   fi
 
   local files_stale=0
-  local rel fpath mtime
-  while IFS= read -r rel; do
-    [[ -n "$rel" ]] || continue
-    fpath="${root}/${rel}"
-    [[ -f "$fpath" ]] || continue
-    mtime="$(stat -f %m "$fpath" 2> /dev/null || stat -c %Y "$fpath" 2> /dev/null || echo 0)"
-    if ((mtime > last_epoch)); then
-      files_stale=$((files_stale + 1))
-    fi
-  done < <(project:list-files "$root" "$is_git" "$exclude")
+  if [[ "$is_git" == "true" ]]; then
+    # git status --porcelain prints one line per changed file. Blank
+    # output means zero changes. grep -c . is safer than wc -l here
+    # because grep returns 0 when nothing matches.
+    files_stale="$(git -C "$root" status --porcelain 2> /dev/null | grep -c . || true)"
+    [[ -z "$files_stale" ]] && files_stale=0
+  else
+    local rel fpath mtime
+    while IFS= read -r rel; do
+      [[ -n "$rel" ]] || continue
+      fpath="${root}/${rel}"
+      [[ -f "$fpath" ]] || continue
+      mtime="$(stat -f %m "$fpath" 2> /dev/null || stat -c %Y "$fpath" 2> /dev/null || echo 0)"
+      if ((mtime > last_epoch)); then
+        files_stale=$((files_stale + 1))
+      fi
+    done < <(project:list-files "$root" "$is_git" "$exclude")
+  fi
 
   # Commits: diff rev-list HEAD against indexed commit identifiers.
   local commits_new=0
@@ -83,18 +98,19 @@ _search:_count-stale() {
     local all_commits
     all_commits="$(git -C "$root" rev-list HEAD 2> /dev/null | sort)"
     if [[ -n "$all_commits" ]]; then
-      commits_new="$(comm -23 <(printf '%s\n' "$all_commits") <(printf '%s\n' "$indexed_commits") | grep -c .)" || commits_new=0
+      commits_new="$(comm -23 <(printf '%s\n' "$all_commits") <(printf '%s\n' "$indexed_commits") | grep -c . || true)"
+      [[ -z "$commits_new" ]] && commits_new=0
     fi
   fi
 
   # Chats: mtime of each chat's messages.jsonl vs last_epoch.
   local chats_stale=0
   if [[ -d "$chats_dir" ]]; then
-    local chat_msgs
+    local chat_msgs chat_mtime
     for chat_msgs in "$chats_dir"/*/messages.jsonl; do
       [[ -f "$chat_msgs" ]] || continue
-      mtime="$(stat -f %m "$chat_msgs" 2> /dev/null || stat -c %Y "$chat_msgs" 2> /dev/null || echo 0)"
-      if ((mtime > last_epoch)); then
+      chat_mtime="$(stat -f %m "$chat_msgs" 2> /dev/null || stat -c %Y "$chat_msgs" 2> /dev/null || echo 0)"
+      if ((chat_mtime > last_epoch)); then
         chats_stale=$((chats_stale + 1))
       fi
     done
