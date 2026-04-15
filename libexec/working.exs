@@ -209,13 +209,24 @@ defmodule Working do
   # edge-to-edge, but it also doesn't wrap.
   @rule_max_width 80
 
-  def render_separator(_state) do
-    # Rule spans up to @rule_max_width columns, or the terminal width if
-    # narrower. Flanked by blank lines above and below so it stands away
-    # from the INFO logs above and the spinner/label below.
-    width = min(@rule_max_width, terminal_columns())
-    bar = String.duplicate("─", width)
-    ["\n", IO.ANSI.format_fragment([:cyan, bar, :reset], true), "\n"]
+  def render_separator({label}) do
+    # Cyan rule followed by the green phase label, mimicking
+    # _chat:print-separator's "rule + metadata on the right" style.
+    # Rule width is the cap-or-terminal-width MINUS room for the label
+    # and a single-space gap, so total visible width matches the rule
+    # length it would have had alone.
+    target_width = min(@rule_max_width, terminal_columns())
+    label_width = String.length(label) + 1
+    rule_width = max(10, target_width - label_width)
+    bar = String.duplicate("─", rule_width)
+
+    [
+      "\n",
+      IO.ANSI.format_fragment([:cyan, bar, :reset], true),
+      " ",
+      IO.ANSI.format_fragment([:green, label, :reset], true),
+      "\n"
+    ]
   end
 
   def render_spinner(:hidden), do: ""
@@ -237,24 +248,14 @@ defmodule Working do
 
   def render_progress(:hidden), do: ""
 
-  # "Up to date" terminal state: render the label and a green-italic
-  # confirmation in place of the progress bar. Used when the producer
-  # announced `# total=0` so the phase still gets a visible section
-  # header and marker in scrollback — matching the shape of the files
-  # and commits phases — instead of vanishing entirely.
-  def render_progress({:up_to_date, label}) do
-    # Return iodata (a list) instead of a binary so the ANSI format
-    # tokens compose cleanly. `<>` would require both sides be binaries,
-    # and IO.ANSI.format_fragment/2 returns a list. Owl accepts iodata
-    # from render functions.
-    [
-      IO.ANSI.format_fragment([:green, label, :reset], true),
-      "\n",
-      IO.ANSI.format_fragment([:green, :italic, "  ✓ up to date", :reset], true)
-    ]
+  # "Up to date" terminal state: render a green-italic confirmation in
+  # place of the progress bar. The phase label has already been printed
+  # by the separator block, so we don't repeat it here.
+  def render_progress(:up_to_date) do
+    IO.ANSI.format_fragment([:green, :italic, "  ✓ up to date", :reset], true)
   end
 
-  def render_progress({done, total, _width_unused, label}) do
+  def render_progress({done, total, _width_unused, _label_unused}) do
     pct =
       if total > 0 do
         min(100, trunc(done * 100 / total))
@@ -277,15 +278,10 @@ defmodule Working do
     padded = bar <> String.duplicate(" ", tail_pad)
     counter = "[#{done}/#{total} - #{pct}%]"
 
-    # Label colored green; the bar line itself stays default-colored so
-    # the = / > characters remain visually readable against any theme.
-    [
-      IO.ANSI.format_fragment([:green, label, :reset], true),
-      "\n[",
-      padded,
-      "]",
-      counter
-    ]
+    # Just the bar + counter; the phase label is rendered by the
+    # separator block. Bar characters stay default-colored so the =/>
+    # stays readable against any terminal theme.
+    "[" <> padded <> "]" <> counter
   end
 
   def render_recent(:hidden), do: ""
@@ -395,7 +391,7 @@ defmodule Working do
     # Blocks render top-to-bottom in the order they're added. The separator
     # sits between scrolling log output above and the pinned status UI below.
     Owl.LiveScreen.add_block(@separator_block,
-      state: {opts.width},
+      state: {opts.label},
       render: &render_separator/1
     )
 
@@ -450,7 +446,7 @@ defmodule Working do
       # which is acceptable here (better than an animating spinner frozen
       # above an already-complete "up to date" message).
       Owl.LiveScreen.update(@spinner_block, :hidden)
-      Owl.LiveScreen.update(@progress_block, {:up_to_date, final_opts.label})
+      Owl.LiveScreen.update(@progress_block, :up_to_date)
       Owl.LiveScreen.update(@recent_block, :hidden)
       Owl.LiveScreen.await_render()
     else
