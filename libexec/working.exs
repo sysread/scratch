@@ -365,12 +365,17 @@ defmodule Working do
       |> Stream.map(&String.trim_trailing/1)
       |> Enum.reduce({0, [], opts}, &process_line/2)
 
-    # Flush any pending Owl renders. No summary line — the final state of
-    # the live region (which Owl commits to scrollback on exit) is already
-    # an accurate at-a-glance summary.
-    Owl.LiveScreen.await_render()
+    {done, recent, final_opts} = final_state
 
-    _ = final_state
+    # Force one last synchronous update for the progress + recent blocks
+    # so any in-flight state (especially the final "ok" line from the
+    # pipeline's very last item) is reflected on screen BEFORE Owl
+    # commits the live region to scrollback. Without this, a close race
+    # between stdin EOF and Owl's internal render timer can commit a
+    # stale snapshot — [N-1/N] instead of [N/N] in scrollback.
+    Owl.LiveScreen.update(@progress_block, {done, final_opts.total, final_opts.width, final_opts.label})
+    Owl.LiveScreen.update(@recent_block, recent)
+    Owl.LiveScreen.await_render()
   end
 end
 
