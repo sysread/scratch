@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# attachment-minter agent - availability check
+#
+# Always available. Uses chat + model + prompt transitively.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"

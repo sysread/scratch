@@ -622,6 +622,13 @@ main() {
     _chat:debug "message appended" role user size "${#user_input}"
     _chat:display-message user "$user_input"
 
+    # Apply the user's reaction to the previous turn's fires. Silently
+    # skipped when the classifier returns 'neutral' or when there are no
+    # unresolved fires. This closes the reinforcement loop without
+    # needing any dedicated UI. Must happen BEFORE firing for this turn
+    # so the new fires start in an unresolved state.
+    attachments:apply-reaction "$project_name" "$user_input" 2> /dev/null || true
+
     # Fire attachments for this turn. The coordinator pre-fill reads
     # SCRATCH_ATTACHMENTS_FIRED_FILE (if non-empty) and appends a priming
     # block to its system prompt. Firing is synchronous here in Phase 2;

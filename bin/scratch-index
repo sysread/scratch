@@ -204,6 +204,21 @@ main() {
     _index_chats
   fi
 
+  # Attachments consolidation runs after the content phases. It reads
+  # accumulated substrate, builds associations, clusters them, and mints
+  # new attachments where signal is strong enough. One ok-line per phase
+  # keeps the progress bar advancing. See
+  # /root/.claude/plans/piped-prancing-cat.md for the design.
+  _consolidate_attachments() {
+    ( "$helpers/consolidate-attachments" "$project_name" ) 2>&1 \
+      | working:run \
+        --total 4 \
+        --match '^ok ' \
+        --extract '^ok (.+)' \
+        --label 'Consolidating attachments:'
+  }
+  _consolidate_attachments
+
   local end_time elapsed
   end_time="$(date +%s)"
   elapsed=$((end_time - start_time))

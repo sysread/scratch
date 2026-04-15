@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# relator agent - availability check
+#
+# Always available. Uses chat + model + prompt transitively, whose leaf
+# deps (curl, jq) are declared at the lib level. Sources base.sh for
+# the agent-contract test.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"
