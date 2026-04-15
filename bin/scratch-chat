@@ -106,6 +106,24 @@ _chat:debug-exit-notice() {
 }
 
 #-------------------------------------------------------------------------------
+# _chat:att-debug LABEL [KEY VALUE ...]
+#
+# Emit a visible attachments trace line via tui:info when
+# SCRATCH_DEBUG_ATTACHMENTS is set. No-op otherwise. Useful for
+# dogfooding: see what fired, what was primed, what substrate was
+# recorded, without digging through the DB.
+#
+# Exported so background subshells (_chat:record-substrate) can call it.
+# shellcheck disable=SC2329
+_chat:att-debug() {
+  [[ -n "${SCRATCH_DEBUG_ATTACHMENTS:-}" ]] || return 0
+  local label="$1"
+  shift
+  tui:info "attachments[$label]" "$@"
+}
+export -f _chat:att-debug
+
+#-------------------------------------------------------------------------------
 # _chat:print-separator
 #
 # Print a left-aligned horizontal rule to stderr, ~1/3 of terminal width,
@@ -391,6 +409,7 @@ _chat:fire-attachments() {
   _out_ref=""
 
   if ! command -v elixir > /dev/null 2>&1; then
+    _chat:att-debug fire-skipped reason "no elixir"
     return 0
   fi
 
@@ -422,7 +441,9 @@ _chat:fire-attachments() {
     count="$(jq 'length' < "$file" 2> /dev/null || echo 0)"
     if [[ "$count" -gt 0 ]]; then
       _out_ref="$file"
+      _chat:att-debug fire-sync count "$count" budget_ms "$timeout_ms"
     else
+      _chat:att-debug fire-sync-empty budget_ms "$timeout_ms"
       rm -f "$file"
     fi
     return 0
@@ -434,6 +455,7 @@ _chat:fire-attachments() {
   local fallback
   fallback="$(attachments:setting "$project" "fallback_to_stashed" "true")"
   if [[ "$fallback" != "true" ]]; then
+    _chat:att-debug fire-timeout fallback "off" budget_ms "$timeout_ms"
     return 0
   fi
 
@@ -441,6 +463,8 @@ _chat:fire-attachments() {
   # chat dir exists by the time we get here (conversation is saved).
   local stash
   stash="$(_chat:stash-path "$project" "$slug")" || return 0
+
+  _chat:att-debug fire-timeout fallback "stashing" stash "$stash"
 
   # Use setsid + & so the child detaches from this shell's job control
   # and survives even if we continue past it. It's fine for the
@@ -492,8 +516,12 @@ _chat:record-substrate() {
     situation="${situation:0:max}..."
   fi
 
-  attachments:record-turn "$project" "$slug" "$round_idx" "$situation" \
-    > /dev/null 2>&1 || true
+  local sid
+  if sid="$(attachments:record-turn "$project" "$slug" "$round_idx" "$situation" 2> /dev/null)"; then
+    _chat:att-debug substrate-recorded id "$sid" round "${round_idx:-?}"
+  else
+    _chat:att-debug substrate-failed
+  fi
 }
 
 #-------------------------------------------------------------------------------
@@ -720,6 +748,9 @@ main() {
     # unresolved fires. This closes the reinforcement loop without
     # needing any dedicated UI. Must happen BEFORE firing for this turn
     # so the new fires start in an unresolved state.
+    local _att_reaction
+    _att_reaction="$(attachments:classify-reaction "$user_input")"
+    _chat:att-debug reaction classification "$_att_reaction"
     attachments:apply-reaction "$project_name" "$user_input" 2> /dev/null || true
 
     # Firing for this turn can come from two sources:
@@ -733,19 +764,32 @@ main() {
     # seeds the stash for the next turn.
     local fired_file=""
     _chat:consume-stash "$project_name" "$slug" fired_file
+    if [[ -n "$fired_file" ]]; then
+      _chat:att-debug stash-consumed count "$(jq 'length' < "$fired_file" 2> /dev/null || echo 0)"
+    fi
 
     local fresh_file=""
     _chat:fire-attachments "$project_name" "$slug" "$user_input" fresh_file
     if [[ -n "$fresh_file" ]]; then
+      _chat:att-debug fired count "$(jq 'length' < "$fresh_file" 2> /dev/null || echo 0)"
       # Synchronous result supersedes any stashed one.
       if [[ -n "$fired_file" ]]; then
         rm -f "$fired_file"
       fi
       fired_file="$fresh_file"
+    elif [[ -z "$fired_file" ]]; then
+      _chat:att-debug no-fire
     fi
 
     if [[ -n "$fired_file" ]]; then
       export SCRATCH_ATTACHMENTS_FIRED_FILE="$fired_file"
+      if [[ -n "${SCRATCH_DEBUG_ATTACHMENTS:-}" ]]; then
+        # Show the priming block the coordinator is about to see. Helps
+        # confirm the texture and tension lines without reading the DB.
+        local _att_priming
+        _att_priming="$(attachments:format-priming "$(cat "$fired_file")")"
+        _chat:att-debug priming $'\n'"$_att_priming"
+      fi
     fi
 
     # Run the completion round via agent:complete. The agent handles

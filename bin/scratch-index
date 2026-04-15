@@ -217,6 +217,7 @@ main() {
         --extract '^ok (.+)' \
         --label 'Consolidating attachments:'
   }
+  _inter_phase_pause
   _consolidate_attachments
 
   local end_time elapsed
