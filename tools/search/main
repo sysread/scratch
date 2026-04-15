@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# search - semantic search over the project index
+#
+# Thin wrapper around lib/search.sh's search:query. Embeds the query
+# once (via the local Bumblebee pool) and ranks indexed entries by
+# cosine similarity. The heavy lifting lives in the library — this
+# script just validates args and formats the call.
+#
+# Reads its arguments from $SCRATCH_TOOL_ARGS_JSON (set by tool:invoke):
+#
+#   {"query": "retry logic", "type": "file", "limit": 5}
+#
+# Output: tab-delimited "score<TAB>identifier" lines on stdout, top K by
+# relevance descending. For type=all, identifier is "type:identifier" so
+# mixed results can be disambiguated.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/project.sh"
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/index.sh"
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/search.sh"
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/tui.sh"
+
+# --- Parse arguments ---
+
+query="$(jq -r '.query // empty' <<< "$SCRATCH_TOOL_ARGS_JSON")"
+entry_type="$(jq -r '.type // "file"' <<< "$SCRATCH_TOOL_ARGS_JSON")"
+limit="$(jq -r '.limit // 10' <<< "$SCRATCH_TOOL_ARGS_JSON")"
+
+if [[ -z "$query" ]]; then
+  tui:error "search: query is required"
+  echo "search: query is required" >&2
+  exit 1
+fi
+
+case "$entry_type" in
+  file | conversation | commit | all) ;;
+  *)
+    tui:error "search: invalid type" type "$entry_type"
+    echo "search: invalid type '$entry_type' (must be file, conversation, commit, or all)" >&2
+    exit 1
+    ;;
+esac
+
+# --- Resolve project ---
+
+if [[ -z "${SCRATCH_PROJECT:-}" ]]; then
+  tui:error "search: SCRATCH_PROJECT is not set"
+  echo "search: SCRATCH_PROJECT is not set" >&2
+  exit 1
+fi
+
+# Ensure the index DB exists (idempotent — creates schema if missing).
+# An empty index returns zero results rather than erroring.
+index:ensure "$SCRATCH_PROJECT"
+
+# --- Run the search ---
+
+results="$(search:query "$SCRATCH_PROJECT" "$entry_type" "$query" "$limit")"
+result_count=0
+if [[ -n "$results" ]]; then
+  result_count="$(printf '%s\n' "$results" | wc -l | tr -d ' ')"
+fi
+
+tui:info "search" project "$SCRATCH_PROJECT" type "$entry_type" results "$result_count" query "$query"
+
+# Hint when the index is stale — helpful for agents deciding whether to
+# trust the results. Non-fatal; results print either way.
+if search:is-stale "$SCRATCH_PROJECT"; then
+  last="$(index:get-meta "$SCRATCH_PROJECT" "last_indexed_at" 2> /dev/null || echo "never")"
+  tui:warn "search: index is stale" last_indexed "$last"
+fi
+
+# Empty results are not an error. The agent can decide whether to prompt
+# the user to run `scratch index` or broaden the query.
+printf '%s\n' "$results"

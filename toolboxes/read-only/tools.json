@@ -3,6 +3,7 @@
   "tools": [
     "list-files",
     "notify",
-    "read-file"
+    "read-file",
+    "search"
   ]
 }

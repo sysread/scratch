@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# search - availability gate
+#
+# Sources lib/base.sh to declare runtime dependencies. scratch-doctor's
+# scanner picks up `has-commands ` lines from this script.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$SCRATCH_HOME/lib/base.sh"
+
+# jq parses SCRATCH_TOOL_ARGS_JSON. elixir and awk are transitive deps of
+# search:query (embedding + cosine ranking). sqlite3 backs the index DB.
+has-commands jq elixir awk sqlite3
