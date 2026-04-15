@@ -153,7 +153,7 @@ main() {
         --total "$files_total" \
         --match '^ok ' \
         --extract '^ok (.+)' \
-        --label 'Indexing files:'
+        --label 'files'
   }
 
   _index_commits() {
@@ -167,7 +167,7 @@ main() {
         --total "$commits_total" \
         --match '^ok ' \
         --extract '^ok (.+)' \
-        --label 'Indexing commits:'
+        --label 'commits'
   }
 
   _index_chats() {
@@ -181,7 +181,7 @@ main() {
         --total "$chats_total" \
         --match '^ok ' \
         --extract '^ok (.+)' \
-        --label 'Indexing chats:'
+        --label 'chats'
   }
 
   # Short breath between phases gives the previous phase's Owl live
