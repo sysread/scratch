@@ -475,10 +475,51 @@ _accumulate:_process-chunk-with-backoff() {
     return "$rc"
   fi
 
-  # Context overflow. Compute the shaved fraction; if it walks the floor,
-  # die loudly so the caller knows which chunk failed.
+  # Context overflow. Two sources for the next fraction:
+  #
+  #   1. Linear shave of the current fraction by `step` (the simple
+  #      conservative move).
+  #   2. Adaptive estimate based on what prompt + notes are actually
+  #      consuming right now: max_tokens - measured(prompt + notes) -
+  #      response reservation, expressed as a fraction of the model's
+  #      context. When notes have grown large, the adaptive estimate
+  #      converges to a workable size in one hop instead of slowly
+  #      shaving down via repeated overflow round-trips.
+  #
+  # We pick the SMALLER of the two so we always make progress: if
+  # adaptive is more aggressive (notes are crowding context), jump
+  # there; if our estimate was optimistic and the linear shave is
+  # smaller, take the linear path instead. Floor still applies.
+  local linear_next
+  linear_next="$(bc -l <<< "$fraction - $step")"
+
+  local total_budget_chars
+  total_budget_chars="$(bc -l <<< "$max_tokens * $cpt")"
+  # Reserve 5% of the context window for the model's response. This is
+  # a heuristic — most accumulator completions are short JSON, but we'd
+  # rather waste a few hundred tokens than overflow on the response.
+  local response_reservation
+  response_reservation="$(bc -l <<< "$total_budget_chars * 0.05")"
+  local prompt_chars=$((${#user_prompt} + ${#question}))
+  local notes_chars=${#notes}
+  local available_chars
+  available_chars="$(bc -l <<< "$total_budget_chars - $prompt_chars - $notes_chars - $response_reservation")"
+
+  local adaptive_next
+  if [[ "$(bc -l <<< "$available_chars > 0")" == "1" ]]; then
+    adaptive_next="$(bc -l <<< "$available_chars / $total_budget_chars")"
+  else
+    # Notes alone already exceed budget; adaptive can't help.
+    adaptive_next="$linear_next"
+  fi
+
   local next_fraction
-  next_fraction="$(bc -l <<< "$fraction - $step")"
+  if [[ "$(bc -l <<< "$adaptive_next < $linear_next && $adaptive_next > 0")" == "1" ]]; then
+    next_fraction="$adaptive_next"
+  else
+    next_fraction="$linear_next"
+  fi
+
   local below_floor
   below_floor="$(bc -l <<< "$next_fraction < $floor")"
   if [[ "$below_floor" == "1" ]]; then
