@@ -49,6 +49,7 @@ SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
   source "$SCRIPTDIR/../lib/agent.sh"
   source "$SCRIPTDIR/../lib/signals.sh"
   source "$SCRIPTDIR/../lib/tempfiles.sh"
+  source "$SCRIPTDIR/../lib/attachments.sh"
 }
 
 has-min-bash-version 5
@@ -325,6 +326,46 @@ _chat:is-accelerator() {
 }
 
 #-------------------------------------------------------------------------------
+# _chat:record-substrate PROJECT SLUG USER_INPUT RESPONSE
+#
+# Build a compact situation text from a just-completed round and hand it
+# off to attachments:record-turn. Intended to be called in a backgrounded
+# subshell — all output is redirected and errors swallowed, because
+# substrate recording is best-effort and must never interrupt a session.
+#
+# The round index is derived from the rounds array length in the chat's
+# metadata.json (the round we just ended is the last one). If derivation
+# fails for any reason, we pass an empty string and record-turn stores
+# NULL, which is fine: round_index is only ever a soft hint.
+#-------------------------------------------------------------------------------
+_chat:record-substrate() {
+  local project="$1"
+  local slug="$2"
+  local user_input="$3"
+  local response="$4"
+
+  local chat_dir
+  chat_dir="$(conversation:chat-dir "$project" "$slug" 2>/dev/null)" || return 0
+
+  local round_idx=""
+  if [[ -f "$chat_dir/metadata.json" ]]; then
+    round_idx="$(jq -r '.rounds | length - 1' "$chat_dir/metadata.json" 2>/dev/null || printf '')"
+  fi
+
+  # Compact situation text. Truncate defensively — this is a summary, not
+  # a transcript. Full messages remain in messages.jsonl.
+  local situation
+  printf -v situation 'User: %s\n\nAssistant: %s' "$user_input" "$response"
+  local max=2000
+  if ((${#situation} > max)); then
+    situation="${situation:0:max}..."
+  fi
+
+  attachments:record-turn "$project" "$slug" "$round_idx" "$situation" \
+    > /dev/null 2>&1 || true
+}
+
+#-------------------------------------------------------------------------------
 # Main
 #-------------------------------------------------------------------------------
 main() {
@@ -571,6 +612,12 @@ main() {
     _chat:debug "message appended" role assistant size "${#response}"
     conversation:end-round "$project_name" "$slug"
     _chat:debug "round end" slug "$slug"
+
+    # Record the just-completed round into the attachments episodic
+    # substrate. Non-blocking — the UI never waits on this, and failures
+    # are silent (substrate is best-effort; we'd rather drop an event than
+    # interrupt a conversation).
+    _chat:record-substrate "$project_name" "$slug" "$user_input" "$response" &
 
     _chat:display-message assistant "$response"
   done
