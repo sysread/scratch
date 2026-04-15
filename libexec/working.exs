@@ -210,11 +210,12 @@ defmodule Working do
   @rule_max_width 80
 
   def render_separator({label}) do
-    # Cyan rule followed by the cyan phase label (matching the rule's
-    # color), mimicking _chat:print-separator's "rule + metadata on the
-    # right" style. Rule width is the cap-or-terminal-width MINUS room
-    # for the label and a single-space gap, so total visible width
-    # matches the rule length it would have had alone.
+    # Phase label on the left, followed by a horizontal rule that fills
+    # to the right. Both rendered bright_black (dim grey) so the section
+    # header sits quietly above the live region without competing with
+    # the spinner/progress UI for attention. Total visible width is
+    # capped at @rule_max_width to dodge Owl's ANSI-confused column
+    # miscount that would otherwise wrap the rule onto a second line.
     target_width = min(@rule_max_width, terminal_columns())
     label_width = String.length(label) + 1
     rule_width = max(10, target_width - label_width)
@@ -222,7 +223,7 @@ defmodule Working do
 
     [
       "\n",
-      IO.ANSI.format_fragment([:cyan, bar, " ", label, :reset], true),
+      IO.ANSI.format_fragment([:light_black, label, " ", bar, :reset], true),
       "\n"
     ]
   end
