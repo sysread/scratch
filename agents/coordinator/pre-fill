@@ -14,6 +14,7 @@ set -euo pipefail
 {
   source "$SCRATCH_HOME/lib/base.sh"
   source "$SCRATCH_HOME/lib/prompt.sh"
+  source "$SCRATCH_HOME/lib/attachments.sh"
 }
 
 messages="$(cat)"
@@ -26,6 +27,24 @@ if [[ "$has_system" == "true" ]]; then
 fi
 
 system_prompt="$(prompt:load coordinator/system)"
+
+# If attachments fired for this turn, append the priming preamble and
+# the structured priming block to the system prompt. The caller (bin/
+# scratch-chat) exports SCRATCH_ATTACHMENTS_FIRED_FILE pointing at a JSON
+# array of fired attachments; missing, empty, or empty-array is "no
+# priming".
+if [[ -n "${SCRATCH_ATTACHMENTS_FIRED_FILE:-}" && -s "$SCRATCH_ATTACHMENTS_FIRED_FILE" ]]; then
+  fired_json="$(cat "$SCRATCH_ATTACHMENTS_FIRED_FILE")"
+  fired_count="$(jq 'length' <<<"$fired_json" 2>/dev/null || echo 0)"
+  if [[ "$fired_count" -gt 0 ]]; then
+    priming_block="$(attachments:format-priming "$fired_json")"
+    if [[ -n "$priming_block" ]]; then
+      preamble="$(prompt:load coordinator/attachments-preamble)"
+      system_prompt="${system_prompt}"$'\n\n'"${preamble}"$'\n\n'"${priming_block}"
+    fi
+  fi
+fi
+
 jq -c --arg sys "$system_prompt" \
   '[{role: "system", content: $sys}] + .' \
   <<<"$messages"

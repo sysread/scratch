@@ -50,6 +50,7 @@ SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
   source "$SCRIPTDIR/../lib/signals.sh"
   source "$SCRIPTDIR/../lib/tempfiles.sh"
   source "$SCRIPTDIR/../lib/attachments.sh"
+  source "$SCRIPTDIR/../lib/search.sh"
 }
 
 has-min-bash-version 5
@@ -316,6 +317,53 @@ _chat:is-accelerator() {
 }
 
 #-------------------------------------------------------------------------------
+# _chat:fire-attachments PROJECT SITUATION OUT_VAR
+#
+# Fire attachments for the current turn. Writes the top-k JSON to a tmp
+# file and returns its path via OUT_VAR (a nameref). If embedding fails
+# (no elixir), no attachments live, or ranking returns nothing, OUT_VAR
+# is left empty and callers skip the priming injection.
+#
+# Best-effort by design: firing must never interrupt a turn. Phase 4
+# tightens this with an explicit timeout and a cross-turn stash.
+#-------------------------------------------------------------------------------
+_chat:fire-attachments() {
+  local project="$1"
+  local situation="$2"
+  local -n _out_ref="$3"
+  _out_ref=""
+
+  # Need search:embed to turn the situation text into a vector. If it's
+  # unavailable (elixir not installed) or fails, quietly skip priming.
+  if ! command -v elixir > /dev/null 2>&1; then
+    return 0
+  fi
+
+  local embedding
+  if ! embedding="$(search:embed "$situation" 2> /dev/null)"; then
+    return 0
+  fi
+
+  local fired
+  if ! fired="$(attachments:fire "$project" "$embedding" 5 2> /dev/null)"; then
+    return 0
+  fi
+
+  # Empty array = no priming; don't bother creating a file
+  local count
+  count="$(jq 'length' <<< "$fired" 2> /dev/null || echo 0)"
+  if [[ "$count" -eq 0 ]]; then
+    return 0
+  fi
+
+  local file
+  tmp:make file /tmp/scratch-attachments-fired.XXXXXX
+  tmp:install-traps
+  printf '%s' "$fired" > "$file"
+  _out_ref="$file"
+}
+
+#-------------------------------------------------------------------------------
 # _chat:record-substrate PROJECT SLUG USER_INPUT RESPONSE
 #
 # Build a compact situation text from a just-completed round and hand it
@@ -574,6 +622,16 @@ main() {
     _chat:debug "message appended" role user size "${#user_input}"
     _chat:display-message user "$user_input"
 
+    # Fire attachments for this turn. The coordinator pre-fill reads
+    # SCRATCH_ATTACHMENTS_FIRED_FILE (if non-empty) and appends a priming
+    # block to its system prompt. Firing is synchronous here in Phase 2;
+    # Phase 4 adds a timeout + stash-for-next-turn fallback.
+    local fired_file=""
+    _chat:fire-attachments "$project_name" "$user_input" fired_file
+    if [[ -n "$fired_file" ]]; then
+      export SCRATCH_ATTACHMENTS_FIRED_FILE="$fired_file"
+    fi
+
     # Run the completion round via agent:complete. The agent handles
     # pre-fill (system prompt), model/tool resolution, and the tool-call
     # loop. Messages are modified in place; we diff before/after to
@@ -588,6 +646,13 @@ main() {
     local response=""
     agent:complete coordinator messages_array response || break
     _chat:debug "round complete" response_size "${#response}"
+
+    # Tear down the firing stash so the next turn starts fresh — priming
+    # is always one-round-scoped.
+    if [[ -n "${SCRATCH_ATTACHMENTS_FIRED_FILE:-}" ]]; then
+      rm -f "$SCRATCH_ATTACHMENTS_FIRED_FILE"
+      unset SCRATCH_ATTACHMENTS_FIRED_FILE
+    fi
 
     # Display any tool call traffic that happened during the round
     _chat:display-new-messages "$messages_array" "$before_count"

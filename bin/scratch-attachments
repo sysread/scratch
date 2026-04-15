@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch attachments — parent dispatcher for the attachments memory model
+#
+# Attachments are reinforced, affect-weighted tendencies the assistant
+# forms from recurring interactions. This parent command has no behavior
+# of its own; it delegates to leaves:
+#
+#   scratch attachments seed  -> bin/scratch-attachments-seed
+#   scratch attachments list  -> bin/scratch-attachments-list
+#   scratch attachments show  -> bin/scratch-attachments-show
+#
+# See /root/.claude/plans/piped-prancing-cat.md for the design.
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_ATTACHMENTS_DESC="Inspect and manage the attachments memory model"
+
+# Respond to synopsis BEFORE loading any libraries
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_ATTACHMENTS_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/termio.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+  source "$SCRIPTDIR/../lib/dispatch.sh"
+}
+
+has-min-bash-version 5
+
+dispatch:try "scratch-attachments" "$@" || true
+
+dispatch:usage "scratch-attachments" "$_ATTACHMENTS_DESC"
+
+case "${1:-}" in
+  "" | -h | --help | help) exit 0 ;;
+  *) exit 1 ;;
+esac

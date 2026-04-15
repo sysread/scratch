@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# scratch attachments show - show full details of one attachment
+#
+# Prints the attachment as pretty JSON including its provenance (which
+# substrate events and associations back it).
+#
+# Examples:
+#   scratch attachments show 42
+#   scratch attachments show 42 -p myproject
+#-------------------------------------------------------------------------------
+
+set -euo pipefail
+
+_DESC="Show full details of one attachment by id"
+
+if [[ "${1:-}" == "synopsis" ]]; then
+  printf '%s\n' "$_DESC"
+  exit 0
+fi
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT" ]]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" > /dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SCRIPT")"
+  [[ "$TARGET" != /* ]] && TARGET="$DIR/$TARGET"
+  SCRIPT="$TARGET"
+done
+SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+# shellcheck source-path=SCRIPTDIR/../lib
+# shellcheck disable=SC1091
+{
+  source "$SCRIPTDIR/../lib/base.sh"
+  source "$SCRIPTDIR/../lib/cmd.sh"
+  source "$SCRIPTDIR/../lib/project.sh"
+  source "$SCRIPTDIR/../lib/tui.sh"
+  source "$SCRIPTDIR/../lib/attachments.sh"
+}
+
+has-min-bash-version 5
+
+cmd:define "attachments show" "$_DESC"
+cmd:optional-arg "--project" "-p" "Project name (default: detect from cwd)" "string" ""
+cmd:required-arg "--id" "" "Attachment id to show" "string"
+cmd:parse "$@"
+
+main() {
+  local project_name
+  project:resolve-name project_name "$(cmd:get --project)"
+
+  local id
+  id="$(cmd:get --id)"
+
+  if ! attachments:show "$project_name" "$id"; then
+    tui:info "not found" project "$project_name" id "$id"
+    return 1
+  fi
+}
+
+main
