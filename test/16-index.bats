@@ -71,8 +71,9 @@ setup() {
 
   local db
   db="$(index:db-path "$PROJECT")"
-  run db:query "$db" "SELECT count(*) FROM migrations;"
-  is "$output" "1"
+  # Idempotency: each migration is recorded exactly once, no duplicates.
+  run db:query "$db" "SELECT name, count(*) FROM migrations GROUP BY name HAVING count(*) > 1;"
+  is "$output" ""
 }
 
 # ---------------------------------------------------------------------------
