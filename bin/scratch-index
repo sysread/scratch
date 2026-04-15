@@ -152,7 +152,7 @@ main() {
       | working:run \
         --total "$files_total" \
         --match '^ok ' \
-        --extract '^ok (.+)' \
+        --extract '^ok [^/]+/(.+)' \
         --label 'files'
   }
 
@@ -166,7 +166,7 @@ main() {
       | working:run \
         --total "$commits_total" \
         --match '^ok ' \
-        --extract '^ok (.+)' \
+        --extract '^ok [^/]+/(.+)' \
         --label 'commits'
   }
 
@@ -180,7 +180,7 @@ main() {
       | working:run \
         --total "$chats_total" \
         --match '^ok ' \
-        --extract '^ok (.+)' \
+        --extract '^ok [^/]+/(.+)' \
         --label 'chats'
   }
 

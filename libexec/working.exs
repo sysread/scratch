@@ -290,8 +290,15 @@ defmodule Working do
     # blank line instead so the block area stays reserved (avoids the
     # progress bar jumping up when the first item lands).
     case recent do
-      [] -> " "
-      items -> items |> Enum.map(&"  - #{&1}") |> Enum.join("\n")
+      [] ->
+        " "
+
+      items ->
+        items
+        |> Enum.map(fn item ->
+          ["  - ", IO.ANSI.format_fragment([:italic, :light_magenta, item, :reset], true)]
+        end)
+        |> Enum.intersperse("\n")
     end
   end
 
