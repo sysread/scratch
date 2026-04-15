@@ -1316,17 +1316,40 @@ attachments:format-priming() {
     return 0
   fi
 
-  # Dominant affect: most common affect tag in the fired set
-  local dominant
-  dominant="$(jq -r '
+  # Texture components: dominant affect, optional secondary if it carries
+  # at least 25% of the fires, and a tension line if any declared
+  # opposing-pair appears in the set.
+  local tallies
+  tallies="$(jq -c '
     group_by(.affect)
     | map({affect: .[0].affect, n: length})
     | sort_by(-.n)
-    | .[0].affect
   ' <<< "$fired")"
 
+  local dominant
+  dominant="$(jq -r '.[0].affect' <<< "$tallies")"
+
+  local secondary
+  secondary="$(jq -r --argjson total "$count" '
+    if length < 2 then empty
+    elif (.[1].n / $total) < 0.25 then empty
+    else .[1].affect
+    end
+  ' <<< "$tallies")"
+
+  local tension
+  tension="$(attachments:_detect-tension "$fired")"
+
+  local texture="Texture: mostly $dominant"
+  if [[ -n "$secondary" ]]; then
+    texture="$texture, threads of $secondary"
+  fi
+  if [[ -n "$tension" ]]; then
+    texture="$texture ($tension)"
+  fi
+
   printf '## Priming (from attachments, not facts — tendencies that may be wrong)\n'
-  printf 'Texture: mostly %s\n' "$dominant"
+  printf '%s\n' "$texture"
 
   jq -r '
     .[]
@@ -1335,3 +1358,126 @@ attachments:format-priming() {
 }
 
 export -f attachments:format-priming
+
+# Declared tension pairs — opposing stances whose co-occurrence is
+# always worth surfacing in the texture line. Space-separated
+# "a:b" tokens; the caller iterates both directions.
+_ATTACHMENTS_TENSION_PAIRS="wary:confident uneasy:eager resigned:curious"
+
+#-------------------------------------------------------------------------------
+# attachments:_detect-tension FIRED_JSON
+#
+# Return a string like "tension: X ↔ Y" if any declared tension pair has
+# both members present in the fired set. Returns empty if no pair
+# conflicts.
+#-------------------------------------------------------------------------------
+attachments:_detect-tension() {
+  local fired="$1"
+
+  local present
+  present=" $(jq -r 'map(.affect) | unique | .[]' <<< "$fired" | tr '\n' ' ') "
+
+  local pair a b
+  for pair in $_ATTACHMENTS_TENSION_PAIRS; do
+    a="${pair%%:*}"
+    b="${pair##*:}"
+    if [[ "$present" == *" $a "* && "$present" == *" $b "* ]]; then
+      # First tension we find wins; one line is plenty.
+      printf 'tension: %s ↔ %s' "$a" "$b"
+      return 0
+    fi
+  done
+  return 0
+}
+
+export -f attachments:_detect-tension
+
+#-------------------------------------------------------------------------------
+# attachments:fires PROJECT_NAME SINCE
+#
+# Print recent fires as a tab-delimited table:
+#   FIRED_AT<TAB>ID<TAB>CONFIRMED<TAB>AFFECT<TAB>PREDICTION
+#
+# SINCE is a SQLite modifier like '-1 hour', '-30 minutes', '-1 day'.
+# No since ("") means everything. The CONFIRMED column is 'yes', 'no',
+# or '?' (unresolved). PREDICTION is truncated to 80 chars so the table
+# stays scannable.
+#-------------------------------------------------------------------------------
+attachments:fires() {
+  local project="$1"
+  local since="${2:-}"
+
+  attachments:ensure "$project"
+  local db
+  db="$(attachments:db-path "$project")"
+
+  local where=""
+  if [[ -n "$since" ]]; then
+    local q_since
+    q_since="$(db:quote "$since")"
+    where="WHERE af.fired_at >= datetime('now', $q_since)"
+  fi
+
+  printf 'FIRED_AT\tID\tCONFIRMED\tAFFECT\tPREDICTION\n'
+
+  db:query "$db" "
+    SELECT af.fired_at,
+           af.attachment_id,
+           CASE
+             WHEN af.was_confirmed IS NULL THEN '?'
+             WHEN af.was_confirmed = 1 THEN 'yes'
+             ELSE 'no'
+           END AS confirmed,
+           a.affect,
+           substr(a.prediction, 1, 80) AS prediction
+    FROM attachment_fires af
+    JOIN attachments a ON a.id = af.attachment_id
+    $where
+    ORDER BY af.fired_at DESC;
+  "
+}
+
+export -f attachments:fires
+
+#-------------------------------------------------------------------------------
+# attachments:setting PROJECT_NAME KEY [DEFAULT]
+#
+# Read a setting from the project's settings.json under
+# .attachments.<key>. Returns DEFAULT (or empty) if the key is missing
+# or the file is absent. Used by scratch-chat to find the firing
+# timeout and feature flags.
+#
+# Examples:
+#   attachments:setting myproject firing_timeout_ms 1500
+#   attachments:setting myproject enabled true
+#-------------------------------------------------------------------------------
+attachments:setting() {
+  local project="$1"
+  local key="$2"
+  local default="${3:-}"
+
+  local settings_file
+  settings_file="$(project:config-dir "$project" 2> /dev/null)/settings.json"
+  if [[ ! -f "$settings_file" ]]; then
+    printf '%s' "$default"
+    return 0
+  fi
+
+  # Use an explicit null check instead of `// empty` because jq's //
+  # treats the boolean literal `false` as missing, and `enabled: false`
+  # is a perfectly valid setting we must honor.
+  local value
+  value="$(jq -r --arg k "$key" '
+    if (.attachments // {})[$k] == null then empty
+    else (.attachments[$k] | tostring)
+    end
+  ' "$settings_file" 2> /dev/null)" || value=""
+
+  if [[ -z "$value" ]]; then
+    printf '%s' "$default"
+  else
+    printf '%s' "$value"
+  fi
+}
+
+export -f attachments:setting

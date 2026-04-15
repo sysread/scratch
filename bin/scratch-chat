@@ -327,50 +327,143 @@ _chat:is-accelerator() {
 }
 
 #-------------------------------------------------------------------------------
-# _chat:fire-attachments PROJECT SITUATION OUT_VAR
+# _chat:stash-path PROJECT SLUG
 #
-# Fire attachments for the current turn. Writes the top-k JSON to a tmp
-# file and returns its path via OUT_VAR (a nameref). If embedding fails
-# (no elixir), no attachments live, or ranking returns nothing, OUT_VAR
-# is left empty and callers skip the priming injection.
-#
-# Best-effort by design: firing must never interrupt a turn. Phase 4
-# tightens this with an explicit timeout and a cross-turn stash.
+# Print the per-chat pending-attachments stash path. Resolves to
+# <chat-dir>/.pending-attachments.json. Callers treat existence as
+# "background firing from the previous turn left a priming set here".
 #-------------------------------------------------------------------------------
-_chat:fire-attachments() {
+_chat:stash-path() {
   local project="$1"
-  local situation="$2"
+  local slug="$2"
+  local dir
+  dir="$(conversation:chat-dir "$project" "$slug" 2> /dev/null)" || return 1
+  printf '%s/.pending-attachments.json' "$dir"
+}
+
+#-------------------------------------------------------------------------------
+# _chat:consume-stash PROJECT SLUG OUT_VAR
+#
+# If a pending-attachments stash exists for this chat, move it into a
+# tmp file and return that path via OUT_VAR. The stash is strictly
+# single-round — it is always consumed-then-deleted; priming never
+# accumulates across turns.
+#-------------------------------------------------------------------------------
+_chat:consume-stash() {
+  local project="$1"
+  local slug="$2"
   local -n _out_ref="$3"
   _out_ref=""
 
-  # Need search:embed to turn the situation text into a vector. If it's
-  # unavailable (elixir not installed) or fails, quietly skip priming.
-  if ! command -v elixir > /dev/null 2>&1; then
-    return 0
-  fi
+  local stash
+  stash="$(_chat:stash-path "$project" "$slug")" || return 0
+  [[ -s "$stash" ]] || return 0
 
-  local embedding
-  if ! embedding="$(search:embed "$situation" 2> /dev/null)"; then
-    return 0
-  fi
-
-  local fired
-  if ! fired="$(attachments:fire "$project" "$embedding" 5 2> /dev/null)"; then
-    return 0
-  fi
-
-  # Empty array = no priming; don't bother creating a file
+  # Validate that it's a non-empty JSON array. Malformed = drop silently.
   local count
-  count="$(jq 'length' <<< "$fired" 2> /dev/null || echo 0)"
+  count="$(jq 'length' < "$stash" 2> /dev/null || echo 0)"
   if [[ "$count" -eq 0 ]]; then
+    rm -f "$stash"
     return 0
   fi
 
   local file
+  tmp:make file /tmp/scratch-attachments-stashed.XXXXXX
+  tmp:install-traps
+  mv "$stash" "$file"
+  _out_ref="$file"
+}
+
+#-------------------------------------------------------------------------------
+# _chat:fire-attachments PROJECT SLUG SITUATION OUT_VAR
+#
+# Fire attachments for the current turn with a timeout budget (read from
+# the project's attachments.firing_timeout_ms setting, default 1500).
+# Three outcomes:
+#
+#   1. Firing completes inside the budget with matches → write them to a
+#      tmp file; OUT_VAR is its path.
+#   2. Firing completes empty (no elixir, no live attachments, or no
+#      cosine matches) → OUT_VAR empty, no priming this turn.
+#   3. Firing exceeds the budget → foreground is killed, a background
+#      job restarts firing with output redirected to
+#      <chat-dir>/.pending-attachments.json. OUT_VAR is empty; the NEXT
+#      turn will consume the stash via _chat:consume-stash.
+#
+# This is the human-analogous fallback: "the thing I should have said"
+# arrives after the moment and primes the next one.
+#-------------------------------------------------------------------------------
+_chat:fire-attachments() {
+  local project="$1"
+  local slug="$2"
+  local situation="$3"
+  local -n _out_ref="$4"
+  _out_ref=""
+
+  if ! command -v elixir > /dev/null 2>&1; then
+    return 0
+  fi
+
+  local timeout_ms
+  timeout_ms="$(attachments:setting "$project" "firing_timeout_ms" "1500")"
+  # Guard against non-numeric values in settings.json
+  [[ "$timeout_ms" =~ ^[0-9]+$ ]] || timeout_ms=1500
+  local timeout_sec
+  timeout_sec="$(awk -v ms="$timeout_ms" 'BEGIN { printf "%.3f", ms/1000 }')"
+
+  local file
   tmp:make file /tmp/scratch-attachments-fired.XXXXXX
   tmp:install-traps
-  printf '%s' "$fired" > "$file"
-  _out_ref="$file"
+
+  # Run the embed + fire pipeline under a timeout. Exit 124 is "timed
+  # out" on GNU coreutils (bash builtin timeout is not POSIX, so we use
+  # the external one).
+  local rc=0
+  timeout "$timeout_sec" bash -c '
+    set -euo pipefail
+    embedding="$(search:embed "$1" 2>/dev/null)"
+    [[ -z "$embedding" ]] && exit 2
+    attachments:fire "$2" "$embedding" 5
+  ' firing "$situation" "$project" > "$file" 2> /dev/null || rc=$?
+
+  if ((rc == 0)); then
+    # In the budget. Use it if non-empty.
+    local count
+    count="$(jq 'length' < "$file" 2> /dev/null || echo 0)"
+    if [[ "$count" -gt 0 ]]; then
+      _out_ref="$file"
+    else
+      rm -f "$file"
+    fi
+    return 0
+  fi
+
+  rm -f "$file"
+
+  # Timeout → fallback. If fallback is disabled, stop here.
+  local fallback
+  fallback="$(attachments:setting "$project" "fallback_to_stashed" "true")"
+  if [[ "$fallback" != "true" ]]; then
+    return 0
+  fi
+
+  # Kick firing to the background, stashing for the next turn. The
+  # chat dir exists by the time we get here (conversation is saved).
+  local stash
+  stash="$(_chat:stash-path "$project" "$slug")" || return 0
+
+  # Use setsid + & so the child detaches from this shell's job control
+  # and survives even if we continue past it. It's fine for the
+  # background child to write partial/empty output; next turn's
+  # consume-stash validates before using.
+  (
+    setsid bash -c "
+      embedding=\"\$(search:embed \"\$1\" 2>/dev/null)\"
+      [[ -z \"\$embedding\" ]] && exit 0
+      attachments:fire \"\$2\" \"\$embedding\" 5
+    " firing "$situation" "$project" > "$stash" 2> /dev/null &
+  ) &
+  disown 2> /dev/null || true
 }
 
 #-------------------------------------------------------------------------------
@@ -639,12 +732,28 @@ main() {
     # so the new fires start in an unresolved state.
     attachments:apply-reaction "$project_name" "$user_input" 2> /dev/null || true
 
-    # Fire attachments for this turn. The coordinator pre-fill reads
-    # SCRATCH_ATTACHMENTS_FIRED_FILE (if non-empty) and appends a priming
-    # block to its system prompt. Firing is synchronous here in Phase 2;
-    # Phase 4 adds a timeout + stash-for-next-turn fallback.
+    # Firing for this turn can come from two sources:
+    #   1. A stash left by the previous turn's background fire (if
+    #      synchronous firing timed out then).
+    #   2. A fresh synchronous fire this turn, within the configured
+    #      timeout budget.
+    # The stash is consumed-and-deleted unconditionally. If synchronous
+    # firing also produces a result, it wins (it's more relevant to the
+    # current moment). If synchronous times out, a new background fire
+    # seeds the stash for the next turn.
     local fired_file=""
-    _chat:fire-attachments "$project_name" "$user_input" fired_file
+    _chat:consume-stash "$project_name" "$slug" fired_file
+
+    local fresh_file=""
+    _chat:fire-attachments "$project_name" "$slug" "$user_input" fresh_file
+    if [[ -n "$fresh_file" ]]; then
+      # Synchronous result supersedes any stashed one.
+      if [[ -n "$fired_file" ]]; then
+        rm -f "$fired_file"
+      fi
+      fired_file="$fresh_file"
+    fi
+
     if [[ -n "$fired_file" ]]; then
       export SCRATCH_ATTACHMENTS_FIRED_FILE="$fired_file"
     fi

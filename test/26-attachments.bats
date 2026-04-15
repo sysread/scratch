@@ -740,3 +740,140 @@ STUB
   after="$(db:query "$db" "SELECT health FROM attachments WHERE id=1;")"
   is "$after" "1.0"
 }
+
+# ---------------------------------------------------------------------------
+# Phase 4: tension detection in format-priming
+# ---------------------------------------------------------------------------
+
+@test "attachments:format-priming adds 'threads of X' when secondary passes threshold" {
+  local fired='[
+    {"id":1,"prediction":"P1","inner_voice":"V1","affect":"wary","confidence":0.5,"health":1.0,"score":0.9},
+    {"id":2,"prediction":"P2","inner_voice":"V2","affect":"wary","confidence":0.5,"health":1.0,"score":0.8},
+    {"id":3,"prediction":"P3","inner_voice":"V3","affect":"curious","confidence":0.5,"health":1.0,"score":0.7}
+  ]'
+  run attachments:format-priming "$fired"
+  is "$status" 0
+  [[ "$output" == *"Texture: mostly wary, threads of curious"* ]]
+}
+
+@test "attachments:format-priming omits secondary below 25% threshold" {
+  # 4 wary, 1 curious → curious is 20%, below 25% threshold
+  local fired='[
+    {"id":1,"prediction":"P1","inner_voice":"V1","affect":"wary","confidence":0.5,"health":1.0,"score":0.9},
+    {"id":2,"prediction":"P2","inner_voice":"V2","affect":"wary","confidence":0.5,"health":1.0,"score":0.8},
+    {"id":3,"prediction":"P3","inner_voice":"V3","affect":"wary","confidence":0.5,"health":1.0,"score":0.7},
+    {"id":4,"prediction":"P4","inner_voice":"V4","affect":"wary","confidence":0.5,"health":1.0,"score":0.6},
+    {"id":5,"prediction":"P5","inner_voice":"V5","affect":"curious","confidence":0.5,"health":1.0,"score":0.5}
+  ]'
+  run attachments:format-priming "$fired"
+  is "$status" 0
+  [[ "$output" == *"Texture: mostly wary"* ]]
+  [[ "$output" != *"threads of"* ]]
+}
+
+@test "attachments:format-priming emits tension line when opposing pair fires together" {
+  local fired='[
+    {"id":1,"prediction":"P1","inner_voice":"V1","affect":"wary","confidence":0.5,"health":1.0,"score":0.9},
+    {"id":2,"prediction":"P2","inner_voice":"V2","affect":"confident","confidence":0.5,"health":1.0,"score":0.8}
+  ]'
+  run attachments:format-priming "$fired"
+  is "$status" 0
+  [[ "$output" == *"tension: wary ↔ confident"* ]]
+}
+
+@test "attachments:format-priming detects each declared tension pair" {
+  for pair in "wary:confident" "uneasy:eager" "resigned:curious"; do
+    local a="${pair%%:*}"
+    local b="${pair##*:}"
+    local fired='[
+      {"id":1,"prediction":"P1","inner_voice":"V1","affect":"'"$a"'","confidence":0.5,"health":1.0,"score":0.9},
+      {"id":2,"prediction":"P2","inner_voice":"V2","affect":"'"$b"'","confidence":0.5,"health":1.0,"score":0.8}
+    ]'
+    run attachments:format-priming "$fired"
+    is "$status" 0
+    [[ "$output" == *"tension: $a ↔ $b"* ]]
+  done
+}
+
+@test "attachments:format-priming has no tension line for co-fires without opposing pair" {
+  # wary + uneasy share valence, not a declared tension pair
+  local fired='[
+    {"id":1,"prediction":"P1","inner_voice":"V1","affect":"wary","confidence":0.5,"health":1.0,"score":0.9},
+    {"id":2,"prediction":"P2","inner_voice":"V2","affect":"uneasy","confidence":0.5,"health":1.0,"score":0.8}
+  ]'
+  run attachments:format-priming "$fired"
+  is "$status" 0
+  [[ "$output" != *"tension:"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Phase 4: settings
+# ---------------------------------------------------------------------------
+
+@test "attachments:setting returns default when file missing" {
+  # Delete the settings.json so the file lookup fails
+  rm -f "${SCRATCH_PROJECTS_DIR}/testproj/settings.json"
+  run attachments:setting "$PROJECT" "firing_timeout_ms" "1500"
+  is "$status" 0
+  is "$output" "1500"
+}
+
+@test "attachments:setting returns value when set under attachments.<key>" {
+  cat > "${SCRATCH_PROJECTS_DIR}/testproj/settings.json" << 'JSON'
+{
+  "root": "/tmp/fake",
+  "is_git": false,
+  "exclude": [],
+  "attachments": {
+    "firing_timeout_ms": 2500,
+    "enabled": false
+  }
+}
+JSON
+  run attachments:setting "$PROJECT" "firing_timeout_ms" "1500"
+  is "$status" 0
+  is "$output" "2500"
+  run attachments:setting "$PROJECT" "enabled" "true"
+  is "$status" 0
+  is "$output" "false"
+}
+
+@test "attachments:setting returns default when key is missing" {
+  cat > "${SCRATCH_PROJECTS_DIR}/testproj/settings.json" << 'JSON'
+{"root":"/tmp/fake","is_git":false,"exclude":[],"attachments":{}}
+JSON
+  run attachments:setting "$PROJECT" "firing_timeout_ms" "1500"
+  is "$status" 0
+  is "$output" "1500"
+}
+
+# ---------------------------------------------------------------------------
+# Phase 4: fires log
+# ---------------------------------------------------------------------------
+
+@test "attachments:fires prints header even when empty" {
+  attachments:ensure "$PROJECT"
+  run attachments:fires "$PROJECT"
+  is "$status" 0
+  local head
+  head="$(head -1 <<< "$output")"
+  is "$head" $'FIRED_AT\tID\tCONFIRMED\tAFFECT\tPREDICTION'
+}
+
+@test "attachments:fires shows resolution status per fire" {
+  attachments:seed "$PROJECT" "prediction text" '[1.0,0.0]' "voice" "wary"
+  attachments:fire "$PROJECT" '[1.0,0.0]' 5 > /dev/null  # fire #1 unresolved
+  attachments:fire "$PROJECT" '[1.0,0.0]' 5 > /dev/null  # fire #2 unresolved
+
+  local db
+  db="$(attachments:db-path "$PROJECT")"
+
+  # Mark fire #1 confirmed
+  db:exec "$db" "UPDATE attachment_fires SET was_confirmed=1 WHERE id=1;"
+
+  local output
+  output="$(attachments:fires "$PROJECT" | tail -n +2 | awk -F'\t' '{print $3}' | sort -u | tr '\n' ',')"
+  # Both 'yes' and '?' should appear
+  [[ "$output" == *"yes"* ]]
+  [[ "$output" == *"?"* ]]
+}
