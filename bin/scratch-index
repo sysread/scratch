@@ -210,7 +210,7 @@ main() {
   # keeps the progress bar advancing. See
   # /root/.claude/plans/piped-prancing-cat.md for the design.
   _consolidate_attachments() {
-    ( "$helpers/consolidate-attachments" "$project_name" ) 2>&1 \
+    ("$helpers/consolidate-attachments" "$project_name") 2>&1 \
       | working:run \
         --total 4 \
         --match '^ok ' \

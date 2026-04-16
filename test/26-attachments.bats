@@ -199,7 +199,7 @@ setup() {
   is "$status" 1
   run attachments:affect-valid ""
   is "$status" 1
-  run attachments:affect-valid "Wary"  # case-sensitive
+  run attachments:affect-valid "Wary" # case-sensitive
   is "$status" 1
 }
 
@@ -279,7 +279,7 @@ setup() {
 @test "attachments:fire returns top-k matches with score, logs fire, increments fire_count" {
   # Two attachments with different embeddings
   attachments:seed "$PROJECT" "pred alpha" '[1.0,0.0,0.0]' "voice alpha" "wary"
-  attachments:seed "$PROJECT" "pred beta"  '[0.0,1.0,0.0]' "voice beta"  "curious"
+  attachments:seed "$PROJECT" "pred beta" '[0.0,1.0,0.0]' "voice beta" "curious"
 
   # Situation close to alpha (cosine ~1.0) and orthogonal to beta
   run attachments:fire "$PROJECT" '[0.9,0.1,0.0]' 5
@@ -347,8 +347,8 @@ setup() {
 }
 
 @test "attachments:list orders by confidence*health descending" {
-  attachments:seed "$PROJECT" "third"  '[1.0,0.0]' "v" "wary"     "0.3"
-  attachments:seed "$PROJECT" "first"  '[1.0,0.0]' "v" "curious"  "0.9"
+  attachments:seed "$PROJECT" "third" '[1.0,0.0]' "v" "wary" "0.3"
+  attachments:seed "$PROJECT" "first" '[1.0,0.0]' "v" "curious" "0.9"
   attachments:seed "$PROJECT" "second" '[1.0,0.0]' "v" "confident" "0.6"
 
   local out
@@ -867,8 +867,8 @@ JSON
 
 @test "attachments:fires shows resolution status per fire" {
   attachments:seed "$PROJECT" "prediction text" '[1.0,0.0]' "voice" "wary"
-  attachments:fire "$PROJECT" '[1.0,0.0]' 5 > /dev/null  # fire #1 unresolved
-  attachments:fire "$PROJECT" '[1.0,0.0]' 5 > /dev/null  # fire #2 unresolved
+  attachments:fire "$PROJECT" '[1.0,0.0]' 5 > /dev/null # fire #1 unresolved
+  attachments:fire "$PROJECT" '[1.0,0.0]' 5 > /dev/null # fire #2 unresolved
 
   local db
   db="$(attachments:db-path "$PROJECT")"

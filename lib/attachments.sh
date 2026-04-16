@@ -294,8 +294,19 @@ attachments:classify-reaction() {
 
   # Disconfirmation beats confirmation if both present, because "no, but
   # thanks anyway" is still a disconfirm.
-  local disconfirm_pat='\b(no|nope|actually|wait|but|nah|hmm|ugh|incorrect|wrong|that'"'"'s not)\b'
-  local confirm_pat='\b(yes|yep|yeah|thanks|thank you|ok|okay|great|perfect|exactly|that'"'"'s it|nice|correct|right|got it|makes sense)\b'
+  #
+  # POSIX ERE doesn't support \b (word boundary); that's a PCRE/GNU
+  # extension. bash's [[ =~ ]] on BSD libc (macOS) rejects it silently
+  # as a never-matching pattern. Use explicit non-alphanumeric bounds
+  # instead — (^|[^[:alnum:]_]) and ($|[^[:alnum:]_]) — which works on
+  # both macOS BSD and Linux glibc.
+  local edge_left='(^|[^[:alnum:]_])'
+  local edge_right='($|[^[:alnum:]_])'
+  local disconfirm_words='(no|nope|actually|wait|but|nah|hmm|ugh|incorrect|wrong|that'"'"'s not)'
+  local confirm_words='(yes|yep|yeah|thanks|thank you|ok|okay|great|perfect|exactly|that'"'"'s it|nice|correct|right|got it|makes sense)'
+
+  local disconfirm_pat="${edge_left}${disconfirm_words}${edge_right}"
+  local confirm_pat="${edge_left}${confirm_words}${edge_right}"
 
   if [[ "$lower" =~ $disconfirm_pat ]]; then
     printf 'disconfirm'

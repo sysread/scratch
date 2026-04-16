@@ -474,8 +474,17 @@ agent:pre-fill() {
   local prompt_path
   prompt_path="$(agent:spec "$name" | jq -r '.system_prompt // empty')"
 
-  # No system_prompt declared — agent uses messages as-is.
-  if [[ -z "$prompt_path" ]]; then
+  # SCRATCH_AGENT_SYSTEM_APPENDIX is a generic per-call hook for callers
+  # to append additional content to the agent's system prompt without
+  # editing spec.json or going through a per-agent pre-fill script. The
+  # chat layer uses it to inject the attachments-priming block when an
+  # attachment fires, keeping coordinator's spec.json declarative while
+  # supporting dynamic per-turn content. The variable is one-shot — the
+  # caller is expected to set/unset around the agent:complete call.
+  local appendix="${SCRATCH_AGENT_SYSTEM_APPENDIX:-}"
+
+  # Nothing to inject: no spec system_prompt AND no appendix.
+  if [[ -z "$prompt_path" && -z "$appendix" ]]; then
     return 0
   fi
 
@@ -486,8 +495,17 @@ agent:pre-fill() {
     return 0
   fi
 
-  local system_prompt
-  system_prompt="$(prompt:load "$prompt_path")"
+  local system_prompt=""
+  if [[ -n "$prompt_path" ]]; then
+    system_prompt="$(prompt:load "$prompt_path")"
+  fi
+  if [[ -n "$appendix" ]]; then
+    if [[ -n "$system_prompt" ]]; then
+      system_prompt+=$'\n\n'"$appendix"
+    else
+      system_prompt="$appendix"
+    fi
+  fi
 
   # shellcheck disable=SC2034
   _apf_messages="$(jq -c --arg sys "$system_prompt" \

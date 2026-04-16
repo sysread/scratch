@@ -438,6 +438,10 @@ _chat:fire-attachments() {
   # out" on GNU coreutils (bash builtin timeout is not POSIX, so we use
   # the external one).
   local rc=0
+  # SC2016: the single-quoted body is intentional — $1 / $2 resolve
+  # inside the bash -c subprocess (from 'firing', $situation, $project)
+  # rather than being expanded here by the outer shell.
+  # shellcheck disable=SC2016
   timeout "$timeout_sec" bash -c '
     set -euo pipefail
     embedding="$(search:embed "$1" 2>/dev/null)"
@@ -510,11 +514,11 @@ _chat:record-substrate() {
   local response="$4"
 
   local chat_dir
-  chat_dir="$(conversation:chat-dir "$project" "$slug" 2>/dev/null)" || return 0
+  chat_dir="$(conversation:chat-dir "$project" "$slug" 2> /dev/null)" || return 0
 
   local round_idx=""
   if [[ -f "$chat_dir/metadata.json" ]]; then
-    round_idx="$(jq -r '.rounds | length - 1' "$chat_dir/metadata.json" 2>/dev/null || printf '')"
+    round_idx="$(jq -r '.rounds | length - 1' "$chat_dir/metadata.json" 2> /dev/null || printf '')"
   fi
 
   # Compact situation text. Truncate defensively — this is a summary, not
@@ -793,19 +797,32 @@ main() {
 
     if [[ -n "$fired_file" ]]; then
       export SCRATCH_ATTACHMENTS_FIRED_FILE="$fired_file"
-      if [[ -n "${SCRATCH_DEBUG_ATTACHMENTS:-}" ]]; then
-        # Show the priming block the coordinator is about to see. Helps
-        # confirm the texture and tension lines without reading the DB.
-        local _att_priming
-        _att_priming="$(attachments:format-priming "$(cat "$fired_file")")"
-        _chat:att-debug priming $'\n'"$_att_priming"
+
+      # Build the priming block here (rather than in a coordinator
+      # pre-fill script — that mechanism went away when agents moved to
+      # declarative system_prompt). The block is formed from the
+      # attachments preamble + the formatted priming output, and passed
+      # to agent:complete via the generic SCRATCH_AGENT_SYSTEM_APPENDIX
+      # hook in agent:pre-fill. One-round-scoped: torn down below along
+      # with FIRED_FILE so subsequent turns start clean.
+      local _att_priming
+      _att_priming="$(attachments:format-priming "$(cat "$fired_file")")"
+      if [[ -n "$_att_priming" ]]; then
+        local _att_preamble
+        _att_preamble="$(prompt:load coordinator/attachments-preamble)"
+        export SCRATCH_AGENT_SYSTEM_APPENDIX="${_att_preamble}"$'\n\n'"${_att_priming}"
+        if [[ -n "${SCRATCH_DEBUG_ATTACHMENTS:-}" ]]; then
+          _chat:att-debug priming $'\n'"$_att_priming"
+        fi
       fi
     fi
 
-    # Run the completion round via agent:complete. The agent handles
-    # pre-fill (system prompt), model/tool resolution, and the tool-call
-    # loop. Messages are modified in place; we diff before/after to
-    # display tool calls that happened during the round.
+    # Run the completion round via agent:complete. The agent loads its
+    # declared system_prompt from spec.json (and appends any
+    # SCRATCH_AGENT_SYSTEM_APPENDIX we set above), resolves model and
+    # tools, and runs the tool-call loop. Messages are modified in
+    # place; we diff before/after to display tool calls that happened
+    # during the round.
     local messages_array
     messages_array="$(conversation:messages-as-array "$project_name" "$slug")"
 
@@ -823,6 +840,7 @@ main() {
       rm -f "$SCRATCH_ATTACHMENTS_FIRED_FILE"
       unset SCRATCH_ATTACHMENTS_FIRED_FILE
     fi
+    unset SCRATCH_AGENT_SYSTEM_APPENDIX
 
     # Display any tool call traffic that happened during the round
     _chat:display-new-messages "$messages_array" "$before_count"
