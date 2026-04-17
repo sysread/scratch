@@ -49,6 +49,8 @@ fi
 }
 
 has-commands jq
+uses-env-vars SCRATCH_DEBUG_INDEX
+describe-env-var SCRATCH_DEBUG_INDEX "log per-item progress during indexing pipeline stages"
 
 project="$1"
 

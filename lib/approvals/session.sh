@@ -26,6 +26,8 @@ _APPROVALS_SESSION_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 }
 
 has-commands jq
+uses-env-vars SCRATCH_CONVERSATION_SLUG
+describe-env-var SCRATCH_CONVERSATION_SLUG "current conversation id (set by chat at runtime)"
 
 #-------------------------------------------------------------------------------
 # _approvals:session-load

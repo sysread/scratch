@@ -24,6 +24,9 @@ _PROMPT_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$_PROMPT_SCRIPTDIR/base.sh"
 
+uses-env-vars SCRATCH_PROMPTS_DIR
+describe-env-var SCRATCH_PROMPTS_DIR "user-defined prompts dir (overrides bundled data/prompts/)"
+
 #-------------------------------------------------------------------------------
 # prompt:dir
 #

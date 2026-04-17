@@ -51,6 +51,7 @@ fi
 }
 
 has-commands jq flock
+uses-env-vars SCRATCH_DEBUG_INDEX
 
 project="$1"
 pool_size="${2:-4}"

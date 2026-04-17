@@ -46,6 +46,8 @@ SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
 }
 
 has-min-bash-version 5
+uses-env-vars SCRATCH_DEBUG_INTUITION
+describe-env-var SCRATCH_DEBUG_INTUITION "log each intuition phase (perception, drives, synthesis) to stderr"
 
 cmd:define "intuit" "$_DESC"
 cmd:define-cli-usage "EXAMPLES" "$(

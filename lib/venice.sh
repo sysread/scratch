@@ -27,6 +27,12 @@ _VENICE_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$_VENICE_SCRIPTDIR/base.sh"
 
 has-commands curl jq bc
+uses-secret-env-vars SCRATCH_VENICE_API_KEY VENICE_API_KEY
+uses-env-vars SCRATCH_VENICE_DISABLE_JITTER SCRATCH_VENICE_MAX_ATTEMPTS
+describe-env-var SCRATCH_VENICE_API_KEY "Venice API key (preferred over VENICE_API_KEY)"
+describe-env-var VENICE_API_KEY "Venice API key (fallback if SCRATCH_VENICE_API_KEY unset)"
+describe-env-var SCRATCH_VENICE_DISABLE_JITTER "disable retry backoff jitter (test use only)"
+describe-env-var SCRATCH_VENICE_MAX_ATTEMPTS "max retries on transient Venice errors (default 3)"
 
 #-------------------------------------------------------------------------------
 # Constants

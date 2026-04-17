@@ -24,6 +24,9 @@ _TUI_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 }
 
 has-commands gum
+uses-env-vars SCRATCH_LOG_LEVEL SCRATCH_TUI_USE_TTY
+describe-env-var SCRATCH_LOG_LEVEL "log verbosity (info, debug, warn; default info)"
+describe-env-var SCRATCH_TUI_USE_TTY "force TUI rendering when stdout is not a TTY"
 
 #-------------------------------------------------------------------------------
 # tui:log LEVEL [ARGS...]

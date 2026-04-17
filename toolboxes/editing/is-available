@@ -18,6 +18,9 @@ set -euo pipefail
 # shellcheck source=/dev/null
 source "$SCRATCH_HOME/lib/base.sh"
 
+uses-env-vars SCRATCH_EDIT_MODE
+describe-env-var SCRATCH_EDIT_MODE "enable the editing toolbox (file-write tools); set to 1"
+
 if [[ "${SCRATCH_EDIT_MODE:-}" != "1" ]]; then
   warn "editing toolbox: SCRATCH_EDIT_MODE is not set; write tools are unavailable"
   exit 1

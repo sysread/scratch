@@ -29,6 +29,8 @@ _CHAT_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 }
 
 has-commands jq
+uses-env-vars SCRATCH_CHAT_DEBUG_LOG
+describe-env-var SCRATCH_CHAT_DEBUG_LOG "explicit file path for chat API request/response log"
 
 #-------------------------------------------------------------------------------
 # _chat:_debug-log EVENT PAYLOAD

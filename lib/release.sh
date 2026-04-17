@@ -26,6 +26,9 @@ _RELEASE_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 }
 
 has-commands curl tar
+uses-env-vars SCRATCH_RELEASE_REPO SCRATCH_RELEASE_VERSION_URL
+describe-env-var SCRATCH_RELEASE_REPO "GitHub repo for release checks (default sysread/scratch)"
+describe-env-var SCRATCH_RELEASE_VERSION_URL "override the VERSION file URL for update checks"
 
 #-------------------------------------------------------------------------------
 # Constants — overridable via env vars for testing

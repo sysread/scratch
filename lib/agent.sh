@@ -60,6 +60,12 @@ _AGENT_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 }
 
 has-commands jq
+uses-env-vars SCRATCH_AGENTS_DIR SCRATCH_AGENT_DEPTH SCRATCH_AGENT_MAX_DEPTH SCRATCH_AGENT_SKIP_AVAILABILITY SCRATCH_AVAIL_MEMO
+describe-env-var SCRATCH_AGENTS_DIR "user-defined agents dir (overrides bundled agents/)"
+describe-env-var SCRATCH_AGENT_DEPTH "current agent nesting depth (set internally)"
+describe-env-var SCRATCH_AGENT_MAX_DEPTH "cap on agent-from-agent nesting (default 3)"
+describe-env-var SCRATCH_AGENT_SKIP_AVAILABILITY "bypass agent is-available preflight (tests)"
+describe-env-var SCRATCH_AVAIL_MEMO "cache availability checks per session (default on)"
 
 #-------------------------------------------------------------------------------
 # Globals (set by agent:available)

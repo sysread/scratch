@@ -30,6 +30,11 @@ _PROJECT_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$_PROJECT_SCRIPTDIR/base.sh"
 
 has-commands jq git
+uses-env-vars SCRATCH_CONFIG_DIR SCRATCH_PROJECTS_DIR SCRATCH_PROJECT SCRATCH_PROJECT_ROOT
+describe-env-var SCRATCH_CONFIG_DIR "scratch config root (default: ~/.config/scratch)"
+describe-env-var SCRATCH_PROJECTS_DIR "project store dir (default: <config>/projects)"
+describe-env-var SCRATCH_PROJECT "current project name (set by project:detect at runtime)"
+describe-env-var SCRATCH_PROJECT_ROOT "absolute path to the current project root"
 
 #-------------------------------------------------------------------------------
 # Global config root for all scratch data

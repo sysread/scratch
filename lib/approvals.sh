@@ -39,6 +39,8 @@ _APPROVALS_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 }
 
 has-commands jq perl
+uses-env-vars SCRATCH_MUTABLE SCRATCH_APPROVALS_SKIP
+describe-env-var SCRATCH_MUTABLE "allow persisting new approvals during a session"
 
 #-------------------------------------------------------------------------------
 # _approvals:command-string EXPRESSION_JSON

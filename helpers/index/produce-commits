@@ -53,6 +53,7 @@ SCRATCH_HOME="${SCRATCH_HOME:-$(cd "$SCRIPTDIR/../.." && pwd)}"
 }
 
 has-commands jq git
+uses-env-vars SCRATCH_DEBUG_INDEX
 
 project="$1"
 root="$2"

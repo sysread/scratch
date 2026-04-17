@@ -13,8 +13,13 @@
 #   1. External commands - everything declared via has-commands in bin/ and lib/.
 #      Each entry shows which subcommands depend on it.
 #
-#   2. Environment variables - everything declared via require-env-vars in bin/
-#      and lib/. Same per-command attribution.
+#   2. Environment variables - the default output shows a one-line
+#      summary (count declared, count set). Pass --env for the full
+#      listing: one stanza per var with purpose and subcommand reach.
+#      Required vars (require-env-vars) that are unset cause a failure;
+#      optional vars (uses-env-vars, uses-secret-env-vars) are
+#      informational. Secret values are masked; long config values are
+#      truncated.
 #
 #   3. Developer tools (--dev) - mise-managed tools and other dev deps.
 #
@@ -55,6 +60,7 @@ _DOCTOR_DESC="Check the runtime environment for missing dependencies and require
 
 FIX=false
 DEV=false
+ENV=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -64,14 +70,16 @@ for arg in "$@"; do
       ;;
     --fix) FIX=true ;;
     --dev) DEV=true ;;
+    --env) ENV=true ;;
     --help | -h)
-      echo "Usage: scratch doctor [--fix] [--dev]" >&2
+      echo "Usage: scratch doctor [--fix] [--dev] [--env]" >&2
       echo "" >&2
       echo "$_DOCTOR_DESC" >&2
       echo "" >&2
       echo "Options:" >&2
       echo "  --fix   Prompt to install missing dependencies via helpers/setup" >&2
       echo "  --dev   Also check developer tools (mise, bats, shellcheck, shfmt)" >&2
+      echo "  --env   List every env var scratch reads, with value/purpose/reach" >&2
       exit 0
       ;;
     *)
@@ -83,18 +91,51 @@ done
 
 #-------------------------------------------------------------------------------
 # Constants - scanner keywords are held in variables so the literal strings
-# "has-commands " and "require-env-vars " never appear in non-comment code
-# lines. This prevents the scanner from matching its own grep arguments.
+# never appear in non-comment code lines. This prevents the scanner from
+# matching its own grep arguments.
 #-------------------------------------------------------------------------------
 _KW_HAS_CMD='has-commands'
 _KW_REQ_ENV='require-env-vars'
+_KW_USES_ENV='uses-env-vars'
+_KW_USES_SECRET_ENV='uses-secret-env-vars'
+_KW_DESC_ENV='describe-env-var'
 
 #-------------------------------------------------------------------------------
 # Globals
+#
+# _CMD_ENVS              var -> space-sep attribution labels (lib, <verb>,
+#                        tool:<name>, etc.) — what scanned the declaration
+# _CMD_ENV_REQUIRED      var -> 1 if declared via require-env-vars
+# _CMD_ENV_SECRET        var -> 1 if declared via uses-secret-env-vars
+# _CMD_ENV_DESCRIPTIONS  var -> pipe-sep descriptions (deduped)
+# _CMD_ENV_DECL_FILES    var -> pipe-sep absolute paths where declared;
+#                        drives subcommand-closure resolution at display
 #-------------------------------------------------------------------------------
 declare -A _CMD_DEPS=()
 declare -A _CMD_ENVS=()
+declare -A _CMD_ENV_REQUIRED=()
+declare -A _CMD_ENV_SECRET=()
+declare -A _CMD_ENV_DESCRIPTIONS=()
+declare -A _CMD_ENV_DECL_FILES=()
 _FAILED=false
+
+#-------------------------------------------------------------------------------
+# Source-import graph (populated in scan-all-deps, consumed at display)
+#
+# _LIB_FILES         array of lib relative paths (e.g. "base.sh",
+#                    "approvals/project.sh") - the canonical set doctor
+#                    attributes transitive reach to
+# _FILE_SOURCES      abs file -> space-sep lib rel paths it sources
+# _LIB_SUBCOMMANDS   lib rel path -> space-sep subcommand verbs whose
+#                    closure (bin/scratch-* -> libs -> libs) reaches it
+# _ALL_SUBCOMMANDS   sorted space-sep list of every bin/scratch-* verb;
+#                    used to detect "this var reaches every subcommand"
+#                    and collapse the display to "(all)"
+#-------------------------------------------------------------------------------
+declare -a _LIB_FILES=()
+declare -A _FILE_SOURCES=()
+declare -A _LIB_SUBCOMMANDS=()
+_ALL_SUBCOMMANDS=""
 
 #-------------------------------------------------------------------------------
 # ANSI color helpers - suppressed when stdout is not a TTY
@@ -131,6 +172,34 @@ print-fail() {
 #-------------------------------------------------------------------------------
 print-note() {
   printf "  %s  %-22s %s%s\n" "$_DIM" "$1" "$2" "$_RESET"
+}
+
+#-------------------------------------------------------------------------------
+# Mask a secret value: fixed-width asterisk prefix + last 4 chars. Values
+# shorter than 4 chars get asterisks only to avoid leaking most of the value.
+#-------------------------------------------------------------------------------
+mask-secret() {
+  local v="$1"
+  if ((${#v} < 4)); then
+    printf '**********'
+  else
+    printf '**********%s' "${v: -4}"
+  fi
+}
+
+#-------------------------------------------------------------------------------
+# Truncate a plaintext value to WIDTH chars (default 22 - matches the
+# env var table's value column). Values longer than WIDTH get the last
+# three chars replaced with "..." so the column stays aligned.
+#-------------------------------------------------------------------------------
+truncate-value() {
+  local v="$1"
+  local w="${2:-22}"
+  if ((${#v} > w)); then
+    printf '%s...' "${v:0:$((w - 3))}"
+  else
+    printf '%s' "$v"
+  fi
 }
 
 #-------------------------------------------------------------------------------
@@ -186,21 +255,94 @@ _record-env() {
 }
 
 #-------------------------------------------------------------------------------
-# Scan a single file for env var declarations (require-env-vars calls).
-# Each variable found is attributed to the given display name in _CMD_ENVS.
+# Record the file path where VAR was declared. Paths are pipe-separated
+# (spaces would collide with the existing attribution format).
+#-------------------------------------------------------------------------------
+_record-env-file() {
+  local var="$1"
+  local file="$2"
+  local cur="${_CMD_ENV_DECL_FILES[$var]:-}"
+  if [[ "|$cur|" != *"|$file|"* ]]; then
+    if [[ -n "$cur" ]]; then
+      _CMD_ENV_DECL_FILES[$var]="$cur|$file"
+    else
+      _CMD_ENV_DECL_FILES[$var]="$file"
+    fi
+  fi
+}
+
+#-------------------------------------------------------------------------------
+# Record a description for VAR. Deduped; multiple descriptions join with
+# " | " so the table stays on one line per var.
+#-------------------------------------------------------------------------------
+_record-env-desc() {
+  local var="$1"
+  local desc="$2"
+  local cur="${_CMD_ENV_DESCRIPTIONS[$var]:-}"
+  [[ -z "$desc" ]] && return 0
+  if [[ -z "$cur" ]]; then
+    _CMD_ENV_DESCRIPTIONS[$var]="$desc"
+  elif [[ " | $cur | " != *" | $desc | "* ]]; then
+    _CMD_ENV_DESCRIPTIONS[$var]="$cur | $desc"
+  fi
+}
+
+#-------------------------------------------------------------------------------
+# Scan a single file for env var declarations across four keywords:
+# require-env-vars, uses-env-vars, uses-secret-env-vars, describe-env-var.
+# Variables are attributed to NAME in _CMD_ENVS; required/secret flags
+# are set in the corresponding arrays; descriptions go in _CMD_ENV_DESCRIPTIONS;
+# every hit also records the declaring file in _CMD_ENV_DECL_FILES so
+# the display layer can compute transitive subcommand reach.
 #-------------------------------------------------------------------------------
 scan-envs() {
   local file="$1"
   local name="$2"
   local line
   local var
+  local desc
 
   while IFS= read -r line; do
     line="${line#*"${_KW_REQ_ENV}" }"
     for var in $line; do
       _record-env "$var" "$name"
+      _record-env-file "$var" "$file"
+      _CMD_ENV_REQUIRED[$var]=1
     done
   done < <(grep -h "${_KW_REQ_ENV} " "$file" 2> /dev/null | grep -v '^[[:space:]]*#')
+
+  while IFS= read -r line; do
+    line="${line#*"${_KW_USES_ENV}" }"
+    for var in $line; do
+      _record-env "$var" "$name"
+      _record-env-file "$var" "$file"
+    done
+  done < <(grep -h "${_KW_USES_ENV} " "$file" 2> /dev/null | grep -v '^[[:space:]]*#' | grep -v "${_KW_USES_SECRET_ENV}")
+
+  while IFS= read -r line; do
+    line="${line#*"${_KW_USES_SECRET_ENV}" }"
+    for var in $line; do
+      _record-env "$var" "$name"
+      _record-env-file "$var" "$file"
+      _CMD_ENV_SECRET[$var]=1
+    done
+  done < <(grep -h "${_KW_USES_SECRET_ENV} " "$file" 2> /dev/null | grep -v '^[[:space:]]*#')
+
+  # describe-env-var NAME "one-line purpose" - quoted second arg, parsed
+  # with `read` so bash tokenization handles the quoting correctly.
+  while IFS= read -r line; do
+    line="${line#*"${_KW_DESC_ENV}" }"
+    # The remainder is: NAME "description text". Split the first token
+    # off with parameter expansion; then strip surrounding quotes from
+    # the rest. Single or double quotes both tolerated.
+    var="${line%% *}"
+    desc="${line#* }"
+    desc="${desc#\"}"
+    desc="${desc%\"}"
+    desc="${desc#\'}"
+    desc="${desc%\'}"
+    _record-env-desc "$var" "$desc"
+  done < <(grep -h "${_KW_DESC_ENV} " "$file" 2> /dev/null | grep -v '^[[:space:]]*#')
 }
 
 #-------------------------------------------------------------------------------
@@ -255,10 +397,37 @@ scan-via-source() {
     require-env-vars() {
       local v
       for v in "$@"; do
-        printf 'ENV\t%s\n' "$v" >> "$capture"
+        printf 'REQ_ENV\t%s\n' "$v" >> "$capture"
       done
     }
     export -f require-env-vars
+
+    # shellcheck disable=SC2329
+    uses-env-vars() {
+      local v
+      for v in "$@"; do
+        printf 'ENV\t%s\n' "$v" >> "$capture"
+      done
+    }
+    export -f uses-env-vars
+
+    # shellcheck disable=SC2329
+    uses-secret-env-vars() {
+      local v
+      for v in "$@"; do
+        printf 'SECRET_ENV\t%s\n' "$v" >> "$capture"
+      done
+    }
+    export -f uses-secret-env-vars
+
+    # shellcheck disable=SC2329
+    describe-env-var() {
+      # Positional: NAME "description". Emit as a 3-field record; any
+      # embedded tabs in the description would corrupt parsing but
+      # scratch descriptions are short and tab-free by convention.
+      printf 'DESC_ENV\t%s\t%s\n' "$1" "${2:-}" >> "$capture"
+    }
+    export -f describe-env-var
 
     # SCRATCH_HOME is commonly referenced from is-available scripts.
     # Provide it so they can resolve sibling library paths.
@@ -269,11 +438,25 @@ scan-via-source() {
     source "$file" 2> /dev/null || true
   ) || true
 
-  local kind value
-  while IFS=$'\t' read -r kind value; do
+  local kind value value2
+  while IFS=$'\t' read -r kind value value2; do
     case "$kind" in
       CMD) _record-cmd "$value" "$name" ;;
-      ENV) _record-env "$value" "$name" ;;
+      REQ_ENV)
+        _record-env "$value" "$name"
+        _record-env-file "$value" "$file"
+        _CMD_ENV_REQUIRED[$value]=1
+        ;;
+      ENV)
+        _record-env "$value" "$name"
+        _record-env-file "$value" "$file"
+        ;;
+      SECRET_ENV)
+        _record-env "$value" "$name"
+        _record-env-file "$value" "$file"
+        _CMD_ENV_SECRET[$value]=1
+        ;;
+      DESC_ENV) _record-env-desc "$value" "$value2" ;;
     esac
   done < "$capture"
 
@@ -355,21 +538,170 @@ _scan-deps-in() {
 }
 
 #-------------------------------------------------------------------------------
+# Enumerate lib files as relative paths under lib/ (e.g. "base.sh",
+# "approvals/project.sh"). This is the canonical vocabulary for the
+# import graph: source-line resolution rewrites arbitrary shell paths
+# ($_FOO_SCRIPTDIR/bar.sh, $SCRATCH_HOME/lib/bar.sh, etc.) into one of
+# these entries.
+#-------------------------------------------------------------------------------
+collect-lib-files() {
+  local lib_root="$SCRIPTDIR/../lib"
+  local f rel
+  _LIB_FILES=()
+  while IFS= read -r f; do
+    rel="${f#"$lib_root"/}"
+    _LIB_FILES+=("$rel")
+  done < <(find "$lib_root" -type f -name '*.sh' 2> /dev/null)
+}
+
+#-------------------------------------------------------------------------------
+# Map a source-line path string to a canonical lib rel path, or empty
+# if it doesn't resolve to a known lib. Longest-suffix match handles
+# the subdir case (approvals/project.sh beats project.sh when the
+# source-line path contains the subdir).
+#-------------------------------------------------------------------------------
+resolve-source() {
+  local path_str="$1"
+  local best=""
+  local lib
+  for lib in "${_LIB_FILES[@]}"; do
+    if [[ "$path_str" == *"/$lib" || "$path_str" == "$lib" ]]; then
+      if ((${#lib} > ${#best})); then
+        best="$lib"
+      fi
+    fi
+  done
+  printf '%s' "$best"
+}
+
+#-------------------------------------------------------------------------------
+# Scan a file for `source "..."` lines, resolve each to a canonical lib
+# rel path, record the set in _FILE_SOURCES[FILE]. Only matches lines
+# where `source` is the first non-whitespace token; comments are skipped
+# via grep -v.
+#-------------------------------------------------------------------------------
+scan-sources-in() {
+  local file="$1"
+  local line path resolved
+  local sources=""
+  while IFS= read -r line; do
+    if [[ "$line" =~ source[[:space:]]+\"([^\"]+)\" ]]; then
+      path="${BASH_REMATCH[1]}"
+      resolved="$(resolve-source "$path")"
+      if [[ -n "$resolved" && " $sources " != *" $resolved "* ]]; then
+        sources+="$resolved "
+      fi
+    fi
+  done < <(grep -E '^[[:space:]]*(source|\.)[[:space:]]+' "$file" 2> /dev/null \
+    | grep -v '^[[:space:]]*#')
+  _FILE_SOURCES[$file]="$sources"
+}
+
+#-------------------------------------------------------------------------------
+# BFS from FILE through _FILE_SOURCES, collecting every lib rel path
+# reachable transitively. Result written space-separated into the
+# variable named by the caller via nameref.
+#-------------------------------------------------------------------------------
+closure-of() {
+  local start="$1"
+  local -n _out="$2"
+  local -A seen=()
+  local queue=("$start")
+  local cur s lib_path
+  _out=""
+  while ((${#queue[@]} > 0)); do
+    cur="${queue[0]}"
+    queue=("${queue[@]:1}")
+    [[ -n "${seen[$cur]:-}" ]] && continue
+    seen[$cur]=1
+    for s in ${_FILE_SOURCES[$cur]:-}; do
+      if [[ " $_out " != *" $s "* ]]; then
+        _out+="$s "
+      fi
+      lib_path="$SCRIPTDIR/../lib/$s"
+      if [[ -z "${seen[$lib_path]:-}" ]]; then
+        queue+=("$lib_path")
+      fi
+    done
+  done
+}
+
+#-------------------------------------------------------------------------------
+# For every bin/scratch-* subcommand, compute the transitive set of
+# libs it sources, and invert into _LIB_SUBCOMMANDS: lib rel path ->
+# space-sep sorted subcommand verbs that reach it. _ALL_SUBCOMMANDS
+# captures the full verb list for "(all)" collapse at display time.
+#-------------------------------------------------------------------------------
+build-subcommand-closures() {
+  local subcmd_file subcmd_name closure s cur
+  local -a verbs=()
+
+  for subcmd_file in "$SCRIPTDIR"/scratch-*; do
+    [[ -f "$subcmd_file" && -x "$subcmd_file" ]] || continue
+    subcmd_name="$(subcommand-name "$subcmd_file")"
+    verbs+=("$subcmd_name")
+    closure-of "$subcmd_file" closure
+    for s in $closure; do
+      cur="${_LIB_SUBCOMMANDS[$s]:-}"
+      if [[ " $cur " != *" $subcmd_name "* ]]; then
+        if [[ -n "$cur" ]]; then
+          _LIB_SUBCOMMANDS[$s]="$cur $subcmd_name"
+        else
+          _LIB_SUBCOMMANDS[$s]="$subcmd_name"
+        fi
+      fi
+    done
+  done
+
+  # Sort verbs for a stable display order; also cache for "(all)" check.
+  _ALL_SUBCOMMANDS="$(printf '%s\n' "${verbs[@]}" | sort | tr '\n' ' ')"
+  _ALL_SUBCOMMANDS="${_ALL_SUBCOMMANDS% }"
+
+  # Sort the per-lib subcommand lists too so output is deterministic.
+  local lib sorted
+  for lib in "${!_LIB_SUBCOMMANDS[@]}"; do
+    # shellcheck disable=SC2086 # intentional word-split: value is a space-sep list
+    sorted="$(printf '%s\n' ${_LIB_SUBCOMMANDS[$lib]} | sort -u | tr '\n' ' ')"
+    _LIB_SUBCOMMANDS[$lib]="${sorted% }"
+  done
+}
+
+#-------------------------------------------------------------------------------
+# Populate the import graph from every file scratch-doctor otherwise
+# scans. Called once by scan-all-deps after the env/command scan so it
+# sees the same universe of files.
+#-------------------------------------------------------------------------------
+build-import-graph() {
+  local f
+  collect-lib-files
+  for f in "$SCRIPTDIR"/scratch-*; do
+    [[ -f "$f" && -x "$f" ]] || continue
+    scan-sources-in "$f"
+  done
+  for f in "$SCRIPTDIR"/../lib/*.sh "$SCRIPTDIR"/../lib/**/*.sh; do
+    [[ -f "$f" ]] || continue
+    scan-sources-in "$f"
+  done
+  build-subcommand-closures
+}
+
+#-------------------------------------------------------------------------------
 # Walk all scratch dependency declarations across the six scan targets:
 #
 #   bin/scratch-*              attributed by verb (subcommand-name)
 #   lib/*.sh                   folded into "lib"
-#   helpers/*                  attributed by helper basename (e.g. "embed")
+#   helpers/* and helpers/*/*  attributed by helper basename
 #   tools/*/is-available       attributed by tool name with "tool:" prefix
 #   agents/*/is-available      attributed by agent name with "agent:" prefix
 #   toolboxes/*/is-available   attributed by toolbox name with "toolbox:" prefix
 #
-# All six use the same _scan-deps-in helper - one line per target.
+# All use the same _scan-deps-in helper - one line per target.
 #-------------------------------------------------------------------------------
 scan-all-deps() {
   _scan-deps-in "$SCRIPTDIR/scratch-*" subcommand-name x
   _scan-deps-in "$SCRIPTDIR/../lib/*.sh" _attr-lib any
   _scan-deps-in "$SCRIPTDIR/../helpers/*" basename x
+  _scan-deps-in "$SCRIPTDIR/../helpers/*/*" basename x
   # is-available files are pure-declaration scripts (per their contract);
   # source them with instrumented has-commands / require-env-vars rather
   # than textual-grep so we can't be fooled by line wrapping, function
@@ -377,6 +709,7 @@ scan-all-deps() {
   _scan-deps-in "$SCRIPTDIR/../tools/*/is-available" _attr-tool x source
   _scan-deps-in "$SCRIPTDIR/../agents/*/is-available" _attr-agent x source
   _scan-deps-in "$SCRIPTDIR/../toolboxes/*/is-available" _attr-toolbox x source
+  build-import-graph
 }
 
 #-------------------------------------------------------------------------------
@@ -426,11 +759,182 @@ check-commands() {
 }
 
 #-------------------------------------------------------------------------------
-# Check that every env var declared via require-env-vars is set and non-empty
+# Resolve a var's declaring-file list to a readable "used by" string.
+# Lib declarations expand to the set of bin/scratch-* verbs whose
+# transitive source closure reaches them (via _LIB_SUBCOMMANDS); if that
+# covers every verb, collapse to "(all)". Non-lib declarations keep
+# their existing labels (tool:X, agent:X, toolbox:X, helper basename,
+# subcommand verb) - those aren't sourced transitively, so a per-call
+# execution trace would be needed to do better.
+#-------------------------------------------------------------------------------
+resolve-used-by() {
+  local var="$1"
+  local files="${_CMD_ENV_DECL_FILES[$var]:-}"
+  local lib_root="$SCRIPTDIR/../lib"
+  local helpers_root="$SCRIPTDIR/../helpers"
+  local set=""
+
+  # Split on pipes (paths don't contain pipes in this codebase).
+  local old_ifs="$IFS"
+  IFS='|'
+  # shellcheck disable=SC2206 # intentional split: $files is a pipe-sep list
+  local -a paths=($files)
+  IFS="$old_ifs"
+
+  local p rel verb base
+  for p in "${paths[@]}"; do
+    if [[ "$p" == "$lib_root"/* ]]; then
+      # Lib file: expand to the transitive subcommand closure.
+      rel="${p#"$lib_root"/}"
+      for verb in ${_LIB_SUBCOMMANDS[$rel]:-}; do
+        if [[ " $set " != *" $verb "* ]]; then
+          set+="$verb "
+        fi
+      done
+    elif [[ "$p" == "$SCRIPTDIR"/scratch-* ]]; then
+      # Subcommand: just its verb.
+      verb="$(subcommand-name "$p")"
+      if [[ " $set " != *" $verb "* ]]; then
+        set+="$verb "
+      fi
+    elif [[ "$p" == "$helpers_root"/* ]]; then
+      # Helper script (flat or nested): attribute by basename, since
+      # helpers aren't sourced by subcommands - they're exec'd.
+      base="helper:$(basename "$p")"
+      if [[ " $set " != *" $base "* ]]; then
+        set+="$base "
+      fi
+    else
+      # tools/*/is-available, agents/*/is-available, toolboxes/*/is-available:
+      # attribute by parent dir with type prefix (matches the existing
+      # _attr-tool / _attr-agent / _attr-toolbox labels).
+      base="$(basename "$(dirname "$p")")"
+      case "$p" in
+        */tools/*) base="tool:$base" ;;
+        */agents/*) base="agent:$base" ;;
+        */toolboxes/*) base="toolbox:$base" ;;
+      esac
+      if [[ " $set " != *" $base "* ]]; then
+        set+="$base "
+      fi
+    fi
+  done
+
+  set="${set% }"
+
+  # Sort alphabetically for deterministic output.
+  local sorted
+  # shellcheck disable=SC2086 # intentional word-split: $set is a space-sep list
+  sorted="$(printf '%s\n' $set | sort | tr '\n' ' ')"
+  sorted="${sorted% }"
+
+  # If every subcommand is in the set, collapse to "(all)".
+  if [[ -n "$sorted" && "$sorted" == "$_ALL_SUBCOMMANDS" ]]; then
+    printf '(all)'
+    return
+  fi
+
+  # Group by scratch's dispatch hierarchy: the first hyphen-separated
+  # token is the top-level verb. Families (chats-list, chats-prune, ...)
+  # collapse to "chats-*" to keep the column scannable. A solitary verb
+  # shows by itself even if its top-level has a hyphen (e.g. file-info).
+  local -A groups=()
+  local v top
+  for v in $sorted; do
+    top="${v%%-*}"
+    if [[ -z "${groups[$top]:-}" ]]; then
+      groups[$top]="$v"
+    else
+      groups[$top]+=" $v"
+    fi
+  done
+
+  local group_list=""
+  local members count
+  for top in "${!groups[@]}"; do
+    members="${groups[$top]}"
+    # shellcheck disable=SC2086
+    count=$(
+      set -- $members
+      echo $#
+    )
+    if ((count > 1)); then
+      group_list+="${top}-* "
+    else
+      group_list+="$members "
+    fi
+  done
+
+  # Sort group labels, then cap display. 5 groups is the sweet spot
+  # between "enough signal" and "still fits on a line".
+  local -a items
+  # shellcheck disable=SC2086 # intentional word-split: group_list is a space-sep list
+  read -r -a items <<< "$(printf '%s\n' $group_list | sort | tr '\n' ' ')"
+  local n=${#items[@]}
+  local joined
+  if ((n > 5)); then
+    printf '%s, %s, %s, %s, %s (+%d more)' \
+      "${items[0]}" "${items[1]}" "${items[2]}" "${items[3]}" "${items[4]}" "$((n - 5))"
+  else
+    joined="${items[*]}"
+    printf '%s' "${joined// /, }"
+  fi
+}
+
+#-------------------------------------------------------------------------------
+# Count declared env vars and how many are currently set. Shared by the
+# summary line (default mode) and the full listing (--env mode).
+#-------------------------------------------------------------------------------
+count-env-vars() {
+  local -n _total="$1"
+  local -n _set_n="$2"
+  local var
+  _total=0
+  _set_n=0
+  for var in "${!_CMD_ENVS[@]}"; do
+    _total=$((_total + 1))
+    if [[ -n "${!var:-}" ]]; then
+      _set_n=$((_set_n + 1))
+    fi
+  done
+}
+
+#-------------------------------------------------------------------------------
+# One-line summary shown by default (no --env). Counts declared vs set
+# and points the user at --env for details. Keeps the default doctor
+# output compact while signaling the feature exists.
+#-------------------------------------------------------------------------------
+summarize-env-vars() {
+  local total set_n
+  count-env-vars total set_n
+  ((total == 0)) && return
+  printf '\n  %senv vars: %d declared, %d set - run with --env for details%s\n' \
+    "$_DIM" "$total" "$set_n" "$_RESET"
+}
+
+#-------------------------------------------------------------------------------
+# Full env var listing: one stanza per var in definition-list form.
+#
+#   <icon> NAME                  <value or "(not set)">
+#       <purpose, if any>
+#       used by: <subcommand/label list>
+#
+# Definition-list beats a table here because purposes and subcommand
+# reach both vary wildly in length; wrapping them into columns means
+# truncating, and truncation was the point of complaint. Status icons
+# mirror the rest of doctor: green ✓ when set, red ✗ when required but
+# unset, blank (dim) when optional and unset.
 #-------------------------------------------------------------------------------
 check-env-vars() {
   local var
-  local users
+  local is_required
+  local is_secret
+  local val
+  local display_val
+  local desc
+  local used_by
+  local icon
+  local val_w=60
 
   if ((${#_CMD_ENVS[@]} == 0)); then
     return
@@ -438,14 +942,40 @@ check-env-vars() {
 
   mapfile -t _env_names < <(printf '%s\n' "${!_CMD_ENVS[@]}" | sort)
 
-  printf '\nEnvironment variables\n\n'
+  printf '\nEnvironment variables\n'
 
   for var in "${_env_names[@]}"; do
-    users="${_CMD_ENVS[$var]}"
-    if [[ -n "${!var:-}" ]]; then
-      print-ok "$var" "${_DIM}set  (${users})${_RESET}"
+    is_required="${_CMD_ENV_REQUIRED[$var]:-}"
+    is_secret="${_CMD_ENV_SECRET[$var]:-}"
+    val="${!var:-}"
+    desc="${_CMD_ENV_DESCRIPTIONS[$var]:-}"
+    used_by="$(resolve-used-by "$var")"
+
+    # Choose status icon and rendered value based on set/unset +
+    # required/secret flags. Icon column is 3 chars (icon + 2 spaces)
+    # regardless of color so name columns align.
+    if [[ -n "$val" ]]; then
+      icon="${_GREEN}✓${_RESET}"
+      if [[ -n "$is_secret" ]]; then
+        display_val="$(mask-secret "$val")"
+      else
+        display_val="$(truncate-value "$val" "$val_w")"
+      fi
+    elif [[ -n "$is_required" ]]; then
+      icon="${_RED}✗${_RESET}"
+      display_val="${_DIM}(not set)${_RESET}"
+      _FAILED=true
     else
-      print-fail "$var" "not set  ${_DIM}(${users})${_RESET}"
+      icon=' '
+      display_val="${_DIM}(not set)${_RESET}"
+    fi
+
+    printf '\n  %s %s  %s\n' "$icon" "$var" "$display_val"
+    if [[ -n "$desc" ]]; then
+      printf '      %s%s%s\n' "$_DIM" "$desc" "$_RESET"
+    fi
+    if [[ -n "$used_by" ]]; then
+      printf '      %sused by: %s%s\n' "$_DIM" "$used_by" "$_RESET"
     fi
   done
 }
@@ -559,7 +1089,12 @@ printf 'Runtime\n\n'
 
 check-bash-version
 check-commands
-check-env-vars
+
+if [[ "$ENV" == true ]]; then
+  check-env-vars
+else
+  summarize-env-vars
+fi
 
 if [[ "$DEV" == true ]]; then
   check-dev-tools

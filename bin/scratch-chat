@@ -54,6 +54,9 @@ SCRIPTDIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
 }
 
 has-min-bash-version 5
+uses-env-vars SCRATCH_DEBUG_CHAT SCRATCH_DEBUG_ATTACHMENTS
+describe-env-var SCRATCH_DEBUG_CHAT "log chat request/response pairs to /tmp/scratch/chat-log-*.log"
+describe-env-var SCRATCH_DEBUG_ATTACHMENTS "trace attachment firing via tui:info on stderr"
 
 SCRATCH_HOME="$(cd -P "$SCRIPTDIR/.." && pwd)"
 export SCRATCH_HOME

@@ -27,6 +27,8 @@ _EMBED_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$_EMBED_SCRIPTDIR/base.sh"
 
 has-commands elixir
+uses-env-vars SCRATCH_MODEL
+describe-env-var SCRATCH_MODEL "override default embedding model name"
 
 _EMBED_SCRIPT="$_EMBED_SCRIPTDIR/../libexec/embed.exs"
 _EMBED_CXX="${CXX:-c++} -Wno-error=missing-template-arg-list-after-template-kw"

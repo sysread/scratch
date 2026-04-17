@@ -123,3 +123,46 @@ require-env-vars() {
 }
 
 export -f require-env-vars
+
+#-------------------------------------------------------------------------------
+# Declares env vars that the calling script reads. Informational only -
+# scratch-doctor scans these to build a complete env var inventory with
+# per-component attribution. Does not validate or require the var to be set.
+#
+# Examples:
+#   uses-env-vars SCRATCH_LOG_LEVEL
+#   uses-env-vars SCRATCH_CONFIG_DIR SCRATCH_PROJECTS_DIR
+#-------------------------------------------------------------------------------
+uses-env-vars() { :; }
+
+export -f uses-env-vars
+
+#-------------------------------------------------------------------------------
+# Same as uses-env-vars, but marks the var as a secret. Doctor masks the
+# value in its output instead of displaying it in the clear.
+#
+# Examples:
+#   uses-secret-env-vars VENICE_API_KEY
+#   uses-secret-env-vars SCRATCH_VENICE_API_KEY VENICE_API_KEY
+#-------------------------------------------------------------------------------
+uses-secret-env-vars() { :; }
+
+export -f uses-secret-env-vars
+
+#-------------------------------------------------------------------------------
+# describe-env-var NAME "one-line purpose"
+#
+# Attaches a short purpose string to an env var. Purely informational -
+# scratch-doctor collates descriptions across declaration sites (pipe-
+# joined, deduplicated) and shows them in its env var table. Runtime
+# no-op. Call once per var; multiple calls for the same var accumulate.
+#
+# Examples:
+#   describe-env-var SCRATCH_LOG_LEVEL "log verbosity (info, debug, warn)"
+#-------------------------------------------------------------------------------
+describe-env-var() { :; }
+
+export -f describe-env-var
+
+uses-env-vars SCRATCH_HOME
+describe-env-var SCRATCH_HOME "absolute path to the scratch install root"

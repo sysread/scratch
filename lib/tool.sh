@@ -59,6 +59,12 @@ _TOOL_SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 }
 
 has-commands jq
+uses-env-vars SCRATCH_TOOLS_DIR SCRATCH_TOOLBOXES_DIR SCRATCH_TOOL_SKIP_AVAILABILITY SCRATCH_TOOL_PARALLEL_JOBS SCRATCH_APPROVALS_SKIP
+describe-env-var SCRATCH_TOOLS_DIR "user-defined tools dir (overrides bundled tools/)"
+describe-env-var SCRATCH_TOOLBOXES_DIR "user-defined toolboxes dir (overrides bundled toolboxes/)"
+describe-env-var SCRATCH_TOOL_SKIP_AVAILABILITY "bypass tool is-available preflight (tests)"
+describe-env-var SCRATCH_TOOL_PARALLEL_JOBS "parallelism for batched tool invocations"
+describe-env-var SCRATCH_APPROVALS_SKIP "bypass approvals gating for tool/command execution"
 
 #-------------------------------------------------------------------------------
 # Globals (set by tool:available and tool:invoke)
